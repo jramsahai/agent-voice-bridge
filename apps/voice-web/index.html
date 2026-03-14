@@ -7,9 +7,11 @@
     <style>
       body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #111827; color: #f9fafb; }
       .wrap { max-width: 760px; margin: 0 auto; }
-      button { font-size: 18px; padding: 16px 20px; border-radius: 12px; border: 0; cursor: pointer; }
-      #ptt { background: #22c55e; color: #06210f; font-weight: 700; width: 100%; }
+      button, input { font-size: 18px; padding: 16px 20px; border-radius: 12px; border: 0; }
+      input { width: 100%; box-sizing: border-box; margin-top: 8px; background: #111827; color: #f9fafb; border: 1px solid #374151; }
+      #ptt { background: #22c55e; color: #06210f; font-weight: 700; width: 100%; cursor: pointer; }
       #ptt.recording { background: #ef4444; color: white; }
+      #ptt:disabled { opacity: 0.6; cursor: wait; }
       .card { background: #1f2937; padding: 16px; border-radius: 16px; margin-top: 16px; }
       .label { font-size: 12px; text-transform: uppercase; opacity: 0.7; margin-bottom: 8px; }
       pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
@@ -21,6 +23,10 @@
     <div class="wrap">
       <h1>OpenClaw Voice Bridge</h1>
       <p>Push-to-talk MVP over Tailscale.</p>
+      <div class="card">
+        <div class="label">Access token</div>
+        <input id="token" type="password" placeholder="Enter shared access token" autocomplete="off" />
+      </div>
       <button id="ptt">Hold to talk</button>
       <div id="status">Idle.</div>
       <div class="card">

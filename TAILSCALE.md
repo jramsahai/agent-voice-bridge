@@ -67,10 +67,21 @@ https://<device>.tailnet.ts.net/
 ## Test flow
 
 1. Open the HTTPS Tailscale URL from another tailnet device.
-2. Grant microphone permission.
-3. Hold the push-to-talk button.
-4. Speak and release.
-5. Confirm transcript + reply audio come back.
+2. Enter the shared access token configured in `config.local.json` / your deployment config.
+3. Grant microphone permission.
+4. Hold the push-to-talk button.
+5. Speak and release.
+6. Confirm transcript + reply audio come back.
+
+## First security pass
+
+The current MVP now includes:
+- shared bearer-token access to `/api/turn`
+- expected host validation
+- allowed-origin checks
+- request size limits
+- simple per-IP rate limiting
+- safer client-facing errors (no stack traces returned to browser)
 
 ## Notes
 

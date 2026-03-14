@@ -37,6 +37,7 @@ This is an MVP scaffold, not production-ready voice infra yet.
 - Browser capture currently records with `MediaRecorder`, then converts the blob to WAV in-browser before upload.
 - The OpenClaw handoff uses a dedicated explicit session id to avoid contention with the main chat lane.
 - The currently tested remote deployment pattern is documented in `TAILSCALE.md`.
+- The first security pass adds shared-token gating, origin/host checks, request size limits, and simple rate limiting.
 
 ## Proposed Structure
 

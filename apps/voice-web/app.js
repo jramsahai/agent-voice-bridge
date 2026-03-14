@@ -1,4 +1,5 @@
 const ptt = document.getElementById('ptt');
+const tokenEl = document.getElementById('token');
 const transcriptEl = document.getElementById('transcript');
 const replyEl = document.getElementById('reply');
 const player = document.getElementById('player');
@@ -8,9 +9,22 @@ let stream;
 let mediaRecorder;
 let recordedChunks = [];
 let decodeAudioContext;
+let isBusy = false;
+
+const TOKEN_STORAGE_KEY = 'voice-bridge-token';
+const savedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
+if (savedToken) tokenEl.value = savedToken;
+tokenEl.addEventListener('change', () => {
+  localStorage.setItem(TOKEN_STORAGE_KEY, tokenEl.value.trim());
+});
 
 function setStatus(text) {
   statusEl.textContent = text;
+}
+
+function setBusy(nextBusy) {
+  isBusy = nextBusy;
+  ptt.disabled = nextBusy;
 }
 
 async function ensureRecorder() {
@@ -40,14 +54,10 @@ function interleaveChannels(audioBuffer) {
   }
   const result = new Float32Array(length * channels);
   const channelData = [];
-  for (let c = 0; c < channels; c++) {
-    channelData.push(audioBuffer.getChannelData(c));
-  }
+  for (let c = 0; c < channels; c++) channelData.push(audioBuffer.getChannelData(c));
   let offset = 0;
   for (let i = 0; i < length; i++) {
-    for (let c = 0; c < channels; c++) {
-      result[offset++] = channelData[c][i];
-    }
+    for (let c = 0; c < channels; c++) result[offset++] = channelData[c][i];
   }
   return result;
 }
@@ -62,9 +72,7 @@ function encodeWavFromAudioBuffer(audioBuffer) {
   const view = new DataView(buffer);
 
   function writeString(offset, string) {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
-    }
+    for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
   }
 
   writeString(0, 'RIFF');
@@ -92,55 +100,66 @@ function encodeWavFromAudioBuffer(audioBuffer) {
 
 async function blobToWav(blob) {
   const arrayBuffer = await blob.arrayBuffer();
-  if (!decodeAudioContext) {
-    decodeAudioContext = new AudioContext();
-  }
+  if (!decodeAudioContext) decodeAudioContext = new AudioContext();
   const audioBuffer = await decodeAudioContext.decodeAudioData(arrayBuffer.slice(0));
   return encodeWavFromAudioBuffer(audioBuffer);
 }
 
 async function stopAndSend() {
   if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
-  await new Promise((resolve) => {
-    mediaRecorder.addEventListener('stop', resolve, { once: true });
-    mediaRecorder.stop();
-  });
+  setBusy(true);
+  try {
+    await new Promise((resolve) => {
+      mediaRecorder.addEventListener('stop', resolve, { once: true });
+      mediaRecorder.stop();
+    });
 
-  const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-  recordedChunks = [];
-  setStatus('Processing audio...');
-  const wavBlob = await blobToWav(blob);
-  setStatus('Transcribing and thinking...');
+    const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+    recordedChunks = [];
+    setStatus('Processing audio...');
+    const wavBlob = await blobToWav(blob);
+    setStatus('Transcribing and thinking...');
 
-  const arrayBuffer = await wavBlob.arrayBuffer();
-  const bytes = new Uint8Array(arrayBuffer);
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  const audioBase64 = btoa(binary);
+    const arrayBuffer = await wavBlob.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    const audioBase64 = btoa(binary);
 
-  const response = await fetch('/api/turn', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ audioBase64, mimeType: wavBlob.type })
-  });
+    const response = await fetch('/api/turn', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${tokenEl.value.trim()}`
+      },
+      body: JSON.stringify({ audioBase64, mimeType: wavBlob.type })
+    });
 
-  const data = await response.json();
-  if (!response.ok) {
-    setStatus(`Error: ${data.error || 'request failed'}`);
-    console.error(data);
-    return;
+    const data = await response.json();
+    if (!response.ok) {
+      setStatus(`Error: ${data.error || 'request failed'}`);
+      console.error(data);
+      return;
+    }
+
+    transcriptEl.textContent = data.transcript || '—';
+    replyEl.textContent = data.reply || '—';
+    if (data.audioBase64) {
+      player.src = `data:${data.audioMimeType};base64,${data.audioBase64}`;
+      await player.play().catch(() => {});
+    }
+    setStatus('Done.');
+  } finally {
+    setBusy(false);
   }
-
-  transcriptEl.textContent = data.transcript || '—';
-  replyEl.textContent = data.reply || '—';
-  if (data.audioBase64) {
-    player.src = `data:${data.audioMimeType};base64,${data.audioBase64}`;
-    await player.play().catch(() => {});
-  }
-  setStatus('Done.');
 }
 
 ptt.addEventListener('pointerdown', async () => {
+  if (isBusy) return;
+  if (!tokenEl.value.trim()) {
+    setStatus('Enter the shared access token first.');
+    return;
+  }
   await ensureRecorder();
   recordedChunks = [];
   mediaRecorder.start();

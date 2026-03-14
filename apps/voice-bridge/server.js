@@ -37,11 +37,20 @@ async function handleTurn(req, res) {
     if (!audioBase64) return sendJson(res, 400, { error: 'audioBase64 is required' });
 
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-bridge-turn-'));
-    const inputExt = mimeType === 'audio/webm' ? 'webm' : mimeType === 'audio/mp4' || mimeType === 'audio/aac' ? 'm4a' : 'bin';
+    const inputExt = mimeType === 'audio/wav' ? 'wav' : mimeType === 'audio/webm' ? 'webm' : mimeType === 'audio/mp4' || mimeType === 'audio/aac' ? 'm4a' : 'bin';
     const inputPath = path.join(tmpDir, `turn-${randomUUID()}.${inputExt}`);
     fs.writeFileSync(inputPath, Buffer.from(audioBase64, 'base64'));
 
     const transcript = await transcribeWithWhisperLocal(inputPath, config.stt);
+    if (!transcript.text || !transcript.text.trim()) {
+      return sendJson(res, 422, {
+        error: 'transcription returned empty text',
+        meta: {
+          configPath,
+          stt: transcript.meta
+        }
+      });
+    }
     const reply = await sendTurnToOpenClaw(transcript.text, config.openclaw);
     const speech = await speakWithMacosSay(reply.text, config.tts);
 

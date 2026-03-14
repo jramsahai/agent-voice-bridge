@@ -15,7 +15,10 @@ function extractReply(stdout) {
 }
 
 export async function sendTurnToOpenClaw(text, openclawConfig) {
-  const args = ['agent', '--message', text, '--json'];
+  if (!text || !text.trim()) {
+    throw new Error('OpenClaw handoff requires non-empty text');
+  }
+  const args = ['agent', '--message', text.trim(), '--json'];
   if (openclawConfig.sessionId) {
     args.push('--session-id', openclawConfig.sessionId);
   } else if (openclawConfig.to) {

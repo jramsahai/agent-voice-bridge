@@ -28,8 +28,15 @@ A first runnable scaffold exists now:
 - local whisper wrapper adapter
 - local macOS `say` adapter
 - OpenClaw CLI adapter
+- working tailnet-only remote access via Tailscale Serve HTTPS
 
 This is an MVP scaffold, not production-ready voice infra yet.
+
+## Current working MVP notes
+
+- Browser capture currently records with `MediaRecorder`, then converts the blob to WAV in-browser before upload.
+- The OpenClaw handoff uses a dedicated explicit session id to avoid contention with the main chat lane.
+- The currently tested remote deployment pattern is documented in `TAILSCALE.md`.
 
 ## Proposed Structure
 

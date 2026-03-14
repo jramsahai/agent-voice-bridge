@@ -13,7 +13,7 @@
 - [x] Add macOS `say` TTS adapter
 - [x] Add OpenClaw turn adapter
 - [x] Add config schema + example config
-- [ ] Add Tailscale deployment notes
+- [x] Add Tailscale deployment notes
 
 ## Phase 2: Hardening
 - [ ] Add auth/session tokens for voice UI

@@ -96,6 +96,7 @@ voice-bridge/
 - Run the bridge on the same machine as OpenClaw
 - Expose the voice web app and/or bridge only over Tailscale
 - Keep machine-specific paths and secrets in config, not code
+- Treat `config/config.example.json` as the shareable template and keep local deployment values in an untracked local config
 
 ## Non-Goals for MVP
 

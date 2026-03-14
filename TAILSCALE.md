@@ -67,11 +67,17 @@ https://<device>.tailnet.ts.net/
 ## Test flow
 
 1. Open the HTTPS Tailscale URL from another tailnet device.
-2. Enter the shared access token configured in `config.local.json` / your deployment config.
+2. Enter the shared access token configured in your local deployment config.
 3. Grant microphone permission.
 4. Hold the push-to-talk button.
 5. Speak and release.
 6. Confirm transcript + reply audio come back.
+
+## Config hygiene
+
+- Keep machine-specific values in `config/config.local.json` (or your own untracked deployment config).
+- Do **not** commit real tokens, real hostnames, or user-specific filesystem paths.
+- Keep `config/config.example.json` generic and safe to share.
 
 ## First security pass
 

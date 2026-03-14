@@ -1,30 +1,95 @@
 const ptt = document.getElementById('ptt');
 const tokenEl = document.getElementById('token');
+const toggleTokenEl = document.getElementById('toggle-token');
+const clearTokenEl = document.getElementById('clear-token');
+const authPillEl = document.getElementById('auth-pill');
 const transcriptEl = document.getElementById('transcript');
 const replyEl = document.getElementById('reply');
 const player = document.getElementById('player');
 const statusEl = document.getElementById('status');
+const hintEl = document.getElementById('hint');
 
 let stream;
 let mediaRecorder;
 let recordedChunks = [];
 let decodeAudioContext;
 let isBusy = false;
+let isRecording = false;
 
 const TOKEN_STORAGE_KEY = 'voice-bridge-token';
 const savedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
 if (savedToken) tokenEl.value = savedToken;
-tokenEl.addEventListener('change', () => {
-  localStorage.setItem(TOKEN_STORAGE_KEY, tokenEl.value.trim());
+
+function updateTokenState() {
+  const hasToken = Boolean(tokenEl.value.trim());
+  authPillEl.textContent = hasToken ? 'token saved' : 'token required';
+  authPillEl.style.background = hasToken ? '#14532d' : '#374151';
+}
+
+function persistToken() {
+  const value = tokenEl.value.trim();
+  if (value) {
+    localStorage.setItem(TOKEN_STORAGE_KEY, value);
+  } else {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+  }
+  updateTokenState();
+}
+
+tokenEl.addEventListener('change', persistToken);
+tokenEl.addEventListener('input', updateTokenState);
+updateTokenState();
+
+toggleTokenEl.addEventListener('click', () => {
+  tokenEl.type = tokenEl.type === 'password' ? 'text' : 'password';
+  toggleTokenEl.textContent = tokenEl.type === 'password' ? 'Show' : 'Hide';
+});
+
+clearTokenEl.addEventListener('click', () => {
+  tokenEl.value = '';
+  persistToken();
+  setStatus('Token cleared.');
 });
 
 function setStatus(text) {
   statusEl.textContent = text;
 }
 
+function setHint(text) {
+  hintEl.textContent = text;
+}
+
 function setBusy(nextBusy) {
   isBusy = nextBusy;
   ptt.disabled = nextBusy;
+  if (nextBusy) {
+    ptt.classList.add('processing');
+    ptt.textContent = 'Working...';
+  } else {
+    ptt.classList.remove('processing');
+    ptt.textContent = 'Hold to talk';
+  }
+}
+
+function humanizeError(error) {
+  switch (error) {
+    case 'unauthorized':
+      return 'Wrong or missing access token.';
+    case 'origin not allowed':
+      return 'This browser origin is not allowed.';
+    case 'host not allowed':
+      return 'This host is not allowed.';
+    case 'too many requests':
+      return 'Slow down a bit and try again.';
+    case 'payload too large':
+      return 'That recording was too large.';
+    case 'transcription returned empty text':
+      return 'I heard almost nothing. Try speaking a little louder or longer.';
+    case 'internal server error':
+      return 'Something broke on the bridge. Try again.';
+    default:
+      return error || 'Request failed.';
+  }
 }
 
 async function ensureRecorder() {
@@ -49,9 +114,7 @@ async function ensureRecorder() {
 function interleaveChannels(audioBuffer) {
   const channels = audioBuffer.numberOfChannels;
   const length = audioBuffer.length;
-  if (channels === 1) {
-    return audioBuffer.getChannelData(0);
-  }
+  if (channels === 1) return audioBuffer.getChannelData(0);
   const result = new Float32Array(length * channels);
   const channelData = [];
   for (let c = 0; c < channels; c++) channelData.push(audioBuffer.getChannelData(c));
@@ -117,9 +180,11 @@ async function stopAndSend() {
     const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
     recordedChunks = [];
     setStatus('Processing audio...');
+    setHint('Converting browser audio to WAV.');
     const wavBlob = await blobToWav(blob);
-    setStatus('Transcribing and thinking...');
 
+    setStatus('Transcribing and thinking...');
+    setHint('Sending your turn to the bridge.');
     const arrayBuffer = await wavBlob.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
     let binary = '';
@@ -137,7 +202,8 @@ async function stopAndSend() {
 
     const data = await response.json();
     if (!response.ok) {
-      setStatus(`Error: ${data.error || 'request failed'}`);
+      setStatus(`Error: ${humanizeError(data.error)}`);
+      setHint('Fix the issue and try again.');
       console.error(data);
       return;
     }
@@ -149,25 +215,33 @@ async function stopAndSend() {
       await player.play().catch(() => {});
     }
     setStatus('Done.');
+    setHint('Press and hold to send another turn.');
   } finally {
+    isRecording = false;
     setBusy(false);
   }
 }
 
 ptt.addEventListener('pointerdown', async () => {
-  if (isBusy) return;
+  if (isBusy || isRecording) return;
   if (!tokenEl.value.trim()) {
     setStatus('Enter the shared access token first.');
+    setHint('The token is saved in this browser after you enter it.');
     return;
   }
   await ensureRecorder();
   recordedChunks = [];
   mediaRecorder.start();
+  isRecording = true;
   ptt.classList.add('recording');
-  setStatus('Recording... release to send.');
+  ptt.classList.remove('processing');
+  ptt.textContent = 'Release to send';
+  setStatus('Recording...');
+  setHint('Keep holding while you talk.');
 });
 
 async function finishRecording() {
+  if (!isRecording) return;
   ptt.classList.remove('recording');
   await stopAndSend();
 }
@@ -176,4 +250,21 @@ ptt.addEventListener('pointerup', finishRecording);
 ptt.addEventListener('pointercancel', finishRecording);
 ptt.addEventListener('pointerleave', async (event) => {
   if (event.buttons === 1) await finishRecording();
+});
+
+window.addEventListener('keydown', async (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !isBusy && !isRecording) {
+    event.preventDefault();
+    await ensureRecorder();
+    recordedChunks = [];
+    mediaRecorder.start();
+    isRecording = true;
+    ptt.classList.add('recording');
+    ptt.textContent = 'Release to send';
+    setStatus('Recording...');
+    setHint('Recording started from keyboard shortcut. Press Escape to send.');
+  } else if (event.key === 'Escape' && isRecording) {
+    event.preventDefault();
+    await finishRecording();
+  }
 });

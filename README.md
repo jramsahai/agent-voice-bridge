@@ -38,6 +38,7 @@ This is an MVP scaffold, not production-ready voice infra yet.
 - The OpenClaw handoff uses a dedicated explicit session id to avoid contention with the main chat lane.
 - The currently tested remote deployment pattern is documented in `TAILSCALE.md`.
 - The first security pass adds shared-token gating, origin/host checks, request size limits, and simple rate limiting.
+- The current UI includes saved token handling, clearer status/hints, better busy/recording states, and friendlier user-facing errors.
 
 ## Proposed Structure
 

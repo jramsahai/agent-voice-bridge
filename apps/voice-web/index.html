@@ -9,26 +9,37 @@
       .wrap { max-width: 760px; margin: 0 auto; }
       button, input { font-size: 18px; padding: 16px 20px; border-radius: 12px; border: 0; }
       input { width: 100%; box-sizing: border-box; margin-top: 8px; background: #111827; color: #f9fafb; border: 1px solid #374151; }
-      #ptt { background: #22c55e; color: #06210f; font-weight: 700; width: 100%; cursor: pointer; }
+      .row { display: flex; gap: 12px; align-items: center; }
+      .row input { flex: 1; }
+      .small-btn { padding: 12px 14px; font-size: 14px; background: #374151; color: #f9fafb; cursor: pointer; }
+      #ptt { background: #22c55e; color: #06210f; font-weight: 700; width: 100%; cursor: pointer; margin-top: 16px; }
       #ptt.recording { background: #ef4444; color: white; }
-      #ptt:disabled { opacity: 0.6; cursor: wait; }
+      #ptt.processing { background: #f59e0b; color: #111827; }
+      #ptt:disabled { opacity: 0.7; cursor: wait; }
       .card { background: #1f2937; padding: 16px; border-radius: 16px; margin-top: 16px; }
       .label { font-size: 12px; text-transform: uppercase; opacity: 0.7; margin-bottom: 8px; }
       pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
-      #status { margin-top: 12px; opacity: 0.85; }
+      #status { margin-top: 12px; opacity: 0.9; min-height: 1.4em; }
+      #hint { margin-top: 8px; font-size: 14px; opacity: 0.7; }
+      .pill { display: inline-block; font-size: 12px; padding: 4px 8px; border-radius: 999px; background: #374151; margin-left: 8px; }
       audio { width: 100%; margin-top: 12px; }
     </style>
   </head>
   <body>
     <div class="wrap">
-      <h1>OpenClaw Voice Bridge</h1>
+      <h1>OpenClaw Voice Bridge <span id="auth-pill" class="pill">token required</span></h1>
       <p>Push-to-talk MVP over Tailscale.</p>
       <div class="card">
         <div class="label">Access token</div>
-        <input id="token" type="password" placeholder="Enter shared access token" autocomplete="off" />
+        <div class="row">
+          <input id="token" type="password" placeholder="Enter shared access token" autocomplete="off" />
+          <button id="toggle-token" class="small-btn" type="button">Show</button>
+          <button id="clear-token" class="small-btn" type="button">Clear</button>
+        </div>
       </div>
       <button id="ptt">Hold to talk</button>
       <div id="status">Idle.</div>
+      <div id="hint">Press and hold to record, then release to send.</div>
       <div class="card">
         <div class="label">Transcript</div>
         <pre id="transcript">—</pre>

@@ -4,15 +4,15 @@
 - [x] Capture architecture
 - [x] Define modular boundaries
 - [x] Create portable repo layout
-- [ ] Decide repo/tooling stack
+- [x] Decide repo/tooling stack
 
 ## Phase 1: MVP
-- [ ] Create `voice-web` push-to-talk UI
-- [ ] Create bridge service API
-- [ ] Add local whisper STT adapter
-- [ ] Add macOS `say` TTS adapter
-- [ ] Add OpenClaw turn adapter
-- [ ] Add config schema + example config
+- [x] Create `voice-web` push-to-talk UI
+- [x] Create bridge service API
+- [x] Add local whisper STT adapter
+- [x] Add macOS `say` TTS adapter
+- [x] Add OpenClaw turn adapter
+- [x] Add config schema + example config
 - [ ] Add Tailscale deployment notes
 
 ## Phase 2: Hardening
@@ -32,3 +32,6 @@
 - Should the first bridge be HTTP upload based or WebSocket based?
 - Which frontend stack should be used for the voice UI?
 - Should TTS audio be generated to temp files or streamed directly?
+ base64 audio.
+- Which frontend stack should be used for the voice UI? Current scaffold uses vanilla browser APIs for speed.
+- Should TTS audio be generated to temp files or streamed directly? Current scaffold generates temp files.

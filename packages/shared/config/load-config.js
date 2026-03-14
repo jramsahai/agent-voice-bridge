@@ -1,0 +1,17 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
+const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../..');
+
+export function getRootDir() {
+  return rootDir;
+}
+
+export function loadConfig() {
+  const localPath = path.join(rootDir, 'config', 'config.local.json');
+  const examplePath = path.join(rootDir, 'config', 'config.example.json');
+  const configPath = fs.existsSync(localPath) ? localPath : examplePath;
+  const raw = fs.readFileSync(configPath, 'utf8');
+  const config = JSON.parse(raw);
+  return { config, configPath };
+}

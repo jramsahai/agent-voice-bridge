@@ -16,9 +16,20 @@ A modular, portable voice companion for OpenClaw focused on private, remote, pus
 - Browser-based push-to-talk client
 - Voice bridge service on the OpenClaw host
 - Local STT adapter (`whisper-cpp` + wrapper)
-- OpenClaw adapter for turn-based replies
+- OpenClaw adapter for turn-based replies via `openclaw agent`
 - Local TTS adapter (start with macOS `say`)
 - Config-driven deployment
+
+## Current status
+
+A first runnable scaffold exists now:
+- zero-dependency Node server
+- simple browser push-to-talk page
+- local whisper wrapper adapter
+- local macOS `say` adapter
+- OpenClaw CLI adapter
+
+This is an MVP scaffold, not production-ready voice infra yet.
 
 ## Proposed Structure
 

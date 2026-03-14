@@ -8,7 +8,7 @@ function extractReply(stdout) {
   if (!trimmed) return '';
   try {
     const parsed = JSON.parse(trimmed);
-    return parsed.reply || parsed.message || parsed.text || trimmed;
+    return parsed?.result?.payloads?.[0]?.text || parsed?.reply || parsed?.message || parsed?.text || trimmed;
   } catch {
     return trimmed;
   }

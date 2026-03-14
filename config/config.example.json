@@ -1,0 +1,19 @@
+{
+  "server": {
+    "host": "100.x.y.z",
+    "port": 4318
+  },
+  "openclaw": {
+    "gatewayUrl": "ws://100.x.y.z:18789",
+    "token": "REPLACE_ME",
+    "session": "main"
+  },
+  "stt": {
+    "provider": "whisper-local",
+    "command": "/Users/you/bin/whisper-audio"
+  },
+  "tts": {
+    "provider": "macos-say",
+    "voice": "Samantha"
+  }
+}

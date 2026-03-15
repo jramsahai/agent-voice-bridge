@@ -30,7 +30,7 @@ The MVP currently assumes:
 
 ## Future cleanup ideas
 
-- replace macOS-first TTS docs with a backend matrix (`say`, Piper, cloud fallback)
+- replace macOS-first TTS docs with a fuller backend matrix (`say`, `kokoro-onnx`, Piper, cloud fallback)
 - formalize config loading for `config.local.json` vs env vars
 - add an install/setup script
 - document Linux-specific STT/TTS paths

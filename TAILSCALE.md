@@ -89,6 +89,14 @@ The current MVP now includes:
 - simple per-IP rate limiting
 - safer client-facing errors (no stack traces returned to browser)
 
+## TTS backends
+
+The bridge now supports switchable TTS backends via config:
+- `macos-say`
+- `kokoro-onnx`
+
+For Kokoro ONNX, the local deployment used in this setup is a wrapper script (for example `~/bin/tts-kokoro`) backed by a durable local runtime under `~/.openclaw`.
+
 ## Notes
 
 - Ping/ICMP may still fail if the host firewall + stealth mode are enabled.

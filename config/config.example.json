@@ -12,8 +12,9 @@
     "command": "/Users/you/bin/whisper-audio"
   },
   "tts": {
-    "provider": "macos-say",
-    "voice": "Samantha"
+    "provider": "kokoro-onnx",
+    "command": "/Users/you/bin/tts-kokoro",
+    "voice": "af_heart"
   },
   "security": {
     "token": "replace-with-a-shared-secret",

@@ -5,7 +5,7 @@ import os from 'node:os';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadConfig, getRootDir } from '../../packages/shared/config/load-config.js';
 import { transcribeWithWhisperLocal } from '../../packages/shared/adapters/stt-whisper-local.js';
-import { speakWithMacosSay } from '../../packages/shared/adapters/tts-macos-say.js';
+import { speakText } from '../../packages/shared/adapters/tts.js';
 import { sendTurnToOpenClaw } from '../../packages/shared/adapters/openclaw-cli.js';
 
 const { config, configPath } = loadConfig();
@@ -115,7 +115,7 @@ async function handleTurn(req, res) {
     }
 
     const reply = await sendTurnToOpenClaw(transcript.text, config.openclaw);
-    const speech = await speakWithMacosSay(reply.text, config.tts);
+    const speech = await speakText(reply.text, config.tts);
 
     sendJson(res, 200, {
       transcript: transcript.text,

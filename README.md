@@ -39,6 +39,7 @@ This is an MVP scaffold, not production-ready voice infra yet.
 - The currently tested remote deployment pattern is documented in `TAILSCALE.md`.
 - The first security pass adds shared-token gating, origin/host checks, request size limits, and simple rate limiting.
 - The current UI includes saved token handling, clearer status/hints, better busy/recording states, and friendlier user-facing errors.
+- TTS is now switchable by config between `macos-say` and `kokoro-onnx`, with Kokoro integrated through a local wrapper script.
 
 ## Proposed Structure
 

@@ -26,6 +26,11 @@ Working today:
 - local transcription on the host machine
 - dedicated OpenClaw session handoff for voice turns
 - local TTS reply playback in the browser
+- voice-mode session shaping for better spoken replies:
+  - the bridge uses a dedicated OpenClaw session for voice turns
+  - that session is primed once with voice-mode instructions instead of injecting a fake system prompt into every turn
+  - normal turns send only the plain transcript text to the agent
+  - TTS receives a speech-cleaned version of the reply while the client can still receive the raw reply text for display/debugging
 - first security pass:
   - shared token auth
   - expected host validation
@@ -104,6 +109,8 @@ Audio + text back to browser
 ### OpenClaw
 - `openclaw agent --json`
 - uses a dedicated explicit session id so voice turns do not contend with the main chat lane
+- on first use, the bridge sends a one-time priming turn to that session with voice-mode instructions so replies stay brief, conversational, and speech-friendly
+- after that, normal turns send only the transcribed user text rather than injecting a fake system prompt on every request
 
 ## Configuration
 
@@ -199,6 +206,25 @@ voice-bridge/
 - multi-tenant hosting
 - fully local LLM stack
 - highly polished production auth
+
+## Voice response shaping notes
+
+The current bridge intentionally separates three concerns:
+
+1. **Session behavior**
+   - a dedicated voice session is primed once with instructions to keep replies brief, conversational, and speech-friendly
+   - the bridge tracks locally whether that dedicated session has already been primed so it does not resend the priming turn on every request
+
+2. **Per-turn handoff**
+   - each normal voice turn sends only the transcribed user message to OpenClaw
+   - this avoids brittle per-turn fake system prompt injection and keeps the user turn clean
+
+3. **TTS cleanup**
+   - before speech playback, the bridge strips markdown and other formatting artifacts that sound bad when spoken
+   - the goal is to preserve meaning while making the output sound natural in TTS
+   - the cleaned speech text is separate from the raw reply text returned to the client
+
+This architecture produced noticeably better spoken replies than the earlier approach of embedding a pseudo-system prompt into every user turn.
 
 ## Next likely improvements
 

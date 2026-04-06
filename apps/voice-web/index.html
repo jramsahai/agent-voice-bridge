@@ -28,15 +28,7 @@
   <body>
     <div class="wrap">
       <h1>OpenClaw Voice Bridge <span id="auth-pill" class="pill">token required</span></h1>
-      <p>Push-to-talk MVP over Tailscale.</p>
-      <div class="card">
-        <div class="label">Access token</div>
-        <div class="row">
-          <input id="token" type="password" placeholder="Enter shared access token" autocomplete="off" />
-          <button id="toggle-token" class="small-btn" type="button">Show</button>
-          <button id="clear-token" class="small-btn" type="button">Clear</button>
-        </div>
-      </div>
+      <p>STT-Agent-TTS pipeline with all models running locally. Hold the button to speak.</p>
       <button id="ptt">Hold to talk</button>
       <div id="status">Idle.</div>
       <div id="hint">Press and hold to record, then release to send.</div>
@@ -48,6 +40,14 @@
         <div class="label">Reply</div>
         <pre id="reply">—</pre>
         <audio id="player" controls></audio>
+      </div>
+      <div class="card">
+        <div class="label">Access token</div>
+        <div class="row">
+          <input id="token" type="password" placeholder="Enter shared access token" autocomplete="off" />
+          <button id="toggle-token" class="small-btn" type="button">Show</button>
+          <button id="clear-token" class="small-btn" type="button">Clear</button>
+        </div>
       </div>
     </div>
     <script type="module" src="/app.js"></script>

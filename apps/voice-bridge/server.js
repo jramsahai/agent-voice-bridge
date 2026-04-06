@@ -119,7 +119,8 @@ async function handleTurn(req, res) {
 
     sendJson(res, 200, {
       transcript: transcript.text,
-      reply: reply.text,
+      reply: reply.rawText || reply.text,
+      speechText: reply.text,
       audioBase64: speech.audioBuffer.toString('base64'),
       audioMimeType: speech.mimeType
     });

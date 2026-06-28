@@ -1,0 +1,5 @@
+fastapi
+kokoro-onnx
+pydantic
+soundfile
+uvicorn

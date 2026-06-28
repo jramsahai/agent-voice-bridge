@@ -88,6 +88,11 @@ Audio + text back to browser
 - runs TTS adapter
 - returns text + audio payloads
 
+### `apps/kokoro-tts`
+- optional persistent FastAPI service for Kokoro ONNX
+- loads the TTS model once at startup
+- lets the bridge avoid spawning Python for every reply
+
 ### `packages/shared/adapters`
 - STT adapters
 - TTS adapters
@@ -104,7 +109,8 @@ Audio + text back to browser
   - simple local fallback
 - `kokoro-onnx`
   - higher-quality local voice path
-  - integrated through a local wrapper command so the bridge can stay runtime-agnostic
+  - prefers the optional persistent Kokoro service when `tts.serviceUrl` or `KOKORO_TTS_URL` is available
+  - falls back to the local wrapper command so the bridge can stay runtime-agnostic
 
 ### OpenClaw
 - `openclaw agent --json`
@@ -132,11 +138,12 @@ Example shape:
   },
   "stt": {
     "provider": "whisper-local",
-    "command": "/Users/you/bin/whisper-audio"
+    "command": "./scripts/whisper-audio"
   },
   "tts": {
     "provider": "kokoro-onnx",
-    "command": "/Users/you/bin/tts-kokoro",
+    "command": "tts-kokoro",
+    "serviceUrl": "http://127.0.0.1:4319",
     "voice": "af_heart"
   },
   "security": {
@@ -179,6 +186,10 @@ Do not commit:
 
 See [`config/PORTABILITY.md`](./config/PORTABILITY.md) for more.
 
+## Setup
+
+See [`SETUP.md`](./SETUP.md) for a fresh-machine checklist covering model files, local config, Whisper STT, the optional Kokoro service, and Tailscale Serve.
+
 ## Project structure
 
 ```text
@@ -186,6 +197,7 @@ voice-bridge/
   README.md
   ARCHITECTURE.md
   ROADMAP.md
+  SETUP.md
   TAILSCALE.md
   config/
     config.example.json
@@ -193,6 +205,7 @@ voice-bridge/
   apps/
     voice-web/
     voice-bridge/
+    kokoro-tts/
   packages/
     shared/
       config/

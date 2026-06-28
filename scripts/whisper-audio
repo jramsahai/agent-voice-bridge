@@ -1,0 +1,26 @@
+#!/bin/zsh
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: whisper-audio <audio-file>" >&2
+  exit 2
+fi
+
+input="$1"
+model="${VOICE_BRIDGE_WHISPER_MODEL:-$HOME/.openclaw/models/whisper/ggml-small.en.bin}"
+vad_model="${VOICE_BRIDGE_WHISPER_VAD_MODEL:-$HOME/.openclaw/models/whisper/ggml-silero-vad.onnx}"
+whisper_cli="${WHISPER_CLI:-whisper-cli}"
+afconvert_bin="${AFCONVERT:-/usr/bin/afconvert}"
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+wav="$tmpdir/audio.wav"
+
+"$afconvert_bin" -f WAVE -d LEI16@16000 "$input" "$wav" >/dev/null 2>&1
+
+vad_args=()
+if [ -f "$vad_model" ]; then
+  vad_args=(--vad -vm "$vad_model")
+fi
+
+"$whisper_cli" -m "$model" -f "$wav" -nt -np "${vad_args[@]}"

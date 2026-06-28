@@ -1,10 +1,10 @@
 import { speakWithMacosSay } from './tts-macos-say.js';
-import { speakWithKokoroOnnx } from './tts-kokoro-onnx.js';
+import { speakWithKokoroFast } from './tts-kokoro-onnx.js';
 
 export async function speakText(text, ttsConfig = {}) {
   const provider = ttsConfig.provider || 'macos-say';
   if (provider === 'kokoro-onnx') {
-    return speakWithKokoroOnnx(text, ttsConfig);
+    return speakWithKokoroFast(text, ttsConfig);
   }
   if (provider === 'macos-say') {
     return speakWithMacosSay(text, ttsConfig);

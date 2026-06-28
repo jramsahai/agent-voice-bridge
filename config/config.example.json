@@ -9,11 +9,12 @@
   },
   "stt": {
     "provider": "whisper-local",
-    "command": "/Users/you/bin/whisper-audio"
+    "command": "./scripts/whisper-audio"
   },
   "tts": {
     "provider": "kokoro-onnx",
-    "command": "/Users/you/bin/tts-kokoro",
+    "command": "tts-kokoro",
+    "serviceUrl": "http://127.0.0.1:4319",
     "voice": "af_heart"
   },
   "security": {

@@ -5,7 +5,8 @@
   "description": "Tailscale-first push-to-talk voice bridge for OpenClaw",
   "type": "module",
   "scripts": {
-    "start": "node apps/voice-bridge/server.js"
+    "start": "node apps/voice-bridge/server.js",
+    "start:kokoro": "python3 apps/kokoro-tts/server.py"
   },
   "engines": {
     "node": ">=20"

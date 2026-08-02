@@ -32,9 +32,35 @@ test('findDataChunk locates data at offset 4096 past a 4044-byte filler chunk', 
   assert.equal(size, pcm.length);
 });
 
-test('findDataChunk finds data regardless of an odd-sized unrecognised chunk (word-alignment pad)', () => {
-  const pcm = makePcm16({ samples: 100 });
-  const wav = makeWavWithFillerChunk({ pcm, fillerBytes: 4043 });
+test('findDataChunk finds data past an odd-sized unrecognised chunk, honoring its word-alignment pad byte', () => {
+  // Built directly (not via makeWavWithFillerChunk, which only exercises even filler sizes)
+  // so the pad byte a real odd-sized RIFF chunk requires is present in this fixture.
+  const pcm = makePcm16({ samples: 10 });
+  const fmtChunk = Buffer.alloc(8 + 16);
+  fmtChunk.write('fmt ', 0, 'ascii');
+  fmtChunk.writeUInt32LE(16, 4);
+  fmtChunk.writeUInt16LE(1, 8);
+  fmtChunk.writeUInt16LE(1, 10);
+  fmtChunk.writeUInt32LE(16000, 12);
+  fmtChunk.writeUInt32LE(32000, 16);
+  fmtChunk.writeUInt16LE(2, 20);
+  fmtChunk.writeUInt16LE(16, 22);
+
+  const oddPayload = Buffer.alloc(5, 0xaa); // odd size -> requires one word-alignment pad byte
+  const oddChunk = Buffer.concat([Buffer.from('ODDX'), Buffer.from([5, 0, 0, 0]), oddPayload, Buffer.from([0])]);
+
+  const dataChunk = Buffer.alloc(8 + pcm.length);
+  dataChunk.write('data', 0, 'ascii');
+  dataChunk.writeUInt32LE(pcm.length, 4);
+  pcm.copy(dataChunk, 8);
+
+  const body = Buffer.concat([fmtChunk, oddChunk, dataChunk]);
+  const header = Buffer.alloc(12);
+  header.write('RIFF', 0, 'ascii');
+  header.writeUInt32LE(4 + body.length, 4);
+  header.write('WAVE', 8, 'ascii');
+  const wav = Buffer.concat([header, body]);
+
   const { offset, size } = findDataChunk(wav);
   assert.equal(size, pcm.length);
   assert.deepEqual(wav.subarray(offset, offset + size), pcm);

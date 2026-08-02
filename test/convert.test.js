@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { AUDIO_FORMATS } from '../packages/shared/audio/format-registry.js';
 import { readWavFormat, wavToPcm } from '../packages/shared/audio/wav.js';
@@ -64,6 +65,9 @@ function writeStub(dir, name, scriptBody) {
   fs.writeFileSync(scriptPath, scriptBody, { mode: 0o755 });
   return scriptPath;
 }
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
 
 // --- Input direction, real subprocess ---
 
@@ -280,4 +284,73 @@ test('argv recorded through prepareTranscriptionInput matches the direct-call sh
     ]);
     assert.equal(recordedArgv.length, 8);
   });
+});
+
+// --- Suite-level guarantees (TEST-05): parallel safety, offline/model-free operation ---
+// These only make sense at the level of the one file in the phase that spawns processes.
+
+test('several conversions launched concurrently all succeed and leave no temp residue', async () => {
+  // node --test runs test files in parallel by default, so two conversions genuinely can
+  // overlap in practice — a fixed (non-unique) temp path would pass here in isolation and
+  // fail intermittently under real suite load, which is the worst failure mode available.
+  const prefix = readTempDirPrefix();
+  const before = listMatchingTempEntries(prefix);
+
+  const jobs = Array.from({ length: 6 }, (_, i) => {
+    const pcm = makePcm16({ samples: 2000 + i * 137 });
+    const wav = makeCanonicalWav({ pcm, sampleRate: 44100, channels: i % 2 === 0 ? 1 : 2 });
+    return prepareTranscriptionInput(wav, CONTAINER_FORMAT_ID);
+  });
+
+  const outcomes = await Promise.all(jobs);
+  for (const result of outcomes) {
+    assert.ok(!result.error, 'every concurrent conversion must succeed');
+    assert.deepEqual(readWavFormat(result.wavBuffer), { sampleRate: 16000, channels: 1, bitDepth: 16 });
+  }
+
+  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+});
+
+test('no source file this phase created references a network client, a fetch call, or a models directory', () => {
+  const scanDirs = [
+    path.join(repoRoot, 'packages/shared/audio'),
+    path.join(repoRoot, 'packages/shared/errors'),
+    path.join(repoRoot, 'test'),
+  ];
+
+  function collectJsFiles(dir) {
+    const files = [];
+    for (const entry of fs.readdirSync(dir)) {
+      const fullPath = path.join(dir, entry);
+      const stats = fs.statSync(fullPath);
+      if (stats.isDirectory()) {
+        files.push(...collectJsFiles(fullPath));
+      } else if (entry.endsWith('.js')) {
+        files.push(fullPath);
+      }
+    }
+    return files;
+  }
+
+  const filesToScan = scanDirs.flatMap(collectJsFiles);
+  assert.ok(filesToScan.length > 0, 'sanity: at least one file was scanned');
+
+  // Built via concatenation, not written as literal substrings, so this scan (which reads
+  // its own file among the ones it walks) does not flag its own pattern list as a hit.
+  const forbiddenPatterns = [
+    ['node', ':', 'net'].join(''),
+    ['node', ':', 'https'].join(''),
+    ['node', ':', 'http'].join(''),
+    ['fetch', '('].join(''),
+    ['models', '/'].join(''),
+  ];
+  for (const filePath of filesToScan) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    for (const pattern of forbiddenPatterns) {
+      assert.ok(
+        !source.includes(pattern),
+        `${path.relative(repoRoot, filePath)} must not reference '${pattern}' — this phase's suite must run offline and model-free`,
+      );
+    }
+  }
 });

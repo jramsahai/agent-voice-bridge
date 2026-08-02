@@ -14,6 +14,32 @@ const AUDIO_FORMATS = Object.freeze({
     // Seam for plan 01-04's container format row — filled without moving this shape.
     afconvertFileFormat: null,
     afconvertDataFormat: null,
+    afconvertChannels: null,
+  }),
+  // The browser recording format the current client actually sends (blobToWav()
+  // decodes MediaRecorder output client-side via Web Audio API before every request).
+  // Sample metadata is null — a container's parameters come from its own fmt chunk,
+  // not an assumption here. afconvertChannels is a separate field, not folded into
+  // afconvertDataFormat, because RESEARCH.md Pitfall 3 verified afconvert's -c flag
+  // must be passed explicitly (LEI16@16000 alone leaves a stereo source stereo) — a
+  // future consumer builds the argv array from this row's fields alone.
+  //
+  // webm/opus is deliberately NOT registered here (checkpoint decision, option-a):
+  // afconvert has no WebM container support on this host at all (absent from -hf,
+  // decode probe rejected with "Couldn't open input file"), and its Ogg container
+  // write is broken for every codec tried. FMT-05's "webm/opus" wording is narrowed
+  // to the format the browser client actually transmits today (WAV). Adding a webm
+  // row later is exactly the one-row change this file's design promises.
+  wav: Object.freeze({
+    mimeType: 'audio/wav',
+    extension: 'wav',
+    headerless: false,
+    sampleRate: null,
+    channels: null,
+    bitDepth: null,
+    afconvertFileFormat: 'WAVE',
+    afconvertDataFormat: 'LEI16@16000',
+    afconvertChannels: 1,
   }),
 });
 

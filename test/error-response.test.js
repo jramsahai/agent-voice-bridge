@@ -16,7 +16,7 @@ import {
   lookupFormat,
 } from '../packages/shared/audio/format-registry.js';
 import { prepareTranscriptionInput } from '../packages/shared/audio/convert.js';
-import { makePcm16 } from './helpers/fixtures.js';
+import { makePcm16, makeCanonicalWav } from './helpers/fixtures.js';
 
 const ERROR_RESPONSE_SOURCE_URL = new URL('../packages/shared/errors/error-response.js', import.meta.url);
 const ERROR_RESPONSE_SOURCE = readFileSync(ERROR_RESPONSE_SOURCE_URL, 'utf8');
@@ -39,19 +39,15 @@ test('every registered format id is accepted exactly and does not produce FMT_UN
       const result = await prepareTranscriptionInput(makePcm16({ samples: 10 }), id);
       assert.ok(!result.error, `${id} must not produce an FMT_UNSUPPORTED envelope`);
     } else {
-      // Container formats (e.g. wav, registered by plan 01-04) are accepted by the
-      // registry ahead of plan 01-05's afconvert wiring — the property this test
-      // guards (a registered id is never treated as unsupported) still holds; the
-      // conversion itself is a documented not-yet-implemented gap, never an
-      // FMT_UNSUPPORTED-shaped rejection.
-      await assert.rejects(
-        () => prepareTranscriptionInput(makePcm16({ samples: 10 }), id),
-        (err) => {
-          assert.ok(!err.error, `${id} must not reject as an FMT_UNSUPPORTED envelope`);
-          assert.match(err.message, /not yet implemented/, `${id} rejection must be the documented pending-conversion gap`);
-          return true;
-        },
-      );
+      // Container formats (e.g. wav) need an actual WAV buffer, not raw PCM — plan 01-05
+      // filled the afconvert conversion path, so a container id is now accepted end to end
+      // the same way a headerless id is. Feed it an already-conforming WAV (16kHz mono
+      // 16-bit) so this stays a fast no-subprocess check; the property this test guards
+      // (a registered id is never treated as unsupported) is what matters here, not the
+      // conversion behavior itself, which test/convert.test.js owns.
+      const wav = makeCanonicalWav({ pcm: makePcm16({ samples: 10 }), sampleRate: 16000, channels: 1, bitDepth: 16 });
+      const result = await prepareTranscriptionInput(wav, id);
+      assert.ok(!result.error, `${id} must not produce an FMT_UNSUPPORTED envelope`);
     }
   }
 });

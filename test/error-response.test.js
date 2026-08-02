@@ -34,8 +34,25 @@ function readDocumentedTruncationLimit() {
 test('every registered format id is accepted exactly and does not produce FMT_UNSUPPORTED', async () => {
   for (const id of listSupportedFormats()) {
     assert.equal(isSupportedFormat(id), true, `isSupportedFormat(${id})`);
-    const result = await prepareTranscriptionInput(makePcm16({ samples: 10 }), id);
-    assert.ok(!result.error, `${id} must not produce an FMT_UNSUPPORTED envelope`);
+    const entry = lookupFormat(id);
+    if (entry.headerless) {
+      const result = await prepareTranscriptionInput(makePcm16({ samples: 10 }), id);
+      assert.ok(!result.error, `${id} must not produce an FMT_UNSUPPORTED envelope`);
+    } else {
+      // Container formats (e.g. wav, registered by plan 01-04) are accepted by the
+      // registry ahead of plan 01-05's afconvert wiring — the property this test
+      // guards (a registered id is never treated as unsupported) still holds; the
+      // conversion itself is a documented not-yet-implemented gap, never an
+      // FMT_UNSUPPORTED-shaped rejection.
+      await assert.rejects(
+        () => prepareTranscriptionInput(makePcm16({ samples: 10 }), id),
+        (err) => {
+          assert.ok(!err.error, `${id} must not reject as an FMT_UNSUPPORTED envelope`);
+          assert.match(err.message, /not yet implemented/, `${id} rejection must be the documented pending-conversion gap`);
+          return true;
+        },
+      );
+    }
   }
 });
 

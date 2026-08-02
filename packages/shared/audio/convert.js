@@ -3,17 +3,113 @@
 // data (headerless, sampleRate, channels, bitDepth, mimeType), never to the id string
 // itself. That distinction is what keeps FMT-07 a one-row registry change.
 
-import { lookupFormat } from './format-registry.js';
-import { unsupportedFormatError } from '../errors/error-response.js';
-import { pcmToWav } from './wav.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+import { AUDIO_FORMATS, lookupFormat } from './format-registry.js';
+import { buildError, unsupportedFormatError } from '../errors/error-response.js';
+import { ERROR_CODES } from '../errors/error-codes.js';
+import { pcmToWav, wavToPcm, readWavFormat } from './wav.js';
+
+const execFileAsync = promisify(execFile);
 
 export const WHISPER_INPUT = Object.freeze({ sampleRate: 16000, channels: 1, bitDepth: 16 });
 
 // Injectable per D-08 so plan 01-05 has the seam and no exported signature moves.
 export const DEFAULT_AFCONVERT_BIN = '/usr/bin/afconvert';
 
+// Stable prefix for every temp directory this module creates. Read by test/convert.test.js
+// via a source-text regex (not exported) so the hygiene assertions there can never drift
+// from the real value — same pattern test/error-response.test.js uses for
+// MAX_ECHOED_IDENTIFIER_LENGTH.
+const TEMP_DIR_PREFIX = 'voice-bridge-convert-';
+
+// Matches the timeout/maxBuffer values already established for afconvert calls elsewhere
+// in this codebase (packages/shared/adapters/tts-kokoro-onnx.js), overridable per call so
+// tests can drive the failure paths without waiting out a two-minute timeout.
+const DEFAULT_AFCONVERT_TIMEOUT_MS = 120000;
+const DEFAULT_AFCONVERT_MAX_BUFFER = 10 * 1024 * 1024;
+
+function resolveAfconvertBin(options = {}) {
+  return options.afconvertBin || process.env.AFCONVERT_BIN || DEFAULT_AFCONVERT_BIN;
+}
+
+// The one registry row that carries non-null afconvert tokens is, by construction (see
+// format-registry.js), the recipe for turning an arbitrary WAV into whisper-ready audio.
+// Found structurally rather than by a hardcoded wire id — this file must never contain a
+// registered format id as a quoted literal (test/format-registry.test.js's one-row-change
+// scan enforces that), and finding the recipe this way means adding a second container row
+// later cannot break this lookup by requiring a new literal here.
+function resolveWhisperConversionRecipe() {
+  const row = Object.values(AUDIO_FORMATS).find((entry) => entry.afconvertDataFormat != null);
+  if (!row) {
+    throw new Error(
+      'convert.js: no registry row supplies the afconvert tokens needed to reach whisper-ready audio',
+    );
+  }
+  return row;
+}
+
+function matchesTarget(sourceFormat, target) {
+  return (
+    sourceFormat.sampleRate === target.sampleRate &&
+    sourceFormat.channels === target.channels &&
+    sourceFormat.bitDepth === target.bitDepth
+  );
+}
+
+// Shared by both directions: resamples an arbitrary WAV buffer down to the whisper-ready
+// shape (16 kHz mono 16-bit) via a real afconvert subprocess. Every temp path this function
+// creates is removed before it returns, on success, on a non-zero exit, on a timeout, and on
+// a throw from anywhere in between — it owns cleanup of its own directory only.
+export async function convertWavToWhisperWav(wavBuffer, options = {}) {
+  const recipe = resolveWhisperConversionRecipe();
+  const bin = resolveAfconvertBin(options);
+  const timeout = options.timeoutMs ?? DEFAULT_AFCONVERT_TIMEOUT_MS;
+  const maxBuffer = options.maxBuffer ?? DEFAULT_AFCONVERT_MAX_BUFFER;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), TEMP_DIR_PREFIX));
+  try {
+    const stem = randomUUID();
+    const inputPath = path.join(tmpDir, `${stem}-in.${recipe.extension}`);
+    const outputPath = path.join(tmpDir, `${stem}-out.${recipe.extension}`);
+    fs.writeFileSync(inputPath, wavBuffer);
+
+    // Array-form execFile only — never a shell string. Every flag value comes from the
+    // registry row, never from request data.
+    const argv = [
+      '-f',
+      recipe.afconvertFileFormat,
+      '-d',
+      recipe.afconvertDataFormat,
+      '-c',
+      String(recipe.afconvertChannels),
+      inputPath,
+      outputPath,
+    ];
+
+    try {
+      await execFileAsync(bin, argv, { timeout, maxBuffer });
+      const wavOut = fs.readFileSync(outputPath);
+      return { wavBuffer: wavOut };
+    } catch {
+      // The caught error's message, stderr, stdout, the binary path, and the temp path
+      // must never reach the client — only the catalogue's fixed title does. Logging them
+      // is a legitimate future need (Phase 4's structured logging), not this module's job.
+      return {
+        error: buildError('AUDIO_CONVERSION_FAILED', ERROR_CODES.AUDIO_CONVERSION_FAILED.title, { status: 500 }),
+      };
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 export async function prepareTranscriptionInput(audioBuffer, declaredFormatId, options = {}) {
-  void options;
   const entry = lookupFormat(declaredFormatId);
   if (!entry) {
     return { error: unsupportedFormatError(declaredFormatId) };
@@ -25,30 +121,70 @@ export async function prepareTranscriptionInput(audioBuffer, declaredFormatId, o
       meta: { formatId: declaredFormatId, converted: false, spawned: false },
     };
   }
-  // Container formats (WAV resample via afconvert) are plan 01-05's addition — this
-  // branch exists now so no signature here changes when that plan fills it in.
-  throw new Error(
-    `prepareTranscriptionInput: container format '${declaredFormatId}' conversion is not yet implemented (see plan 01-05)`,
-  );
+
+  // Container format: read the source's own fmt chunk (throws AUDIO_MALFORMED for a
+  // buffer that isn't a valid WAV at all — before any temp directory is ever created) and
+  // only pay for the afconvert subprocess if the source doesn't already match what
+  // transcription needs.
+  const sourceFormat = readWavFormat(audioBuffer);
+  if (matchesTarget(sourceFormat, WHISPER_INPUT)) {
+    return {
+      wavBuffer: audioBuffer,
+      meta: { formatId: declaredFormatId, converted: false, spawned: false },
+    };
+  }
+
+  const result = await convertWavToWhisperWav(audioBuffer, options);
+  if (result.error) {
+    return result;
+  }
+  return {
+    wavBuffer: result.wavBuffer,
+    meta: { formatId: declaredFormatId, converted: true, spawned: true },
+  };
 }
 
 export async function prepareClientOutput(replyWavBuffer, requestedFormatId, options = {}) {
-  void options;
   const entry = lookupFormat(requestedFormatId);
   if (!entry) {
     return { error: unsupportedFormatError(requestedFormatId) };
   }
   if (entry.headerless) {
-    // Canonical 44-byte offset only — this path is fed by the service's own
-    // pcmToWav() output. A chunk-walking reader for arbitrary WAVs is plan 01-02's job.
-    const buffer = replyWavBuffer.subarray(44);
+    // The requested headerless format's own declared shape is the target — for pcm16 this
+    // is numerically the same as WHISPER_INPUT, but the comparison stays registry-driven
+    // (entry.sampleRate/channels/bitDepth) rather than hardcoded to that constant.
+    const target = { sampleRate: entry.sampleRate, channels: entry.channels, bitDepth: entry.bitDepth };
+    const sourceFormat = readWavFormat(replyWavBuffer);
+
+    let wavToStrip = replyWavBuffer;
+    let converted = false;
+    let spawned = false;
+
+    if (!matchesTarget(sourceFormat, target)) {
+      const result = await convertWavToWhisperWav(replyWavBuffer, options);
+      if (result.error) {
+        return result;
+      }
+      wavToStrip = result.wavBuffer;
+      converted = true;
+      spawned = true;
+    }
+
+    // Chunk-walking strip, never a fixed offset — the source may be this service's own
+    // canonical WAV, or afconvert output with a filler chunk ahead of 'data'.
+    const buffer = wavToPcm(wavToStrip);
     return {
       buffer,
       mimeType: entry.mimeType,
-      meta: { formatId: requestedFormatId, converted: false, spawned: false },
+      meta: { formatId: requestedFormatId, converted, spawned },
     };
   }
+
+  // Container-format output requests (returning a WAV rather than headerless PCM) are not
+  // exercised by any client this milestone ships — the codec-free promise is the only
+  // output path this phase's requirements (FMT-04) cover. Documented as out of scope
+  // rather than guessed at.
   throw new Error(
-    `prepareClientOutput: container format '${requestedFormatId}' conversion is not yet implemented (see plan 01-05)`,
+    `prepareClientOutput: container format '${requestedFormatId}' as a reply format is out of scope for this milestone`,
   );
 }

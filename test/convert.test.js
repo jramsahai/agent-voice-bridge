@@ -185,7 +185,10 @@ test('temp hygiene: a missing afconvert binary leaves no residue', async () => {
 test('temp hygiene: an invalid input buffer creates no temp directory at all', async () => {
   const prefix = readTempDirPrefix();
   const before = listMatchingTempEntries(prefix);
-  await assert.rejects(() => prepareTranscriptionInput(makeMalformedWav('no-data-chunk'), CONTAINER_FORMAT_ID));
+  // Fails readWavFormat's own RIFF/WAVE preamble check before any temp directory is ever
+  // created — unlike 'no-data-chunk' (still a valid fmt chunk, just missing 'data'), this
+  // fixture is too short to even be a container, so this exercises the true fail-fast path.
+  await assert.rejects(() => prepareTranscriptionInput(makeMalformedWav('truncated-header'), CONTAINER_FORMAT_ID));
   assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
 });
 

@@ -67,7 +67,12 @@ function markSessionPrimed(sessionId) {
   fs.writeFileSync(getSessionStatePath(sessionId), JSON.stringify({ primedAt: new Date().toISOString() }), 'utf8');
 }
 
+function getOpenClawCommand(openclawConfig) {
+  return openclawConfig.command || process.env.OPENCLAW_BIN || 'openclaw';
+}
+
 async function runOpenClawAgent(message, openclawConfig) {
+  const command = getOpenClawCommand(openclawConfig);
   const args = ['agent', '--message', message, '--json'];
 
   if (openclawConfig.sessionId) {
@@ -80,14 +85,26 @@ async function runOpenClawAgent(message, openclawConfig) {
     args.push('--thinking', openclawConfig.thinking);
   }
 
-  const { stdout, stderr } = await execFileAsync('/opt/homebrew/bin/openclaw', args, {
-    timeout: 180000,
-    maxBuffer: 10 * 1024 * 1024
-  });
+  let stdout;
+  let stderr;
+  try {
+    ({ stdout, stderr } = await execFileAsync(command, args, {
+      timeout: 180000,
+      maxBuffer: 10 * 1024 * 1024
+    }));
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error(
+        `OpenClaw CLI not found at "${command}". Set openclaw.command in config/config.local.json to an absolute path, or set OPENCLAW_BIN.`
+      );
+    }
+    throw error;
+  }
 
   return {
     rawReply: extractReply(stdout),
     stderr: stderr?.trim() || '',
+    command,
     args
   };
 }
@@ -118,6 +135,7 @@ export async function sendTurnToOpenClaw(text, openclawConfig) {
     rawText: result.rawReply,
     meta: {
       stderr: result.stderr,
+      command: result.command,
       args: result.args
     }
   };

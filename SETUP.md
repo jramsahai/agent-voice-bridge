@@ -8,7 +8,7 @@ It does not include model files, local secrets, local LaunchAgents, or a machine
 
 - Node.js 20+
 - Python 3.10+
-- OpenClaw CLI available as `openclaw`
+- OpenClaw CLI on `PATH` as `openclaw`, or an absolute path set via `openclaw.command` / `OPENCLAW_BIN`
 - `whisper-cli` from `whisper.cpp`
 - macOS `afconvert` for audio conversion
 - Tailscale Serve if accessing the browser UI from another device
@@ -40,6 +40,7 @@ cp config/config.example.json config/config.local.json
 Then edit:
 
 - `openclaw.sessionId`
+- `openclaw.command` if the CLI is not on the server process's `PATH` (e.g. `/opt/homebrew/bin/openclaw`)
 - `security.token`
 - `security.expectedHost`
 - `security.allowedOrigins`

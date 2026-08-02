@@ -20,6 +20,20 @@ These are fine to keep in the repo:
 - backend/frontend code
 - placeholder command paths
 
+## Binary paths
+
+Every external binary is resolved from config, never hardcoded in adapter code:
+
+| Binary | Config key | Fallback |
+| --- | --- | --- |
+| OpenClaw CLI | `openclaw.command` | `OPENCLAW_BIN` env var, then `openclaw` on `PATH` |
+| STT | `stt.command` | none — required |
+| TTS | `tts.command` | none — required |
+
+`config.example.json` ships PATH-relative placeholders. Absolute, machine-specific
+paths (e.g. `/opt/homebrew/bin/openclaw` on Apple Silicon Homebrew) belong in
+gitignored `config/config.local.json`.
+
 ## Current portability assumptions
 
 The MVP currently assumes:

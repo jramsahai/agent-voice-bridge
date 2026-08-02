@@ -133,6 +133,7 @@ Example shape:
     "port": 4318
   },
   "openclaw": {
+    "command": "openclaw",
     "sessionId": "voice-bridge-mvp",
     "thinking": "low"
   },

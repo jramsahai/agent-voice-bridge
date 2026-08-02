@@ -80,7 +80,7 @@ async function runOpenClawAgent(message, openclawConfig) {
     args.push('--thinking', openclawConfig.thinking);
   }
 
-  const { stdout, stderr } = await execFileAsync('openclaw', args, {
+  const { stdout, stderr } = await execFileAsync('/opt/homebrew/bin/openclaw', args, {
     timeout: 180000,
     maxBuffer: 10 * 1024 * 1024
   });

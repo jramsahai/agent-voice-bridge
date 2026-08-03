@@ -231,13 +231,21 @@ test('a serialised envelope for every code contains no host path, home directory
 test('the published error code list is exactly the pinned literal', () => {
   // A failure here means a published contract is changing — confirm the change is an
   // addition or retirement, never a silent redefinition, before updating this literal.
+  // Phase 3 (03-04) appended six transport-layer codes; every Phase 1/2 code above stays
+  // unmodified — see the paired status-mapping test below for confirmation none were redefined.
   const PUBLISHED_CODES = [
     'AUDIO_CONVERSION_FAILED',
     'AUDIO_MALFORMED',
     'AUDIO_TOO_LARGE',
     'FMT_UNSUPPORTED',
+    'FORBIDDEN',
+    'INTERNAL_ERROR',
+    'NOT_FOUND',
+    'RATE_LIMITED',
+    'TRANSCRIPT_EMPTY',
     'TURN_ABORTED',
     'TURN_BUSY',
+    'UNAUTHORIZED',
   ];
   assert.deepEqual(Object.keys(ERROR_CODES).sort(), PUBLISHED_CODES.sort());
 });
@@ -252,6 +260,12 @@ test('the published error code -> status mapping is exactly the pinned literal',
     AUDIO_CONVERSION_FAILED: 500,
     TURN_BUSY: 409,
     TURN_ABORTED: 499,
+    TRANSCRIPT_EMPTY: 422,
+    UNAUTHORIZED: 401,
+    FORBIDDEN: 403,
+    RATE_LIMITED: 429,
+    NOT_FOUND: 404,
+    INTERNAL_ERROR: 500,
   };
   const actual = Object.fromEntries(Object.entries(ERROR_CODES).map(([key, value]) => [key, value.status]));
   assert.deepEqual(Object.entries(actual).sort(), Object.entries(PUBLISHED_STATUS).sort());

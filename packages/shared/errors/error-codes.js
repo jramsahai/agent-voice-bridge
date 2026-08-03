@@ -32,6 +32,34 @@ export const ERROR_CODES = Object.freeze({
     status: 499,
     title: 'The turn was aborted before it could complete.',
   }),
+  // --- Phase 3: transport-layer codes /v1/* returns (append-only, same as above) ---
+  TRANSCRIPT_EMPTY: Object.freeze({
+    status: 422,
+    title: 'Transcription returned no text.',
+  }),
+  UNAUTHORIZED: Object.freeze({
+    status: 401,
+    title: 'Authentication is required or the provided credential is invalid.',
+  }),
+  // Deliberately covers both an unexpected Host header and a disallowed Origin header with
+  // one code and one title: telling a caller which of the two checks it failed tells an
+  // attacker how to fix its request, so both collapse to one indistinguishable rejection.
+  FORBIDDEN: Object.freeze({
+    status: 403,
+    title: 'The request is not permitted from this host or origin.',
+  }),
+  RATE_LIMITED: Object.freeze({
+    status: 429,
+    title: 'Too many requests. Try again shortly.',
+  }),
+  NOT_FOUND: Object.freeze({
+    status: 404,
+    title: 'The requested resource does not exist.',
+  }),
+  INTERNAL_ERROR: Object.freeze({
+    status: 500,
+    title: 'An internal error occurred while processing the request.',
+  }),
 });
 
 // Shape invariants enforced once, at import time, so a malformed catalogue fails the

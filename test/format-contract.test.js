@@ -91,7 +91,7 @@ test('every ERROR_CODES entry round-trips through buildError with matching heade
   }
 });
 
-test('ERROR_CODES holds exactly the six codes phases 1 and 2 can produce', () => {
+test('ERROR_CODES holds exactly the twelve codes phases 1 through 3 can produce', () => {
   assert.deepEqual(
     Object.keys(ERROR_CODES).sort(),
     [
@@ -99,8 +99,14 @@ test('ERROR_CODES holds exactly the six codes phases 1 and 2 can produce', () =>
       'AUDIO_MALFORMED',
       'AUDIO_TOO_LARGE',
       'FMT_UNSUPPORTED',
+      'FORBIDDEN',
+      'INTERNAL_ERROR',
+      'NOT_FOUND',
+      'RATE_LIMITED',
+      'TRANSCRIPT_EMPTY',
       'TURN_ABORTED',
       'TURN_BUSY',
+      'UNAUTHORIZED',
     ].sort(),
   );
   assert.equal(ERROR_CODES.FMT_UNSUPPORTED.status, 415);
@@ -109,6 +115,12 @@ test('ERROR_CODES holds exactly the six codes phases 1 and 2 can produce', () =>
   assert.equal(ERROR_CODES.AUDIO_CONVERSION_FAILED.status, 500);
   assert.equal(ERROR_CODES.TURN_BUSY.status, 409);
   assert.equal(ERROR_CODES.TURN_ABORTED.status, 499);
+  assert.equal(ERROR_CODES.TRANSCRIPT_EMPTY.status, 422);
+  assert.equal(ERROR_CODES.UNAUTHORIZED.status, 401);
+  assert.equal(ERROR_CODES.FORBIDDEN.status, 403);
+  assert.equal(ERROR_CODES.RATE_LIMITED.status, 429);
+  assert.equal(ERROR_CODES.NOT_FOUND.status, 404);
+  assert.equal(ERROR_CODES.INTERNAL_ERROR.status, 500);
 });
 
 test('TurnBusyError and TurnAbortedError construct with a registered catalogue code and a message with no path-like or numeric-identifier content', () => {

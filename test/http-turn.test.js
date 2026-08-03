@@ -700,7 +700,7 @@ test('a client that destroys its socket mid-turn causes the in-flight fake speak
     await waitUntil(() => headersReceived);
     clientReq.destroy();
 
-    // The server's req 'close' event is driven by the underlying socket teardown, not
+    // The server's response 'close' event is driven by the underlying socket teardown, not
     // synchronous with clientReq.destroy() — give the event loop a short window for it to
     // actually fire and abort the controller before releasing the gate.
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -708,6 +708,145 @@ test('a client that destroys its socket mid-turn causes the in-flight fake speak
     await waitUntil(() => observedAborted !== null);
 
     assert.equal(observedAborted, true);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// =====================================================================================
+// Task 3: wire hygiene — assert on the raw response header block, not on intent
+// =====================================================================================
+
+// Reads res.rawHeaders (the flat, un-deduplicated wire array) rather than res.headers (an
+// object Node already flattens/overwrites duplicates into) so a duplicated or
+// later-overwritten header is visible to the assertion instead of silently collapsed.
+function assertWireHygiene(response) {
+  const pairs = [];
+  for (let i = 0; i < response.rawHeaders.length; i += 2) {
+    pairs.push([response.rawHeaders[i].toLowerCase(), response.rawHeaders[i + 1]]);
+  }
+  const names = pairs.map(([name]) => name);
+
+  assert.ok(!names.includes('set-cookie'), 'response must never carry a Set-Cookie header');
+  assert.ok(
+    response.statusCode < 300 || response.statusCode >= 400,
+    `response status ${response.statusCode} must never be a 3xx redirect`,
+  );
+  for (const [name, value] of pairs) {
+    if (name === 'content-encoding') {
+      assert.equal(value, 'identity', 'any content-encoding present must be exactly identity');
+    }
+  }
+  const cacheControlPairs = pairs.filter(([name]) => name === 'cache-control');
+  assert.equal(cacheControlPairs.length, 1, 'cache-control must appear exactly once in the raw header block');
+  assert.ok(
+    cacheControlPairs[0][1].includes('no-transform'),
+    'cache-control must include the no-transform directive',
+  );
+}
+
+test('wire hygiene: a 200 response with audio carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
+  const config = buildTestConfig();
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    assert.equal(response.statusCode, 200);
+    assertWireHygiene(response);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('wire hygiene: a 200 text-only response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
+  const config = buildTestConfig();
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'pcm16', 'X-Voice-Want-Audio': '0' },
+    });
+    assert.equal(response.statusCode, 200);
+    assertWireHygiene(response);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('wire hygiene: a 401 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
+  const config = buildTestConfig({ token: 'the-real-token' });
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    assert.equal(response.statusCode, 401);
+    assertWireHygiene(response);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('wire hygiene: a 413 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
+  const config = buildTestConfig();
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: {
+        'X-Voice-Input-Format': 'pcm16',
+        'Content-Length': String(MAX_REQUEST_AUDIO_BYTES + 1),
+      },
+    });
+    assert.equal(response.statusCode, 413);
+    assertWireHygiene(response);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('wire hygiene: a 415 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
+  const config = buildTestConfig();
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'not-a-real-format' },
+    });
+    assert.equal(response.statusCode, 415);
+    assertWireHygiene(response);
   } finally {
     await closeServer(server);
   }

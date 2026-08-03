@@ -19,6 +19,26 @@ import { TurnBusyError, TurnAbortedError } from '../errors/turn-errors.js';
 // the test can never drift from the real value.
 const TEMP_DIR_PREFIX = 'voice-bridge-pipeline-';
 
+// A real adapter that forwards `signal` into a child process or request rejects with
+// whatever abort-shaped error that facility produces (execFile's own AbortError, fetch's
+// DOMException, etc.) once it is actually killed mid-flight — a different shape per
+// facility. Normalizing every such rejection to the pipeline's own stable TurnAbortedError
+// here means a caller never has to know which adapter or which platform primitive produced
+// the underlying error; it only ever sees TURN_ABORTED. A rejection that happens while the
+// signal is NOT aborted is a real failure and propagates completely unchanged, exactly as
+// plan 02-01's "a throwing agent fake propagates the original error unchanged" behavior
+// already established.
+async function runStage(callAdapter, signal) {
+  try {
+    return await callAdapter();
+  } catch (err) {
+    if (signal?.aborted) {
+      throw new TurnAbortedError();
+    }
+    throw err;
+  }
+}
+
 function isPlainFilename(value) {
   return typeof value === 'string' && value.length > 0 && !value.includes(path.sep) && !value.includes('/');
 }
@@ -70,7 +90,8 @@ export async function runTurn({
 
   // Step 2: the pipeline accepts an already-constructed AbortSignal and never constructs
   // one itself — the caller owns that lifecycle, whether the caller is a test or Phase 3's
-  // request handler. Plan 02-03 adds the between-stage checks.
+  // request handler. Between-stage checks (an already-vanished caller must not still pay
+  // for the next stage) sit further down, right before each subsequent adapter call.
   if (signal?.aborted) {
     throw new TurnAbortedError();
   }
@@ -90,18 +111,35 @@ export async function runTurn({
       fs.writeFileSync(audioPath, audioBuffer);
 
       const transcribeStart = Date.now();
-      const transcribeResult = await adapters.transcribe(audioPath, sttConfig, { signal });
+      const transcribeResult = await runStage(() => adapters.transcribe(audioPath, sttConfig, { signal }), signal);
       meta.durationsMs.transcribe = Date.now() - transcribeStart;
 
+      // A caller that vanished during transcription must never cause the agent stage to
+      // run — it is the most expensive stage in the pipeline and holds the shared
+      // conversation while it runs. Re-checked here, not just at entry, because entry's
+      // check cannot see a signal that aborted mid-flight.
+      if (signal?.aborted) {
+        throw new TurnAbortedError();
+      }
+
       const agentStart = Date.now();
-      const agentResult = await adapters.agent(transcribeResult.text, openclawConfig, { signal });
+      const agentResult = await runStage(
+        () => adapters.agent(transcribeResult.text, openclawConfig, { signal }),
+        signal,
+      );
       meta.durationsMs.agent = Date.now() - agentStart;
+
+      // Same reasoning between the agent and speech stages: a caller gone by the time the
+      // reply is ready must not still pay for a speech synthesis nobody will hear.
+      if (signal?.aborted) {
+        throw new TurnAbortedError();
+      }
 
       const speechText = agentResult.text;
       let speech = null;
       if (wantAudio) {
         const speakStart = Date.now();
-        speech = await adapters.speak(speechText, ttsConfig, { signal });
+        speech = await runStage(() => adapters.speak(speechText, ttsConfig, { signal }), signal);
         meta.durationsMs.speak = Date.now() - speakStart;
       }
 

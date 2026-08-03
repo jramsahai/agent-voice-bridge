@@ -6,8 +6,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 import {
@@ -98,6 +99,78 @@ test('release of a different session id does not free the one actually held', ()
   }
 });
 
+// CR-02/WR-05: the test above only proves the final answer (false) is unchanged — it cannot
+// distinguish a correct in-process guard from the pre-fix bug, where releaseTurnLock(otherId)
+// unconditionally cleared heldSessionId and acquireTurnLock(heldId) then fell through to the
+// filesystem layer (mkdirSync EEXIST + a live, non-stale holder) and reached the *same*
+// answer by an unintended mechanism. This test proves the in-process guard directly: a third,
+// never-before-seen session id, immediately after an unrelated release, must be refused with
+// zero filesystem I/O — something only possible if heldSessionId still names heldId. A
+// filesystem fallback for a session id whose lock artifact does not exist at all would
+// instead succeed (mkdirSync has nothing to collide with), so this assertion fails outright
+// under the pre-fix behavior rather than merely reaching the same boolean by accident.
+test('an unrelated release does not clear the in-process guard: a brand-new session id is still refused instantly while the real lock is held', () => {
+  const heldId = uniqueSessionId('held-guard');
+  const otherId = uniqueSessionId('other-guard');
+  const neverSeenId = uniqueSessionId('never-seen-guard');
+  try {
+    assert.equal(acquireTurnLock(heldId), true);
+    releaseTurnLock(otherId); // never acquired by this process — must be a documented no-op
+    assert.equal(
+      acquireTurnLock(neverSeenId),
+      false,
+      'a session id with no lock artifact on disk at all must still be refused, proving the ' +
+        'refusal came from the in-process guard (heldSessionId) rather than a filesystem EEXIST',
+    );
+    assert.equal(fs.existsSync(turnLockPathFor(neverSeenId)), false, 'no artifact was created for the refused id');
+  } finally {
+    releaseTurnLock(heldId);
+  }
+});
+
+// CR-02: a process must never remove a lock artifact that has since become someone else's —
+// e.g. this process's own lock was reclaimed as stale by another acquirer while a legitimately
+// slow turn was still finishing, and this process's outer finally then calls releaseTurnLock
+// for the session id it originally acquired. Simulated here by acquiring normally and then
+// overwriting holder.json's token exactly as a different, successful reclaimer would (its pid
+// and acquiredAt are also rewritten, since a real reclaimer's mkdirSync+write is indistinguishable
+// from this at the metadata level).
+test('releaseTurnLock does not remove a lock artifact whose on-disk token no longer matches what this process acquired', () => {
+  const sessionId = uniqueSessionId('stolen-by-reclaim');
+  const lockPath = turnLockPathFor(sessionId);
+  try {
+    assert.equal(acquireTurnLock(sessionId), true);
+
+    // Simulate a different process reclaiming this same lock: a fresh pid, a fresh
+    // acquiredAt, and — the detail this process's own release must catch — a different
+    // token.
+    fs.writeFileSync(
+      path.join(lockPath, 'holder.json'),
+      JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), sessionId, token: 'not-our-token' }),
+      'utf8',
+    );
+
+    assert.doesNotThrow(() => releaseTurnLock(sessionId));
+    assert.equal(fs.existsSync(lockPath), true, 'the artifact belonging to the new (simulated) holder must survive');
+
+    // The in-process guard must still clear regardless — this process is done believing it
+    // holds sessionId either way, per CR-02's fix note that both pieces of state are only
+    // ever changed together.
+    const probeId = uniqueSessionId('probe-after-stolen-release');
+    try {
+      assert.equal(
+        acquireTurnLock(probeId),
+        true,
+        'the in-process guard must be clear after release, even though the filesystem removal was skipped',
+      );
+    } finally {
+      releaseTurnLock(probeId);
+    }
+  } finally {
+    fs.rmSync(lockPath, { recursive: true, force: true });
+  }
+});
+
 // --- Reclaim ---
 
 test('an artifact whose holder pid belongs to a genuinely exited process is stale and reclaimed by the next acquisition', () => {
@@ -185,6 +258,110 @@ test('malformed holder JSON collapses to the safe default rather than throwing',
     assert.equal(staleResult, false);
     assert.doesNotThrow(() => acquireTurnLock(sessionId));
   } finally {
+    fs.rmSync(lockPath, { recursive: true, force: true });
+  }
+});
+
+// --- CR-01: cross-process reclaim race ---
+//
+// test/turn-lock-concurrency.test.js's own fork test only races two processes for a *fresh*
+// lock (mkdirSync EEXIST alone as the arbiter). CR-01's actual defect was in the *reclaim*
+// path — two processes independently observing the same *stale* lock, each running
+// rmSync-then-mkdirSync with nothing atomic between the two calls, could both come away
+// believing they held it. This test seeds one genuinely stale lock (a dead pid, using a real
+// short-lived process's own now-exited pid, same honesty requirement as the in-process
+// dead-pid test above) and races two forked OS processes to reclaim it, reusing the same
+// fork mechanics test/turn-lock-concurrency.test.js established: execArgv: [] so neither
+// child inherits node --test's own flags and gets relaunched under the test runner's IPC
+// protocol, a two-phase ready/go handshake so both attempts land as close together as the
+// platform allows, and the winner releasing before it reports its result so the parent's
+// message receipt is a valid happens-after guarantee that the release already ran.
+test('two forked processes racing to reclaim the same stale lock produce exactly one winner', async () => {
+  const sessionId = uniqueSessionId('cross-process-reclaim');
+  const lockPath = turnLockPathFor(sessionId);
+  const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vbtest-lock-reclaim-fork-'));
+  const scriptPath = path.join(scriptDir, 'reclaim-race-child.mjs');
+  const lockModuleUrl = new URL('../packages/shared/session/turn-lock.js', import.meta.url).href;
+
+  // A real, now-exited process's own pid — an invented number could belong to a live,
+  // unrelated process on this host and would make isTurnLockStale (and therefore this whole
+  // test) assert the opposite of what it claims.
+  const finished = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+  assert.ok(finished.pid > 0, 'expected the short-lived process to report a real pid');
+  fs.mkdirSync(lockPath, { recursive: true });
+  fs.writeFileSync(
+    path.join(lockPath, 'holder.json'),
+    JSON.stringify({ pid: finished.pid, acquiredAt: new Date().toISOString(), sessionId, token: 'stale-token' }),
+    'utf8',
+  );
+  assert.equal(isTurnLockStale(sessionId), true, 'sanity: the seeded lock must actually be stale before racing it');
+
+  const childScript = `
+import { acquireTurnLock, releaseTurnLock } from ${JSON.stringify(lockModuleUrl)};
+
+process.once('message', (msg) => {
+  if (msg !== 'go') return;
+  let acquired = false;
+  let errorMessage = null;
+  try {
+    acquired = acquireTurnLock(${JSON.stringify(sessionId)});
+  } catch (err) {
+    errorMessage = err.message;
+  }
+  if (acquired) {
+    releaseTurnLock(${JSON.stringify(sessionId)});
+  }
+  process.send({ acquired, errorMessage });
+  process.exit(0);
+});
+
+process.send('ready');
+`;
+  fs.writeFileSync(scriptPath, childScript, 'utf8');
+
+  const forkOptions = { stdio: 'ignore', execArgv: [] };
+  const children = [];
+  try {
+    children.push(fork(scriptPath, [], forkOptions), fork(scriptPath, [], forkOptions));
+
+    await Promise.all(
+      children.map(
+        (child) =>
+          new Promise((resolve, reject) => {
+            child.once('message', (msg) => {
+              if (msg === 'ready') resolve();
+              else reject(new Error(`unexpected first message from child: ${JSON.stringify(msg)}`));
+            });
+            child.once('error', reject);
+          }),
+      ),
+    );
+
+    const results = await Promise.all(
+      children.map(
+        (child) =>
+          new Promise((resolve, reject) => {
+            child.once('message', resolve);
+            child.once('error', reject);
+            child.send('go');
+          }),
+      ),
+    );
+
+    const successes = results.filter((r) => r.acquired === true);
+    const failures = results.filter((r) => r.acquired === false);
+
+    // If two racing reclaimers can both come away believing they hold the lock, this is
+    // exactly the mutual-exclusion break CR-01 describes — must never be weakened to pass.
+    assert.equal(successes.length, 1, `expected exactly one reclaim winner, got ${JSON.stringify(results)}`);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].errorMessage, null, 'the losing reclaimer must report a plain refusal, not throw');
+    assert.equal(fs.existsSync(lockPath), false, 'the winner must have released before exiting');
+  } finally {
+    for (const child of children) {
+      child.kill();
+    }
+    fs.rmSync(scriptDir, { recursive: true, force: true });
     fs.rmSync(lockPath, { recursive: true, force: true });
   }
 });

@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 // The same directory packages/shared/adapters/openclaw-cli.js already writes its
 // {sessionId}.json session-state file into — the lock sits at the same level of reality as
@@ -41,6 +42,12 @@ const MISSING_HOLDER_GRACE_MS = 2000;
 // Which session id, if any, this process currently believes it holds — never a bare
 // boolean, so the module can never conflate two different sessions' turns.
 let heldSessionId = null;
+
+// The opaque token this process wrote into holder.json when it acquired heldSessionId.
+// releaseTurnLock reads holder.json back and only removes the on-disk artifact when this
+// token still matches — proving the artifact on disk is still the one this process created,
+// not one a later reclaimer or a fresh acquirer has since replaced it with (CR-02).
+let heldToken = null;
 
 function assertValidSessionId(sessionId) {
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -138,6 +145,20 @@ export function isTurnLockStale(sessionId) {
 // the determinism plan 02-02's concurrency test depends on. Reclaim, when the contended
 // lock is stale, is itself a single attempt — if that attempt loses to another process that
 // reclaimed first, this reports busy rather than trying again (RQ-2).
+//
+// The reclaim step (CR-01) does not `rmSync` the existing directory in place — two
+// processes independently observing the same stale lock could both win that sequence, since
+// `rmSync`+`mkdirSync` are two unrelated syscalls with nothing atomic between them. Instead
+// the reclaimer *steals* the stale directory with a single `fs.renameSync(lockPath,
+// scratchPath)`, where `scratchPath` is unique to this attempt. POSIX rename is atomic with
+// respect to its source path: exactly one process's rename of a given source can succeed:
+// once it does, that path no longer exists, and every other process's identical rename call
+// throws ENOENT. A losing reclaimer therefore has no directory to remove and no directory to
+// recreate — it reports busy immediately, precisely the "single attempt, no retry" contract.
+// The winner alone now owns `scratchPath` (no other process ever learns its name), discards
+// it, and then makes one single further `mkdirSync(lockPath)` attempt to (re)establish the
+// lock — itself subject to losing to a third, unrelated fresh acquirer that raced into the
+// same brief window, which is reported as busy exactly like any other contention.
 export function acquireTurnLock(sessionId) {
   assertValidSessionId(sessionId);
 
@@ -160,10 +181,19 @@ export function acquireTurnLock(sessionId) {
     if (!isTurnLockStale(sessionId)) {
       return false;
     }
-    // Single reclaim attempt: remove the stale artifact and recreate it. If this loses to
-    // another process that reclaimed first, report busy — no retry, no poll.
+    // Single reclaim attempt: atomically steal the stale directory via rename (see the
+    // block comment above), then make one further mkdirSync attempt to recreate it. Either
+    // step losing — the rename because another reclaimer stole it first, or the mkdirSync
+    // because a third acquirer claimed the path in the gap — reports busy. No retry, no
+    // poll, no second attempt at either step.
+    const scratchPath = `${lockPath}.reclaim-${randomUUID()}`;
     try {
-      fs.rmSync(lockPath, { recursive: true, force: true });
+      fs.renameSync(lockPath, scratchPath);
+    } catch {
+      return false;
+    }
+    fs.rmSync(scratchPath, { recursive: true, force: true });
+    try {
       fs.mkdirSync(lockPath);
     } catch {
       return false;
@@ -172,25 +202,53 @@ export function acquireTurnLock(sessionId) {
 
   // Written after the directory create succeeds, so a crash between the two leaves a lock
   // directory with no holder.json — the case isTurnLockStale reasons about above (treated
-  // as reclaimable once old enough, not as held).
+  // as reclaimable once old enough, not as held). token is this process's own proof of
+  // ownership, checked back by releaseTurnLock (CR-02) so a release can never remove a lock
+  // a later acquirer has since replaced.
+  const token = randomUUID();
   fs.writeFileSync(
     path.join(lockPath, 'holder.json'),
-    JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), sessionId }),
+    JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), sessionId, token }),
     'utf8',
   );
 
   heldSessionId = sessionId;
+  heldToken = token;
   return true;
 }
 
-// Release clears the in-process holder first, then removes the artifact inside a
-// try/catch that swallows — this runs in runTurn's outer finally and must never be the
-// thing that throws.
+// Release only ever acts on the lock this process itself believes it holds (CR-02). A call
+// naming a different sessionId than heldSessionId is a documented no-op — it touches neither
+// the in-process holder nor any filesystem artifact, so it can never clear the in-process
+// fast path for whatever this process actually holds and can never remove a different,
+// currently-live session's lock. Even when sessionId matches, the on-disk holder.json is
+// read back and compared by token before anything is removed: if it no longer matches (this
+// process's own lock was reclaimed as stale by someone else while a slow turn was still
+// in-flight, or has already been released), the artifact on disk now belongs to a different
+// acquirer and must not be touched. The in-process state is cleared either way, because this
+// process's own belief that it holds sessionId ends here regardless of what disk agrees
+// with. Every filesystem operation runs inside a try/catch that swallows — this executes
+// from runTurn's outer finally and must never be the thing that throws.
 export function releaseTurnLock(sessionId) {
   assertValidSessionId(sessionId);
+
+  if (sessionId !== heldSessionId || heldToken === null) {
+    return;
+  }
+
+  const lockPath = turnLockPathFor(sessionId);
+  const onDiskHolder = readHolderMetadata(lockPath);
+  const stillOwnedByUs = onDiskHolder !== null && onDiskHolder.token === heldToken;
+
   heldSessionId = null;
+  heldToken = null;
+
+  if (!stillOwnedByUs) {
+    return;
+  }
+
   try {
-    fs.rmSync(turnLockPathFor(sessionId), { recursive: true, force: true });
+    fs.rmSync(lockPath, { recursive: true, force: true });
   } catch {
     // Swallow — release must never throw.
   }

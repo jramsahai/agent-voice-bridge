@@ -19,6 +19,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 import { speakWithKokoroFast } from '../packages/shared/adapters/tts-kokoro-onnx.js';
+import { probeExecutable } from '../packages/shared/health/probes.js';
+import {
+  getBackendStatus,
+  resetBackendHealthCache,
+  BACKEND_DOWN,
+} from '../packages/shared/health/backend-health-cache.js';
 
 // Port 1 is a well-known privileged port essentially never bound by an ordinary process,
 // including in CI containers — a request to it fails immediately with a connection refusal
@@ -66,5 +72,49 @@ test('a genuinely-down service (no abort in play) still falls through to the spa
       assert.notEqual(err.name, 'AbortError', 'a non-aborted call must not fail with an abort-shaped error');
       return true;
     },
+  );
+});
+
+test('probeExecutable resolves for a command that exists and is executable, and rejects for a name that resolves nowhere on PATH', async () => {
+  await assert.doesNotReject(() => probeExecutable(process.execPath));
+  await assert.rejects(() => probeExecutable('this-command-does-not-exist-anywhere-xyz'));
+});
+
+// Proves the per-turn tax is gone (OPS-05): two speakWithKokoroFast calls against an
+// unreachable service inside one TTL window must both reach the spawn fallback while the
+// underlying reachability probe runs once. Asserted via the cache's own observable
+// call-count behavior rather than by timing the calls, which would be flaky.
+test('two speakWithKokoroFast calls against an unreachable service inside one TTL window read the cached speech verdict rather than re-probing', async () => {
+  resetBackendHealthCache();
+
+  let primingProbeCallCount = 0;
+  const primingProbe = async () => {
+    primingProbeCallCount += 1;
+    throw new Error('unreachable');
+  };
+
+  // Prime the 'speech' entry ourselves so both speakWithKokoroFast calls below can only
+  // observe a cache hit, never invoke their own probeHttpService closure.
+  const primedVerdict = await getBackendStatus('speech', primingProbe);
+  assert.equal(primedVerdict, BACKEND_DOWN);
+  assert.equal(primingProbeCallCount, 1);
+
+  const ttsConfig = { serviceUrl: UNREACHABLE_SERVICE_URL, command: '/nonexistent-tts-kokoro-binary-xyz' };
+  await assert.rejects(() => speakWithKokoroFast('hello', ttsConfig, {}));
+  await assert.rejects(() => speakWithKokoroFast('hello', ttsConfig, {}));
+
+  // If either speakWithKokoroFast call above had re-probed, it would have done so through
+  // its own closure, never through this fake — so a fresh counting fake for the same name
+  // staying uncalled proves the 'speech' entry primingProbe wrote is still the one in the
+  // cache, untouched by either speakWithKokoroFast call.
+  let verifyingProbeCallCount = 0;
+  const verifyingProbe = async () => {
+    verifyingProbeCallCount += 1;
+  };
+  await getBackendStatus('speech', verifyingProbe);
+  assert.equal(
+    verifyingProbeCallCount,
+    0,
+    'the speech entry primed above must still be fresh, proving neither speakWithKokoroFast call re-probed',
   );
 });

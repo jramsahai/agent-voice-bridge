@@ -3,6 +3,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { withTempDir } from '../lifecycle/tempfiles.js';
+import { getBackendStatus, BACKEND_UP } from '../health/backend-health-cache.js';
+import { probeHttpService } from '../health/probes.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -21,27 +23,6 @@ export function composeAbortSignals(...signals) {
   if (present.length === 0) return undefined;
   if (present.length === 1) return present[0];
   return AbortSignal.any(present);
-}
-
-/**
- * Check if the Kokoro FastAPI service is available.
- */
-async function isFastApiAvailable(serviceUrl, { signal } = {}) {
-  try {
-    const res = await fetch(`${serviceUrl}/health`, {
-      signal: composeAbortSignals(signal, AbortSignal.timeout(2000)),
-    });
-    return res.ok;
-  } catch (err) {
-    // A genuinely-down service and the 2-second health timeout both collapse to "not
-    // available" — the caller falls through to the heavier spawn path either way. The
-    // caller's own turn-level abort is different: it must propagate so speakWithKokoroFast's
-    // caller (runStage in turn-pipeline.js) can normalize it to TurnAbortedError, instead of
-    // this probe silently reporting "down" and speakWithKokoroFast spawning a whole new
-    // temp directory and child process for a caller that has already vanished.
-    if (signal?.aborted) throw err;
-    return false;
-  }
 }
 
 /**
@@ -121,11 +102,33 @@ async function speakWithKokoroOnnx(text, ttsConfig, { signal } = {}) {
   });
 }
 
+// Reasserted here because getBackendStatus resolves rather than rejects by contract — it
+// swallows every probe failure, including one caused by this call's own signal, into
+// BACKEND_DOWN. A caller that has already vanished must not be reported as a down backend
+// and then charged for a fallback spawn (WR-03), so this check runs both immediately before
+// the cache call (an aborted caller must never write a bogus down verdict into a window
+// every other caller shares) and again immediately after (covering a signal that fires
+// mid-probe).
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const err = new Error('The turn was aborted before it could complete.');
+  err.name = 'AbortError';
+  throw err;
+}
+
 export async function speakWithKokoroFast(text, ttsConfig, { signal } = {}) {
-  // Prefer FastAPI if available, fall back to spawn
   const serviceUrl = getKokoroServiceUrl(ttsConfig);
-  const fastApiUp = await isFastApiAvailable(serviceUrl, { signal });
-  if (fastApiUp) {
+
+  throwIfAborted(signal);
+  // The single reachability-probe path in the codebase, cached: a downed backend now costs
+  // one probe per PROBE_TTL_MS window shared across every caller, not one per turn (OPS-05).
+  // A verdict cached from a probe that was cut short by a mid-flight abort self-heals at the
+  // end of its own window — the next caller inside a fresh window re-probes for real, so no
+  // special case is needed here beyond the recheck below.
+  const verdict = await getBackendStatus('speech', () => probeHttpService(serviceUrl, { signal }));
+  throwIfAborted(signal);
+
+  if (verdict === BACKEND_UP) {
     return speakWithFastApi(text, ttsConfig, { signal });
   }
   return speakWithKokoroOnnx(text, ttsConfig, { signal });

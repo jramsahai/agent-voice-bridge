@@ -14,7 +14,8 @@ import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
 import { buildTurnResponseHead, MAX_REQUEST_AUDIO_BYTES } from '../packages/shared/transport/turn-response.js';
 import { defaultOutputFormatId } from '../packages/shared/transport/negotiate.js';
 import { wavToPcm } from '../packages/shared/audio/wav.js';
-import { makePcm16, makeCanonicalWav } from './helpers/fixtures.js';
+import { prepareClientOutput } from '../packages/shared/audio/convert.js';
+import { makePcm16, makeCanonicalWav, makeStereoWav } from './helpers/fixtures.js';
 
 function uniqueSessionId(label) {
   return `http-turn-test-${label}-${randomUUID()}`;
@@ -860,6 +861,71 @@ test('wire hygiene: a 415 response carries no cookie, no redirect status, no com
     });
     assert.equal(response.statusCode, 415);
     assertWireHygiene(response);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// =====================================================================================
+// Plan 03-06: pin the adapter-to-transport contract — every real speech path now returns
+// a WAV buffer, and prepareClientOutput() must accept it. Asserted from both the passing
+// side (matching shape, differing shape) and the failing side (a non-RIFF buffer, the
+// regression this whole plan exists to remove), plus a re-assertion that D-01's 415 for a
+// container-format reply request is unchanged.
+// =====================================================================================
+
+test('prepareClientOutput accepts a WAV already at the pcm16 registry shape with no subprocess spawned', async () => {
+  const pcm = makePcm16({ samples: 100 });
+  const result = await prepareClientOutput(makeCanonicalWav({ pcm }), 'pcm16');
+  assert.equal(result.meta.spawned, false);
+  assert.deepEqual(result.buffer, pcm);
+});
+
+test('prepareClientOutput resamples a differently-shaped WAV rather than rejecting it', async () => {
+  const pcm = makePcm16({ samples: 100 });
+  const result = await prepareClientOutput(makeStereoWav({ pcm }), 'pcm16');
+  assert.equal(result.meta.converted, true);
+  assert.ok(result.buffer.length > 0);
+});
+
+test('prepareClientOutput throws AUDIO_MALFORMED for a non-RIFF buffer — the regression this plan removes, asserted from the failing side', async () => {
+  await assert.rejects(
+    () => prepareClientOutput(Buffer.from('not-a-riff-container'), 'pcm16'),
+    (err) => {
+      assert.equal(err.code, 'AUDIO_MALFORMED');
+      return true;
+    },
+  );
+});
+
+test('prepareClientOutput still resolves the 415 FMT_UNSUPPORTED envelope for a container-format reply request — D-01 unchanged by this plan', async () => {
+  const pcm = makePcm16({ samples: 100 });
+  const result = await prepareClientOutput(makeCanonicalWav({ pcm }), 'wav');
+  assert.equal(result.error.status, 415);
+  assert.equal(result.error.headers['X-Error-Code'], 'FMT_UNSUPPORTED');
+});
+
+test('a full POST /v1/turn whose fake speak adapter returns exactly what the rewritten real adapters now return (a WAV buffer, audio/wav) yields a byte-identical audio segment', async () => {
+  const pcm = makePcm16({ samples: 200 });
+  const replyWav = makeCanonicalWav({ pcm });
+  const fakeTranscript = 'hello';
+  const fakeReply = 'hi there';
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => ({ text: fakeTranscript, meta: {} }),
+    agent: async () => ({ text: fakeReply, rawText: fakeReply, meta: {} }),
+    speak: async () => ({ audioBuffer: replyWav, mimeType: 'audio/wav', meta: {} }),
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    assert.equal(response.statusCode, 200);
+    const transcriptBytes = Number(response.headers['x-voice-transcript-bytes']);
+    const replyBytes = Number(response.headers['x-voice-reply-bytes']);
+    const audioSegment = response.body.subarray(transcriptBytes + replyBytes);
+    assert.deepEqual(audioSegment, wavToPcm(replyWav));
   } finally {
     await closeServer(server);
   }

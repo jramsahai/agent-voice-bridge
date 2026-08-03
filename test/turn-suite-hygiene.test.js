@@ -88,7 +88,10 @@ const PHASE_TEST_FILES = fs
 // silently reintroduce this guard's own flag against that file's real socket). Only the
 // three socket-related substrings below are exempted; the secure-transport builtin pattern
 // and the models-directory pattern stay enforced for every file, including this one.
-const HTTP_SOCKET_EXEMPT_FILES = new Set([path.join(TEST_DIR, 'http-turn.test.js')]);
+const HTTP_SOCKET_EXEMPT_FILES = new Set([
+  path.join(TEST_DIR, 'http-turn.test.js'),
+  path.join(TEST_DIR, 'http-capabilities.test.js'),
+]);
 const HTTP_SOCKET_EXEMPT_PATTERNS = [
   ['node', ':', 'net'].join(''),
   ['node', ':', 'http'].join(''),

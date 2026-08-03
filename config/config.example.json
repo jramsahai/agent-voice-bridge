@@ -16,7 +16,8 @@
     "provider": "kokoro-onnx",
     "command": "tts-kokoro",
     "serviceUrl": "http://127.0.0.1:4319",
-    "voice": "af_heart"
+    "voice": "af_heart",
+    "voices": ["af_heart"]
   },
   "security": {
     "token": "replace-with-a-shared-secret",

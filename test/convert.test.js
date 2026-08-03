@@ -317,7 +317,10 @@ test('several conversions launched concurrently all succeed and leave no temp re
 // offline-scan guards to trip on that file's real HTTP-server-builtin import), only the
 // three socket-related substrings below are exempted for it. The models-directory pattern
 // and the secure-transport builtin pattern stay enforced for every file, including this one.
-const HTTP_SOCKET_EXEMPT_FILES = new Set([path.join(repoRoot, 'test', 'http-turn.test.js')]);
+const HTTP_SOCKET_EXEMPT_FILES = new Set([
+  path.join(repoRoot, 'test', 'http-turn.test.js'),
+  path.join(repoRoot, 'test', 'http-capabilities.test.js'),
+]);
 
 test('no source file this phase created references a network client, a fetch call, or a models directory', () => {
   const scanDirs = [

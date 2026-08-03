@@ -4,12 +4,23 @@ import { timingSafeEqual } from 'node:crypto';
 
 import { runTurn } from '../../packages/shared/pipeline/turn-pipeline.js';
 import { prepareTranscriptionInput, prepareClientOutput } from '../../packages/shared/audio/convert.js';
-import { negotiate } from '../../packages/shared/transport/negotiate.js';
+import {
+  negotiate,
+  listReplyFormats,
+  defaultOutputFormatId,
+  INPUT_FORMAT_HEADER,
+  OUTPUT_FORMAT_HEADER,
+  WANT_AUDIO_HEADER,
+} from '../../packages/shared/transport/negotiate.js';
 import {
   buildTurnResponseHead,
   buildErrorResponseHead,
   MAX_REQUEST_AUDIO_BYTES,
+  API_VERSION,
+  TRANSCRIPT_BYTES_HEADER,
+  REPLY_BYTES_HEADER,
 } from '../../packages/shared/transport/turn-response.js';
+import { listSupportedFormats } from '../../packages/shared/audio/format-registry.js';
 import { buildError } from '../../packages/shared/errors/error-response.js';
 import { isKnownErrorCode } from '../../packages/shared/errors/error-codes.js';
 
@@ -21,6 +32,35 @@ function sendErrorHead(res, envelope) {
   const head = buildErrorResponseHead(envelope);
   res.writeHead(head.status, head.headers);
   res.end(head.bodyBuffer);
+}
+
+// Line-based body renderer for GET /v1/capabilities and GET /v1/health (D-02, locked): one
+// `key: value` line per pair, UTF-8, no JSON — a client with no JSON parser needs nothing
+// beyond splitting on the newline and then on the first ': '. A real Content-Length is set
+// because unlike the turn response this body is short, fully known upfront, and never
+// streamed.
+function sendLinesBody(res, status, headers, pairs) {
+  const bodyText = pairs.map(([key, value]) => `${key}: ${value}`).join('\n') + '\n';
+  const bodyBuffer = Buffer.from(bodyText, 'utf8');
+  res.writeHead(status, {
+    ...headers,
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-transform',
+    'X-API-Version': API_VERSION,
+    'Content-Length': String(bodyBuffer.length),
+  });
+  res.end(bodyBuffer);
+}
+
+// The two discovery GET routes' own rejection renderer — the same buildError() envelope
+// every other route uses, rendered as `error-code`/`error-message` lines instead of the
+// turn route's JSON body, so all three routes report one machine-readable X-Error-Code
+// while each route's body shape matches its own declared content type.
+function sendLineErrorHead(res, envelope) {
+  sendLinesBody(res, envelope.status, envelope.headers, [
+    ['error-code', envelope.headers['X-Error-Code']],
+    ['error-message', envelope.body.error.message],
+  ]);
 }
 
 function sendFile(res, filePath, contentType) {
@@ -74,7 +114,10 @@ export function createRequestHandler({ config, adapters, webDir }) {
     return true;
   }
 
-  function validateRequest(req, res) {
+  // `sendError` lets a caller swap the rejection renderer without duplicating the gate
+  // itself — GET /v1/capabilities and GET /v1/health pass sendLineErrorHead so a rejection
+  // from this same gate still matches each route's own line-based content type.
+  function validateRequest(req, res, sendError = sendErrorHead) {
     const origin = req.headers.origin;
     const host = req.headers.host;
     const authHeader = req.headers.authorization || '';
@@ -84,19 +127,19 @@ export function createRequestHandler({ config, adapters, webDir }) {
     // same fixed title (T-3-16): telling a caller which of the two checks it failed tells an
     // attacker how to fix its request.
     if (expectedHost && host !== expectedHost) {
-      sendErrorHead(res, buildError('FORBIDDEN'));
+      sendError(res, buildError('FORBIDDEN'));
       return false;
     }
     if (allowedOrigins.size && origin && !allowedOrigins.has(origin)) {
-      sendErrorHead(res, buildError('FORBIDDEN'));
+      sendError(res, buildError('FORBIDDEN'));
       return false;
     }
     if (!isAuthorizedToken(bearerToken)) {
-      sendErrorHead(res, buildError('UNAUTHORIZED'));
+      sendError(res, buildError('UNAUTHORIZED'));
       return false;
     }
     if (!checkRateLimit(req)) {
-      sendErrorHead(res, buildError('RATE_LIMITED'));
+      sendError(res, buildError('RATE_LIMITED'));
       return false;
     }
     return true;
@@ -281,6 +324,29 @@ export function createRequestHandler({ config, adapters, webDir }) {
     res.end();
   }
 
+  // GET /v1/capabilities — the whole turn vocabulary, discoverable as text before a
+  // client's first turn. Every value is read from an existing exported constant or derived
+  // from the registry (listSupportedFormats()/listReplyFormats()/defaultOutputFormatId()),
+  // never re-spelled as a literal — the body cannot drift from what the service actually
+  // supports because it is derived from the same source the transport itself reads.
+  // Served without acquiring the shared turn lock: this route never calls runTurn().
+  function handleCapabilities(req, res) {
+    const voices = config.tts?.voices ?? [config.tts?.voice];
+    sendLinesBody(res, 200, {}, [
+      ['api-version', API_VERSION],
+      ['input-formats', listSupportedFormats().join(',')],
+      ['reply-formats', listReplyFormats().join(',')],
+      ['default-reply-format', defaultOutputFormatId()],
+      ['voices', voices.join(',')],
+      ['max-audio-bytes', String(MAX_REQUEST_AUDIO_BYTES)],
+      ['input-format-header', INPUT_FORMAT_HEADER],
+      ['output-format-header', OUTPUT_FORMAT_HEADER],
+      ['want-audio-header', WANT_AUDIO_HEADER],
+      ['transcript-bytes-header', TRANSCRIPT_BYTES_HEADER],
+      ['reply-bytes-header', REPLY_BYTES_HEADER],
+    ]);
+  }
+
   return async function requestHandler(req, res) {
     try {
       if (req.method === 'GET' && req.url === '/') {
@@ -292,6 +358,10 @@ export function createRequestHandler({ config, adapters, webDir }) {
       if (req.method === 'POST' && req.url === '/v1/turn') {
         if (!validateRequest(req, res)) return;
         return await handleTurn(req, res);
+      }
+      if (req.method === 'GET' && req.url === '/v1/capabilities') {
+        if (!validateRequest(req, res, sendLineErrorHead)) return;
+        return handleCapabilities(req, res);
       }
       return sendErrorHead(res, buildError('NOT_FOUND'));
     } catch (error) {

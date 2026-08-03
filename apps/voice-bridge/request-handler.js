@@ -449,17 +449,27 @@ export function createRequestHandler({ config, adapters, webDir }) {
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : null;
 
-      if (code === 'TURN_ABORTED') {
-        // Nothing is listening on the other end of an aborted turn by definition. The 499
-        // status is only writable when nothing has reached the wire yet — if headers are
-        // already sent (the text preamble was already flushed before the client vanished),
-        // a second writeHead() would throw, so log and destroy the response instead.
-        if (!res.headersSent) {
-          return sendErrorHead(res, buildError('TURN_ABORTED'));
-        }
-        console.error('[voice-bridge] turn aborted after headers were already sent', error);
-        res.destroy();
+      // CR-01: the text preamble may already be on the wire (writeHead already called in
+      // handleTurn's early-flush branch) by the time ANY error reaches here — not just
+      // TURN_ABORTED. There is no fresh status line left to report through once that
+      // happens, and a second writeHead() throws ERR_HTTP_HEADERS_SENT, which — uncaught
+      // here — becomes an unhandled rejection that crashes the whole process under Node
+      // 20's default unhandled-rejections behavior, taking every other in-flight turn down
+      // with it. Guard every code, not just the abort path, and tear the connection down
+      // instead of attempting a second writeHead.
+      if (res.headersSent) {
+        console.error(
+          code === 'TURN_ABORTED'
+            ? '[voice-bridge] turn aborted after headers were already sent'
+            : '[voice-bridge] request failed after headers were already sent',
+          error,
+        );
+        if (!res.writableEnded) res.destroy();
         return;
+      }
+
+      if (code === 'TURN_ABORTED') {
+        return sendErrorHead(res, buildError('TURN_ABORTED'));
       }
 
       // TURN_BUSY (from turn-errors.js) and AUDIO_MALFORMED/AUDIO_TOO_LARGE/

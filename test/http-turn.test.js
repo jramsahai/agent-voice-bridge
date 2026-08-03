@@ -930,3 +930,95 @@ test('a full POST /v1/turn whose fake speak adapter returns exactly what the rew
     await closeServer(server);
   }
 });
+
+// =====================================================================================
+// 03-REVIEW.md CR-01/CR-02 regression coverage: both findings describe a process crash,
+// not a wrong response — the fix must keep the server (and every other in-flight turn)
+// alive, not just return a nicer status code. Each test below proves survival by making a
+// second, ordinary request against the same server immediately after the crash-inducing
+// one.
+// =====================================================================================
+
+test('CR-01 regression: a corrupt speech buffer thrown as AUDIO_MALFORMED after headers were already flushed truncates the response instead of crashing the process', async () => {
+  const fakeTranscript = 'hello';
+  const fakeReply = 'ok then';
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => ({ text: fakeTranscript, meta: {} }),
+    agent: async () => ({ text: fakeReply, rawText: fakeReply, meta: {} }),
+    // Not a RIFF container — prepareClientOutput() throws AUDIO_MALFORMED for this. By the
+    // time this resolves, the transcript/reply preamble is already flushed (writeHead + two
+    // writes already on the wire), which is exactly the post-headers-sent throw CR-01
+    // describes.
+    speak: async () => ({ audioBuffer: Buffer.from('not-a-riff-container'), mimeType: 'audio/wav', meta: {} }),
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const body = makePcm16({ samples: 10 });
+
+    // The server destroying the response mid-stream (post-fix behavior) surfaces to this
+    // client as a socket reset rather than a clean 'end' — on either the response object or
+    // the request object, depending on timing. Neither is a test failure: both are resolved
+    // to whatever partial data arrived, since the point of this test is that the process
+    // survives, not that the client sees a graceful close.
+    const response = await new Promise((resolve) => {
+      const chunks = [];
+      const result = { statusCode: null, headers: {} };
+      const finish = () => resolve({ ...result, body: Buffer.concat(chunks) });
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: '/v1/turn',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': body.length,
+            'X-Voice-Input-Format': 'pcm16',
+          },
+        },
+        (res) => {
+          result.statusCode = res.statusCode;
+          result.headers = res.headers;
+          res.on('data', (chunk) => chunks.push(chunk));
+          res.on('end', finish);
+          res.on('error', finish);
+        },
+      );
+      req.on('error', finish);
+      req.write(body);
+      req.end();
+    });
+
+    // With fake adapters resolving synchronously, the writeHead/write/destroy sequence all
+    // happens within one tick, faster than the loopback socket flushes — so the client may
+    // see the connection reset before its HTTP parser ever completes a status line (a bare
+    // ECONNRESET, statusCode still null) rather than a parsed 200 followed by a truncated
+    // body. Both are proof the fix never attempted a second writeHead: if it had, Node
+    // would have thrown ERR_HTTP_HEADERS_SENT server-side regardless of what the client
+    // observed. When a status line %does% get through, it must be the original 200 — never
+    // a second, different status.
+    if (response.statusCode !== null) {
+      assert.equal(response.statusCode, 200);
+      const transcriptBytes = Number(response.headers['x-voice-transcript-bytes']);
+      const replyBytes = Number(response.headers['x-voice-reply-bytes']);
+      // No audio bytes were ever written once the throw happened — the body ends at or
+      // before the reply segment boundary, never carrying a bogus audio segment.
+      assert.ok(response.body.length <= transcriptBytes + replyBytes);
+    }
+
+    // The real assertion: the server process is still alive. If the pre-fix bug had fired
+    // (ERR_HTTP_HEADERS_SENT as an unhandled rejection), Node's default
+    // --unhandled-rejections=throw would have already killed the process, and this
+    // follow-up request would never complete.
+    const followUp = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'pcm16', 'X-Voice-Want-Audio': '0' },
+    });
+    assert.equal(followUp.statusCode, 200);
+  } finally {
+    await closeServer(server);
+  }
+});

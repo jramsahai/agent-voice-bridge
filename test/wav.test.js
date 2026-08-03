@@ -1,9 +1,9 @@
 // Codec-free WAV framing: RIFF chunk walker, headerless PCM extraction, fmt chunk reader.
 // Every assertion here targets pure buffer math — no subprocess, no filesystem.
 
-import { test, mock } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import childProcess from 'node:child_process';
+import fs from 'node:fs';
 
 import { ERROR_CODES } from '../packages/shared/errors/error-codes.js';
 import { findDataChunk, wavToPcm, readWavFormat, pcmToWav, MAX_PCM_BYTES } from '../packages/shared/audio/wav.js';
@@ -189,60 +189,60 @@ test('pcmToWav succeeds for an empty buffer, producing a 44-byte WAV with data s
 
 // --- Passthrough fidelity: nothing is silently altered ---
 //
-// One test, one execFile/spawn stub-and-restore scope, matching the convention already
-// established in test/format-contract.test.js — a codec invocation anywhere in this group
-// fails the suite immediately rather than letting the round trip pass by accident.
+// wav.js is pure buffer math (see the file-level comment above) and never imports
+// node:child_process at all, so a mock.method(childProcess, 'execFile', ...) guard here
+// would protect nothing real even if it worked — and post-import mock.method patches can't
+// intercept a promisify(execFile) captured at module-load time regardless (see REVIEW.md
+// WR-06). The source-scan test below is a reliable, timing-independent proof that this
+// module structurally cannot spawn a subprocess.
 
-test('codec-free path is byte-faithful in both directions and touches no subprocess', () => {
-  const execFileMock = mock.method(childProcess, 'execFile', () => {
-    throw new Error('execFile must not be called');
-  });
-  const spawnMock = mock.method(childProcess, 'spawn', () => {
-    throw new Error('spawn must not be called');
-  });
-  try {
-    // Bitwise fidelity across empty, minimal, and realistic pcm byte lengths.
-    const byteLengths = [0, 2, 4, 1000, 32000];
-    for (const length of byteLengths) {
-      const pcm = length === 0 ? Buffer.alloc(0) : makePcm16({ samples: length / 2 });
-      const roundTripped = wavToPcm(pcmToWav(pcm));
-      assert.deepEqual(roundTripped, pcm, `round trip mismatch at ${length} pcm bytes`);
-    }
+test('wav.js source never imports child_process or references execFile/spawn', () => {
+  const wavSourceUrl = new URL('../packages/shared/audio/wav.js', import.meta.url);
+  const source = fs.readFileSync(wavSourceUrl, 'utf8');
+  assert.ok(!source.includes('child_process'), 'wav.js must not import child_process');
+  assert.ok(!source.includes('execFile'), 'wav.js must not reference execFile');
+  assert.ok(!source.includes('spawn'), 'wav.js must not reference spawn');
+});
 
-    // Deliberately negative first sample, positive last sample: a sign-handling defect
-    // (e.g. writing/reading as unsigned) would corrupt one or both.
-    const pcm = Buffer.alloc(4);
-    pcm.writeInt16LE(-12345, 0);
-    pcm.writeInt16LE(6789, 2);
+test('codec-free path is byte-faithful in both directions', () => {
+  // Bitwise fidelity across empty, minimal, and realistic pcm byte lengths.
+  const byteLengths = [0, 2, 4, 1000, 32000];
+  for (const length of byteLengths) {
+    const pcm = length === 0 ? Buffer.alloc(0) : makePcm16({ samples: length / 2 });
     const roundTripped = wavToPcm(pcmToWav(pcm));
-    assert.equal(roundTripped.readInt16LE(0), -12345);
-    assert.equal(roundTripped.readInt16LE(2), 6789);
+    assert.deepEqual(roundTripped, pcm, `round trip mismatch at ${length} pcm bytes`);
+  }
 
-    // Neither direction mutates its input.
-    const original = makePcm16({ samples: 100 });
-    const originalCopy = Buffer.from(original);
-    pcmToWav(original);
-    assert.deepEqual(original, originalCopy, 'pcmToWav must not mutate its input');
+  // Deliberately negative first sample, positive last sample: a sign-handling defect
+  // (e.g. writing/reading as unsigned) would corrupt one or both.
+  const pcm = Buffer.alloc(4);
+  pcm.writeInt16LE(-12345, 0);
+  pcm.writeInt16LE(6789, 2);
+  const roundTripped = wavToPcm(pcmToWav(pcm));
+  assert.equal(roundTripped.readInt16LE(0), -12345);
+  assert.equal(roundTripped.readInt16LE(2), 6789);
 
-    const wav = makeCanonicalWav({ pcm: makePcm16({ samples: 100 }) });
-    const wavCopy = Buffer.from(wav);
-    wavToPcm(wav);
-    assert.deepEqual(wav, wavCopy, 'wavToPcm must not mutate its input');
+  // Neither direction mutates its input.
+  const original = makePcm16({ samples: 100 });
+  const originalCopy = Buffer.from(original);
+  pcmToWav(original);
+  assert.deepEqual(original, originalCopy, 'pcmToWav must not mutate its input');
 
-    // Header honesty: the writer records what the caller declared, not whisper defaults.
-    const declaredPcm = makePcm16({ samples: 1000 });
-    const declaredWav = pcmToWav(declaredPcm, { sampleRate: 8000, channels: 2, bitDepth: 16 });
-    assert.deepEqual(readWavFormat(declaredWav), { sampleRate: 8000, channels: 2, bitDepth: 16 });
+  const wav = makeCanonicalWav({ pcm: makePcm16({ samples: 100 }) });
+  const wavCopy = Buffer.from(wav);
+  wavToPcm(wav);
+  assert.deepEqual(wav, wavCopy, 'wavToPcm must not mutate its input');
 
-    // Size fields are exact for every length tested above, not merely "close enough".
-    for (const length of byteLengths) {
-      const testPcm = length === 0 ? Buffer.alloc(0) : makePcm16({ samples: length / 2 });
-      const testWav = pcmToWav(testPcm);
-      assert.equal(testWav.readUInt32LE(40), testPcm.length, `data size field at ${length} pcm bytes`);
-      assert.equal(testWav.readUInt32LE(4), 36 + testPcm.length, `RIFF size field at ${length} pcm bytes`);
-    }
-  } finally {
-    execFileMock.mock.restore();
-    spawnMock.mock.restore();
+  // Header honesty: the writer records what the caller declared, not whisper defaults.
+  const declaredPcm = makePcm16({ samples: 1000 });
+  const declaredWav = pcmToWav(declaredPcm, { sampleRate: 8000, channels: 2, bitDepth: 16 });
+  assert.deepEqual(readWavFormat(declaredWav), { sampleRate: 8000, channels: 2, bitDepth: 16 });
+
+  // Size fields are exact for every length tested above, not merely "close enough".
+  for (const length of byteLengths) {
+    const testPcm = length === 0 ? Buffer.alloc(0) : makePcm16({ samples: length / 2 });
+    const testWav = pcmToWav(testPcm);
+    assert.equal(testWav.readUInt32LE(40), testPcm.length, `data size field at ${length} pcm bytes`);
+    assert.equal(testWav.readUInt32LE(4), 36 + testPcm.length, `RIFF size field at ${length} pcm bytes`);
   }
 });

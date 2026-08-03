@@ -2,9 +2,10 @@
 // Every assertion here is written before the modules under test exist (TDD RED), then the
 // four library modules are implemented until this file goes green.
 
-import { test, mock } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import childProcess from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 
 import { ERROR_CODES, isKnownErrorCode } from '../packages/shared/errors/error-codes.js';
 import { buildError, unsupportedFormatError } from '../packages/shared/errors/error-response.js';
@@ -17,6 +18,25 @@ import {
 import { MAX_PCM_BYTES, pcmToWav } from '../packages/shared/audio/wav.js';
 import { prepareTranscriptionInput, prepareClientOutput, toErrorEnvelope } from '../packages/shared/audio/convert.js';
 import { makePcm16, makeCanonicalWav } from './helpers/fixtures.js';
+
+// Read convert.js's own temp-directory prefix from its source text (regex, not a new
+// export), same pattern test/convert.test.js already uses. Asserting that no such temp
+// directory was created is a reliable "no subprocess spawned" signal regardless of when the
+// module was imported — unlike mock.method(childProcess, 'execFile', ...), which cannot
+// intercept convert.js's own promisify(execFile), captured once at module-load time, no
+// matter when the mock is installed (see REVIEW.md WR-06).
+const CONVERT_SOURCE_URL = new URL('../packages/shared/audio/convert.js', import.meta.url);
+const CONVERT_SOURCE = fs.readFileSync(CONVERT_SOURCE_URL, 'utf8');
+
+function readTempDirPrefix() {
+  const match = CONVERT_SOURCE.match(/TEMP_DIR_PREFIX\s*=\s*'([^']+)'/);
+  assert.ok(match, 'convert.js must declare a documented TEMP_DIR_PREFIX constant');
+  return match[1];
+}
+
+function listMatchingTempEntries(prefix) {
+  return fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith(prefix));
+}
 
 // --- Registry ---
 
@@ -129,41 +149,33 @@ test('pcmToWav throws AUDIO_TOO_LARGE above MAX_PCM_BYTES', () => {
 
 test('prepareTranscriptionInput(pcm16) produces a byte-identical WAV with no subprocess spawned', async () => {
   const pcm = makePcm16({ samples: 16000 });
-  const execFileMock = mock.method(childProcess, 'execFile', () => {
-    throw new Error('execFile must not be called');
-  });
-  const spawnMock = mock.method(childProcess, 'spawn', () => {
-    throw new Error('spawn must not be called');
-  });
-  try {
-    const { wavBuffer, meta } = await prepareTranscriptionInput(pcm, 'pcm16');
-    assert.deepEqual(wavBuffer, makeCanonicalWav({ pcm }));
-    assert.equal(meta.converted, false);
-    assert.equal(meta.spawned, false);
-  } finally {
-    execFileMock.mock.restore();
-    spawnMock.mock.restore();
-  }
+  const prefix = readTempDirPrefix();
+  const before = listMatchingTempEntries(prefix);
+  const { wavBuffer, meta } = await prepareTranscriptionInput(pcm, 'pcm16');
+  assert.deepEqual(wavBuffer, makeCanonicalWav({ pcm }));
+  assert.equal(meta.converted, false);
+  assert.equal(meta.spawned, false);
+  assert.deepEqual(
+    listMatchingTempEntries(prefix).sort(),
+    before.sort(),
+    'no convert.js temp directory was created — the codec-free path never reached execFileAsync',
+  );
 });
 
 test('prepareClientOutput(pcm16) extracts byte-identical PCM with no subprocess spawned', async () => {
   const pcm = makePcm16({ samples: 16000 });
   const wav = makeCanonicalWav({ pcm });
-  const execFileMock = mock.method(childProcess, 'execFile', () => {
-    throw new Error('execFile must not be called');
-  });
-  const spawnMock = mock.method(childProcess, 'spawn', () => {
-    throw new Error('spawn must not be called');
-  });
-  try {
-    const { buffer, mimeType, meta } = await prepareClientOutput(wav, 'pcm16');
-    assert.deepEqual(buffer, pcm);
-    assert.equal(mimeType, lookupFormat('pcm16').mimeType);
-    assert.equal(meta.spawned, false);
-  } finally {
-    execFileMock.mock.restore();
-    spawnMock.mock.restore();
-  }
+  const prefix = readTempDirPrefix();
+  const before = listMatchingTempEntries(prefix);
+  const { buffer, mimeType, meta } = await prepareClientOutput(wav, 'pcm16');
+  assert.deepEqual(buffer, pcm);
+  assert.equal(mimeType, lookupFormat('pcm16').mimeType);
+  assert.equal(meta.spawned, false);
+  assert.deepEqual(
+    listMatchingTempEntries(prefix).sort(),
+    before.sort(),
+    'no convert.js temp directory was created — the codec-free path never reached execFileAsync',
+  );
 });
 
 // --- Rejection path ---

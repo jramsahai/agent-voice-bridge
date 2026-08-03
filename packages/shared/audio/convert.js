@@ -141,10 +141,14 @@ export async function convertWavToWhisperWav(wavBuffer, options = {}) {
       await execFileAsync(bin, argv, { timeout, maxBuffer });
       const wavOut = fs.readFileSync(outputPath);
       return { wavBuffer: wavOut };
-    } catch {
+    } catch (err) {
       // The caught error's message, stderr, stdout, the binary path, and the temp path
-      // must never reach the client — only the catalogue's fixed title does. Logging them
-      // is a legitimate future need (Phase 4's structured logging), not this module's job.
+      // must never reach the client — only the catalogue's fixed title does. They are,
+      // however, logged server-side (stderr, per this codebase's console.error convention)
+      // so a non-zero exit, a missing binary, a timeout, and an unrelated fs error are
+      // distinguishable to an operator instead of all collapsing into the same silent
+      // outcome.
+      console.error('[voice-bridge] afconvert conversion failed', err);
       return {
         error: buildError('AUDIO_CONVERSION_FAILED', ERROR_CODES.AUDIO_CONVERSION_FAILED.title, { status: 500 }),
       };

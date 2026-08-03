@@ -48,7 +48,29 @@ function getVoiceInstructions(openclawConfig) {
   );
 }
 
+// Today the sole caller in the call graph (turn-pipeline.js's runTurn, via
+// sendTurnToOpenClaw) already validates the identical openclawConfig.sessionId value (no
+// path separators, not '.'/'..') before this module is ever reached. That upstream guard is
+// not load-bearing at the point where these functions actually touch the filesystem — a
+// future caller that reaches sendTurnToOpenClaw directly (a script, a different transport)
+// would otherwise be able to pass a sessionId like '../../../../tmp/pwned' straight into a
+// real fs write. Validating independently here, the same way turn-lock.js's
+// assertValidSessionId does, makes that safe regardless of what any caller already checked
+// (WR-02).
+function assertValidSessionId(sessionId) {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    throw new Error('openclaw-cli: sessionId must be a non-empty string');
+  }
+  if (sessionId.includes(path.sep) || sessionId.includes('/')) {
+    throw new Error('openclaw-cli: sessionId must not contain a path separator');
+  }
+  if (sessionId === '.' || sessionId === '..') {
+    throw new Error('openclaw-cli: sessionId must not be "." or ".."');
+  }
+}
+
 function getSessionStatePath(sessionId) {
+  assertValidSessionId(sessionId);
   return path.join(voiceSessionStateDir, `${sessionId}.json`);
 }
 

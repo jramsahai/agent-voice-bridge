@@ -62,6 +62,22 @@ function matchesTarget(sourceFormat, target) {
   );
 }
 
+// This module's throw-vs-resolve split is a documented, load-bearing contract, not an
+// accident: an unrecognized format id resolves to `{ error }` (buildError/
+// unsupportedFormatError), because the wire id itself is untrusted input this module is
+// meant to validate. A malformed or oversized *buffer* (AUDIO_MALFORMED/AUDIO_TOO_LARGE,
+// thrown by wav.js) is left to propagate as a raw Error instead — callers that already
+// `try/catch` around the whole turn (the server's request handler) see it there. Every
+// future caller that needs the same `{ error }` shape for a caught wav.js error should
+// route it through this helper rather than re-deriving the code -> envelope mapping.
+export function toErrorEnvelope(err) {
+  const code = err && typeof err.code === 'string' ? err.code : null;
+  if (code && code in ERROR_CODES) {
+    return buildError(code, ERROR_CODES[code].title, { status: ERROR_CODES[code].status });
+  }
+  throw err;
+}
+
 // Shared by both directions: resamples an arbitrary WAV buffer down to the whisper-ready
 // shape (16 kHz mono 16-bit) via a real afconvert subprocess. Every temp path this function
 // creates is removed before it returns, on success, on a non-zero exit, on a timeout, and on
@@ -109,6 +125,10 @@ export async function convertWavToWhisperWav(wavBuffer, options = {}) {
   }
 }
 
+// Throw-vs-resolve contract (see toErrorEnvelope above): an unsupported declaredFormatId
+// resolves to `{ error }`. A malformed or oversized audioBuffer throws a raw Error with a
+// `.code` of AUDIO_MALFORMED/AUDIO_TOO_LARGE instead — callers must either await this from
+// within a try/catch, or pass the caught error through toErrorEnvelope() themselves.
 export async function prepareTranscriptionInput(audioBuffer, declaredFormatId, options = {}) {
   const entry = lookupFormat(declaredFormatId);
   if (!entry) {
@@ -144,6 +164,8 @@ export async function prepareTranscriptionInput(audioBuffer, declaredFormatId, o
   };
 }
 
+// Same throw-vs-resolve contract as prepareTranscriptionInput above: an unsupported
+// requestedFormatId resolves to `{ error }`; a malformed replyWavBuffer throws.
 export async function prepareClientOutput(replyWavBuffer, requestedFormatId, options = {}) {
   const entry = lookupFormat(requestedFormatId);
   if (!entry) {

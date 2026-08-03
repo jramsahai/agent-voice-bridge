@@ -15,7 +15,7 @@ import {
   isSupportedFormat,
 } from '../packages/shared/audio/format-registry.js';
 import { MAX_PCM_BYTES, pcmToWav } from '../packages/shared/audio/wav.js';
-import { prepareTranscriptionInput, prepareClientOutput } from '../packages/shared/audio/convert.js';
+import { prepareTranscriptionInput, prepareClientOutput, toErrorEnvelope } from '../packages/shared/audio/convert.js';
 import { makePcm16, makeCanonicalWav } from './helpers/fixtures.js';
 
 // --- Registry ---
@@ -174,4 +174,36 @@ test('prepareTranscriptionInput resolves (does not reject) with an envelope for 
   assert.ok(result.error, 'expected a resolved error envelope, not a thrown error');
   assert.equal(result.error.status, 415);
   assert.deepEqual(result.error.body.error.supportedFormats, listSupportedFormats());
+});
+
+// --- Documented throw-vs-resolve contract (WR-01) ---
+
+test('toErrorEnvelope converts a thrown AUDIO_MALFORMED/AUDIO_TOO_LARGE-coded error into the same envelope shape buildError produces', () => {
+  const malformed = new Error('bad wav');
+  malformed.code = 'AUDIO_MALFORMED';
+  const envelope = toErrorEnvelope(malformed);
+  assert.equal(envelope.status, 400);
+  assert.equal(envelope.body.error.code, 'AUDIO_MALFORMED');
+
+  const tooLarge = new Error('too big');
+  tooLarge.code = 'AUDIO_TOO_LARGE';
+  const envelope2 = toErrorEnvelope(tooLarge);
+  assert.equal(envelope2.status, 413);
+  assert.equal(envelope2.body.error.code, 'AUDIO_TOO_LARGE');
+});
+
+test('toErrorEnvelope rethrows an error whose code is not a registered ERROR_CODES entry', () => {
+  const unrelated = new Error('not an audio error');
+  unrelated.code = 'ENOENT';
+  assert.throws(() => toErrorEnvelope(unrelated), (err) => err === unrelated);
+});
+
+test('prepareTranscriptionInput throws (per the documented contract) for a malformed source buffer, and toErrorEnvelope maps that throw to AUDIO_MALFORMED', async () => {
+  await assert.rejects(
+    () => prepareTranscriptionInput(makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }).subarray(0, 2), 'wav'),
+    (err) => {
+      assert.equal(toErrorEnvelope(err).body.error.code, 'AUDIO_MALFORMED');
+      return true;
+    },
+  );
 });

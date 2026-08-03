@@ -5,11 +5,23 @@
 // directory distinctness, and several-at-once concurrency. Every test that acquires a lock
 // uses a session id unique to itself and releases in a finally, same discipline as
 // test/turn-pipeline.test.js and test/turn-pipeline-abort.test.js.
+//
+// None of these hygiene assertions diff a shared, process-wide directory listing.
+// `node --test` runs test files in parallel by default, and this file's own sibling
+// (test/turn-pipeline-abort.test.js) also drives real runTurn() calls under the same shared
+// TEMP_DIR_PREFIX — deferred-items.md documents the exact same class of race for
+// test/turn-pipeline.test.js from plan 02-01, where a bare before/after snapshot of that
+// shared listing can catch another concurrently-running file's own transient entry and fail
+// for a reason that has nothing to do with the test itself. Every outcome that creates a
+// directory instead captures *its own* path from inside the transcribe adapter (the one
+// place the pipeline hands it out) and asserts on that specific path; every outcome that
+// creates no directory at all asserts a zero adapter call count instead — the deterministic,
+// non-racy proof plan 02-02 established for the identical problem in
+// test/turn-lock-concurrency.test.js.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -17,31 +29,8 @@ import { withTempDir } from '../packages/shared/lifecycle/tempfiles.js';
 import { runTurn } from '../packages/shared/pipeline/turn-pipeline.js';
 import { acquireTurnLock, releaseTurnLock } from '../packages/shared/session/turn-lock.js';
 
-// Read turn-pipeline.js's own temp-directory prefix from its source text (regex, not a new
-// export) so these hygiene assertions can never drift from the real value — same convention
-// test/turn-pipeline.test.js and test/turn-pipeline-abort.test.js already use.
-const PIPELINE_SOURCE_URL = new URL('../packages/shared/pipeline/turn-pipeline.js', import.meta.url);
-const PIPELINE_SOURCE = fs.readFileSync(PIPELINE_SOURCE_URL, 'utf8');
-
-function readTempDirPrefix() {
-  const match = PIPELINE_SOURCE.match(/TEMP_DIR_PREFIX\s*=\s*'([^']+)'/);
-  assert.ok(match, 'turn-pipeline.js must declare a documented TEMP_DIR_PREFIX constant');
-  return match[1];
-}
-
-function listMatchingTempEntries(prefix) {
-  return fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith(prefix));
-}
-
 function uniqueSessionId(label) {
   return `vbtest-tempfiles-${label}-${randomUUID()}`;
-}
-
-function makeFakes({ transcript = 'hello', rawReply = 'ok', speechText = 'ok' } = {}) {
-  const transcribe = async () => ({ text: transcript, meta: {} });
-  const agent = async () => ({ text: speechText, rawText: rawReply, meta: {} });
-  const speak = async () => ({ audioBuffer: Buffer.from('fake-audio'), mimeType: 'audio/mp4', meta: {} });
-  return { adapters: { transcribe, agent, speak } };
 }
 
 function createDeferred() {
@@ -149,11 +138,18 @@ test('two concurrent withTempDir calls with the same prefix receive two differen
 
 // --- Turn-level hygiene across six outcomes ---
 
-test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a successful turn', async () => {
+test('temp hygiene: a successful turn creates a real directory and removes it', async () => {
   const sessionId = uniqueSessionId('outcome-success');
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
-  const { adapters } = makeFakes();
+  let createdDir;
+  const adapters = {
+    transcribe: async (audioPath) => {
+      createdDir = path.dirname(audioPath);
+      assert.ok(fs.existsSync(createdDir), 'the directory must exist while the transcribe stage runs');
+      return { text: 'hello', meta: {} };
+    },
+    agent: async () => ({ text: 'ok', rawText: 'OK', meta: {} }),
+    speak: async () => ({ audioBuffer: Buffer.from('fake-audio'), mimeType: 'audio/mp4', meta: {} }),
+  };
 
   await runTurn({
     audioBuffer: Buffer.from('bytes'),
@@ -163,15 +159,16 @@ test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a suc
     ttsConfig: {},
   });
 
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  assert.ok(createdDir, 'expected the transcribe adapter to have captured a real directory');
+  assert.equal(fs.existsSync(createdDir), false, 'the directory must be removed after a successful turn');
 });
 
-test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a turn whose transcribe adapter throws', async () => {
+test('temp hygiene: a turn whose transcribe adapter throws still removes its own directory', async () => {
   const sessionId = uniqueSessionId('outcome-transcribe-throws');
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
+  let createdDir;
   const adapters = {
-    transcribe: async () => {
+    transcribe: async (audioPath) => {
+      createdDir = path.dirname(audioPath);
       throw new Error('transcribe exploded');
     },
     agent: async () => ({ text: 'x', rawText: 'x', meta: {} }),
@@ -188,15 +185,18 @@ test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a tur
     }),
   );
 
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  assert.ok(createdDir);
+  assert.equal(fs.existsSync(createdDir), false);
 });
 
-test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a turn whose agent adapter throws', async () => {
+test('temp hygiene: a turn whose agent adapter throws still removes its own directory', async () => {
   const sessionId = uniqueSessionId('outcome-agent-throws');
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
+  let createdDir;
   const adapters = {
-    transcribe: async () => ({ text: 'hi', meta: {} }),
+    transcribe: async (audioPath) => {
+      createdDir = path.dirname(audioPath);
+      return { text: 'hi', meta: {} };
+    },
     agent: async () => {
       throw new Error('agent exploded');
     },
@@ -213,15 +213,18 @@ test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a tur
     }),
   );
 
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  assert.ok(createdDir);
+  assert.equal(fs.existsSync(createdDir), false);
 });
 
-test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a turn whose speak adapter throws', async () => {
+test('temp hygiene: a turn whose speak adapter throws still removes its own directory', async () => {
   const sessionId = uniqueSessionId('outcome-speak-throws');
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
+  let createdDir;
   const adapters = {
-    transcribe: async () => ({ text: 'hi', meta: {} }),
+    transcribe: async (audioPath) => {
+      createdDir = path.dirname(audioPath);
+      return { text: 'hi', meta: {} };
+    },
     agent: async () => ({ text: 'ok', rawText: 'OK', meta: {} }),
     speak: async () => {
       throw new Error('speak exploded');
@@ -238,13 +241,28 @@ test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a tur
     }),
   );
 
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  assert.ok(createdDir);
+  assert.equal(fs.existsSync(createdDir), false);
 });
 
-test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a turn refused by a guard clause', async () => {
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
-  const { adapters } = makeFakes();
+test('temp hygiene: a turn refused by a guard clause never reaches the transcribe stage, so no directory is ever created', async () => {
+  // A guard-clause refusal happens synchronously, before withTempDir's own mkdtempSync — a
+  // shared-prefix listing snapshot around this call is a near-zero-width window in principle,
+  // but "near-zero" still isn't zero under node --test's parallel file execution (a sibling
+  // file can legitimately create and remove its own entry inside any window, however small).
+  // transcribeCallCount is the deterministic proxy 02-02 established for exactly this case:
+  // withTempDir's mkdtempSync is its own first statement, and transcribe is the first adapter
+  // call inside its callback, so a call count staying at 0 is a structural proof no directory
+  // was ever created — immune to any concurrent sibling file's own unrelated activity.
+  let transcribeCallCount = 0;
+  const adapters = {
+    transcribe: async () => {
+      transcribeCallCount += 1;
+      return { text: 'unused', meta: {} };
+    },
+    agent: async () => ({ text: 'unused', rawText: 'unused', meta: {} }),
+    speak: async () => ({ audioBuffer: Buffer.alloc(0), mimeType: 'audio/mp4', meta: {} }),
+  };
 
   await assert.rejects(() =>
     runTurn({
@@ -256,16 +274,22 @@ test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a tur
     }),
   );
 
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  assert.equal(transcribeCallCount, 0);
 });
 
-test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a turn refused as busy', async () => {
+test('temp hygiene: a turn refused as busy never reaches the transcribe stage, so no directory is ever created', async () => {
   const sessionId = uniqueSessionId('outcome-busy');
-  const prefix = readTempDirPrefix();
   assert.ok(acquireTurnLock(sessionId));
   try {
-    const before = listMatchingTempEntries(prefix);
-    const { adapters } = makeFakes();
+    let transcribeCallCount = 0;
+    const adapters = {
+      transcribe: async () => {
+        transcribeCallCount += 1;
+        return { text: 'unused', meta: {} };
+      },
+      agent: async () => ({ text: 'unused', rawText: 'unused', meta: {} }),
+      speak: async () => ({ audioBuffer: Buffer.alloc(0), mimeType: 'audio/mp4', meta: {} }),
+    };
 
     await assert.rejects(
       () =>
@@ -279,7 +303,7 @@ test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a tur
       (err) => err.code === 'TURN_BUSY',
     );
 
-    assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+    assert.equal(transcribeCallCount, 0);
   } finally {
     releaseTurnLock(sessionId);
   }
@@ -287,14 +311,14 @@ test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a tur
 
 // --- Empty input ---
 
-test('a zero-length audio buffer still produces a directory that is removed, and the transcribe adapter receives a real path to a zero-length file', async () => {
+test('a zero-length audio buffer still produces a real directory that is removed, and the transcribe adapter receives a real path to a zero-length file', async () => {
   const sessionId = uniqueSessionId('zero-length');
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
   let observedSize;
   let observedPathExists;
+  let createdDir;
   const adapters = {
     transcribe: async (audioPath) => {
+      createdDir = path.dirname(audioPath);
       observedPathExists = fs.existsSync(audioPath);
       observedSize = fs.statSync(audioPath).size;
       return { text: 'x', meta: {} };
@@ -314,12 +338,13 @@ test('a zero-length audio buffer still produces a directory that is removed, and
 
   assert.equal(observedPathExists, true, 'the transcribe adapter must receive a real, existing file path');
   assert.equal(observedSize, 0, 'the file backing a zero-length audio buffer must itself be zero-length');
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  assert.ok(createdDir);
+  assert.equal(fs.existsSync(createdDir), false, 'the directory must be removed even for a zero-length buffer');
 });
 
 // --- Adjacency: two turns never collide on a directory name ---
 
-test('two back-to-back turns hand their transcribe adapters two different directory paths', async () => {
+test('two back-to-back turns hand their transcribe adapters two different directory paths, both removed', async () => {
   const sessionId = uniqueSessionId('back-to-back');
   const capturedDirs = [];
   const adapters = {
@@ -350,18 +375,27 @@ test('two back-to-back turns hand their transcribe adapters two different direct
 
   assert.equal(capturedDirs.length, 2);
   assert.notEqual(capturedDirs[0], capturedDirs[1], 'a second turn must never reuse the first turn\'s directory name');
+  assert.equal(fs.existsSync(capturedDirs[0]), false);
+  assert.equal(fs.existsSync(capturedDirs[1]), false);
 });
 
 // --- Concurrency: several turns launched at once ---
 
-test('several turns launched at once against one session leave the entry set exactly as they found it, whichever won the lock', async () => {
+test('several turns launched at once against one session each remove their own directory, whichever won the lock', async () => {
   const sessionId = uniqueSessionId('several-at-once');
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
-  const { adapters } = makeFakes();
+  const capturedDirs = [];
+  const adapters = {
+    transcribe: async (audioPath) => {
+      capturedDirs.push(path.dirname(audioPath));
+      return { text: 'hello', meta: {} };
+    },
+    agent: async () => ({ text: 'ok', rawText: 'OK', meta: {} }),
+    speak: async () => ({ audioBuffer: Buffer.from('fake-audio'), mimeType: 'audio/mp4', meta: {} }),
+  };
 
   // Launched without awaiting individually, then settled together — the point of this
-  // assertion is the entry set, not which caller happened to win the lock.
+  // assertion is that every directory a winner created is gone afterward, not which caller
+  // happened to win the lock.
   const outcomes = await Promise.allSettled(
     Array.from({ length: 5 }, () =>
       runTurn({
@@ -382,5 +416,8 @@ test('several turns launched at once against one session leave the entry set exa
     assert.equal(outcome.reason?.code, 'TURN_BUSY', 'every loser must be refused as busy, never anything else');
   }
 
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  assert.equal(capturedDirs.length, fulfilled.length, 'only a turn that actually won the lock reaches the transcribe stage');
+  for (const dir of capturedDirs) {
+    assert.equal(fs.existsSync(dir), false, `${dir} must be removed after the turn that created it settles`);
+  }
 });

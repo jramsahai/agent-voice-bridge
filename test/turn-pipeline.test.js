@@ -7,7 +7,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -16,21 +15,18 @@ import { acquireTurnLock, releaseTurnLock, turnLockPathFor } from '../packages/s
 import { withTempDir } from '../packages/shared/lifecycle/tempfiles.js';
 import { TurnBusyError } from '../packages/shared/errors/turn-errors.js';
 
-// Read turn-pipeline.js's own temp-directory prefix from its source text (regex, not a new
-// export) so the hygiene assertions below can never drift from the real value — same
-// pattern test/convert.test.js uses for its own TEMP_DIR_PREFIX.
+// Read turn-pipeline.js's own source text (regex, not a new export) so source-shape
+// assertions below (sessionId reads, import graph, lock-acquisition ordering) can never
+// drift from the real value — same pattern test/convert.test.js uses for its own
+// TEMP_DIR_PREFIX. This file's own temp-hygiene assertions do NOT diff a listing against
+// this prefix (see deferred-items.md): node --test runs test files in parallel by default,
+// and other files in this suite also drive real runTurn() calls under the same shared,
+// process-wide prefix, so a snapshot-based diff can fail for a reason that has nothing to do
+// with this file's own behavior. Each hygiene assertion instead proves its own turn's
+// directory specifically (via the fake transcribe adapter's recorded audioPath) or a zero
+// adapter call count, both immune to unrelated concurrent activity under the shared prefix.
 const PIPELINE_SOURCE_URL = new URL('../packages/shared/pipeline/turn-pipeline.js', import.meta.url);
 const PIPELINE_SOURCE = fs.readFileSync(PIPELINE_SOURCE_URL, 'utf8');
-
-function readTempDirPrefix() {
-  const match = PIPELINE_SOURCE.match(/TEMP_DIR_PREFIX\s*=\s*'([^']+)'/);
-  assert.ok(match, 'turn-pipeline.js must declare a documented TEMP_DIR_PREFIX constant');
-  return match[1];
-}
-
-function listMatchingTempEntries(prefix) {
-  return fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith(prefix));
-}
 
 function uniqueSessionId(label) {
   return `vbtest-${label}-${randomUUID()}`;
@@ -200,8 +196,6 @@ const sessionIdGuardCases = [
 
 for (const { label, sessionId } of sessionIdGuardCases) {
   test(`guard clause: ${label} rejects before any adapter call, lock artifact or temp directory`, async () => {
-    const prefix = readTempDirPrefix();
-    const before = listMatchingTempEntries(prefix);
     const { adapters, calls } = makeFakes();
 
     await assert.rejects(() =>
@@ -214,11 +208,14 @@ for (const { label, sessionId } of sessionIdGuardCases) {
       }),
     );
 
+    // A zero transcribe call count is the deterministic proof no temp directory was ever
+    // created (withTempDir's mkdtempSync is its own first statement, and transcribe is the
+    // first adapter call inside its callback) — non-racy, unlike a shared-prefix directory
+    // listing diff under node --test's parallel file execution (deferred-items.md).
     assert.equal(calls.transcribe, 0);
     assert.equal(calls.agent, 0);
     assert.equal(calls.speak, 0);
     assert.equal(fs.existsSync(turnLockPathFor(sessionId)), false);
-    assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
   });
 }
 
@@ -238,8 +235,6 @@ const adapterGuardCases = [
 for (const { label, adapters } of adapterGuardCases) {
   test(`guard clause: ${label} rejects before any lock artifact or temp directory`, async () => {
     const sessionId = uniqueSessionId('adapter-guard');
-    const prefix = readTempDirPrefix();
-    const before = listMatchingTempEntries(prefix);
 
     await assert.rejects(() =>
       runTurn({
@@ -251,15 +246,18 @@ for (const { label, adapters } of adapterGuardCases) {
       }),
     );
 
+    // No temp directory can exist to check for directly here (this guard rejects before
+    // acquireTurnLock, and withTempDir only ever runs after a successful acquisition — proven
+    // structurally by the "lock-acquisition precedes the first await" source assertion below).
+    // The lock artifact's absence is therefore sufficient evidence, and avoids diffing the
+    // shared, process-wide temp-prefix listing other concurrently-running test files also
+    // write under (deferred-items.md).
     assert.equal(fs.existsSync(turnLockPathFor(sessionId)), false);
-    assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
   });
 }
 
 test('guard clause: non-Buffer audioBuffer rejects before any adapter call, lock artifact or temp directory', async () => {
   const sessionId = uniqueSessionId('buffer-guard');
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
   const { adapters, calls } = makeFakes();
 
   await assert.rejects(() =>
@@ -274,13 +272,10 @@ test('guard clause: non-Buffer audioBuffer rejects before any adapter call, lock
 
   assert.equal(calls.transcribe, 0);
   assert.equal(fs.existsSync(turnLockPathFor(sessionId)), false);
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
 });
 
 test('guard clause: an audioFilename with a path separator is rejected the same way as a bad session id', async () => {
   const sessionId = uniqueSessionId('filename-guard');
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
   const { adapters, calls } = makeFakes();
 
   await assert.rejects(() =>
@@ -296,7 +291,6 @@ test('guard clause: an audioFilename with a path separator is rejected the same 
 
   assert.equal(calls.transcribe, 0);
   assert.equal(fs.existsSync(turnLockPathFor(sessionId)), false);
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
 });
 
 // --- Lock span and ordering ---
@@ -411,11 +405,16 @@ test('source assertion: the lock-acquisition call precedes the first await in ru
 
 // --- Temp hygiene and format-agnosticism ---
 
-test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a successful turn', async () => {
+test('temp hygiene: a successful turn creates a real directory and removes it', async () => {
+  // Captures its own directory from the transcribe fake's recorded audioPath rather than
+  // diffing the shared, process-wide TEMP_DIR_PREFIX listing. node --test runs test files in
+  // parallel by default, and other files in this suite also drive real runTurn() calls under
+  // that same shared prefix (see deferred-items.md) — a before/after snapshot of the whole
+  // listing can catch an unrelated concurrent file's own transient entry and fail for a
+  // reason that has nothing to do with this test. Asserting on this turn's own directory is
+  // immune to that class of race.
   const sessionId = uniqueSessionId('temp-hygiene');
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
-  const { adapters } = makeFakes();
+  const { adapters, record } = makeFakes();
 
   await runTurn({
     audioBuffer: Buffer.from('bytes'),
@@ -426,7 +425,9 @@ test('temp hygiene: the pipeline temp-prefix entry set is unchanged across a suc
     wantAudio: false,
   });
 
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  assert.equal(record.transcribe.length, 1);
+  const createdDir = path.dirname(record.transcribe[0].audioPath);
+  assert.equal(fs.existsSync(createdDir), false, 'the directory this turn created must be removed after it resolves');
 });
 
 test('source assertion: turn-pipeline.js imports nothing from Phase 1\'s format-conversion directory', () => {

@@ -13,7 +13,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -31,16 +30,6 @@ const repoRoot = path.resolve(__dirname, '..');
 // so these hygiene assertions can never drift from the real value.
 const PIPELINE_SOURCE_URL = new URL('../packages/shared/pipeline/turn-pipeline.js', import.meta.url);
 const PIPELINE_SOURCE = fs.readFileSync(PIPELINE_SOURCE_URL, 'utf8');
-
-function readTempDirPrefix() {
-  const match = PIPELINE_SOURCE.match(/TEMP_DIR_PREFIX\s*=\s*'([^']+)'/);
-  assert.ok(match, 'turn-pipeline.js must declare a documented TEMP_DIR_PREFIX constant');
-  return match[1];
-}
-
-function listMatchingTempEntries(prefix) {
-  return fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith(prefix));
-}
 
 function uniqueSessionId(label) {
   return `vbtest-abort-${label}-${randomUUID()}`;
@@ -69,9 +58,17 @@ function makeFastFakes({ transcript = 'hello', rawReply = 'ok', speechText = 'ok
 // synchronously the moment the child is created — used to deterministically wait for a
 // later-pipeline-stage's child to exist before the test aborts, without any timer-based race.
 function makeRealSleepAdapter({ seconds = 5, forwardSignal = true, onSpawn } = {}) {
-  const state = { child: null, exited: null };
+  const state = { child: null, exited: null, audioPath: null };
   const fn = (input, config, options = {}) =>
     new Promise((resolve, reject) => {
+      // Captured for the promptness test's non-racy temp-hygiene assertion below: since a
+      // turn creates exactly one temp directory for its whole lifetime (transcribe/agent/
+      // speak all run inside the same withTempDir callback), the directory containing this
+      // fake's own `input` argument (an audioPath when this fake plays the transcribe role)
+      // is the turn's own directory — captured directly rather than diffed against the
+      // shared, process-wide os.tmpdir() prefix listing, which is racy once more than one
+      // file drives real runTurn() calls concurrently under node --test (see deferred-items.md).
+      state.audioPath = input;
       const execOptions = forwardSignal ? { signal: options.signal } : {};
       const child = execFile('sleep', [String(seconds)], execOptions, (error) => {
         if (error) {
@@ -192,8 +189,6 @@ test('promptness: the abort-to-rejection interval is far below the transcription
   const sessionId = uniqueSessionId('promptness');
   const controller = new AbortController();
   const { fn: transcribe, getState } = makeRealSleepAdapter();
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
 
   const turnPromise = runTurn({
     audioBuffer: Buffer.from('bytes'),
@@ -235,9 +230,10 @@ test('promptness: the abort-to-rejection interval is far below the transcription
     'the lock artifact must be gone at the moment the rejection settles',
   );
 
-  assert.deepEqual(
-    listMatchingTempEntries(prefix).sort(),
-    before.sort(),
+  const turnDir = path.dirname(getState().audioPath);
+  assert.equal(
+    fs.existsSync(turnDir),
+    false,
     'the abandoned turn\'s own temp directory must be gone at the moment the rejection settles',
   );
 
@@ -362,13 +358,18 @@ test('a signal already aborted before the call rejects with the aborted code and
 test('abort during the speech stage still releases the lock and removes the temp directory, proven against a real child process', async () => {
   const sessionId = uniqueSessionId('abort-during-speech');
   const controller = new AbortController();
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
   const spawnedGate = createDeferred();
   const { fn: speak, getState } = makeRealSleepAdapter({ onSpawn: () => spawnedGate.resolve() });
 
+  // Captured from the transcribe stage's own audioPath argument — the turn's one temp
+  // directory is created once, before transcribe runs, and lasts the whole turn, so this is
+  // the same directory the speech stage's abort must have removed by the time it settles.
+  let turnDir;
   const adapters = {
-    transcribe: async () => ({ text: 'hi', meta: {} }),
+    transcribe: async (audioPath) => {
+      turnDir = path.dirname(audioPath);
+      return { text: 'hi', meta: {} };
+    },
     agent: async () => ({ text: 'ok', rawText: 'OK', meta: {} }),
     speak,
   };
@@ -399,21 +400,21 @@ test('abort during the speech stage still releases the lock and removes the temp
   assert.throws(() => process.kill(child.pid, 0), /ESRCH/);
 
   assert.equal(fs.existsSync(turnLockPathFor(sessionId)), false, 'the lock must be released');
-  assert.deepEqual(
-    listMatchingTempEntries(prefix).sort(),
-    before.sort(),
-    'the pipeline temp-prefix entry set must be unchanged after an abort during the speech stage',
+  assert.equal(
+    fs.existsSync(turnDir),
+    false,
+    'the turn\'s own temp directory must be gone after an abort during the speech stage',
   );
 });
 
 test('after any abort rejection the lock artifact does not exist and the pipeline temp-prefix entry set is unchanged from before the turn', async () => {
   const sessionId = uniqueSessionId('unwind-generic');
   const controller = new AbortController();
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
 
+  let turnDir;
   const adapters = {
-    transcribe: async () => {
+    transcribe: async (audioPath) => {
+      turnDir = path.dirname(audioPath);
       controller.abort();
       return { text: 'hi', meta: {} };
     },
@@ -435,7 +436,7 @@ test('after any abort rejection the lock artifact does not exist and the pipelin
   );
 
   assert.equal(fs.existsSync(turnLockPathFor(sessionId)), false);
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  assert.equal(fs.existsSync(turnDir), false);
 });
 
 // --- Regression: lock acquisition still precedes the first await (plan 02-02's determinism

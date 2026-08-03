@@ -17,7 +17,25 @@ import { pcmToWav, wavToPcm, readWavFormat } from './wav.js';
 
 const execFileAsync = promisify(execFile);
 
-export const WHISPER_INPUT = Object.freeze({ sampleRate: 16000, channels: 1, bitDepth: 16 });
+// The one registry row that is headerless is, by construction (see format-registry.js),
+// the shape whisper transcription is done against — found structurally, the same way
+// resolveWhisperConversionRecipe() below finds the container row, so this constant can
+// never drift from the registry's own numbers and this file never contains a registered
+// format id as a quoted literal (test/format-registry.test.js's one-row-change scan).
+function resolveDefaultHeaderlessFormat() {
+  const row = Object.values(AUDIO_FORMATS).find((entry) => entry.headerless);
+  if (!row) {
+    throw new Error('convert.js: no registry row is headerless; cannot derive WHISPER_INPUT');
+  }
+  return row;
+}
+
+const defaultHeaderlessFormat = resolveDefaultHeaderlessFormat();
+export const WHISPER_INPUT = Object.freeze({
+  sampleRate: defaultHeaderlessFormat.sampleRate,
+  channels: defaultHeaderlessFormat.channels,
+  bitDepth: defaultHeaderlessFormat.bitDepth,
+});
 
 // Injectable per D-08 so plan 01-05 has the seam and no exported signature moves.
 export const DEFAULT_AFCONVERT_BIN = '/usr/bin/afconvert';
@@ -78,12 +96,21 @@ export function toErrorEnvelope(err) {
   throw err;
 }
 
-// Shared by both directions: resamples an arbitrary WAV buffer down to the whisper-ready
-// shape (16 kHz mono 16-bit) via a real afconvert subprocess. Every temp path this function
-// creates is removed before it returns, on success, on a non-zero exit, on a timeout, and on
-// a throw from anywhere in between — it owns cleanup of its own directory only.
+// Shared by both directions: resamples an arbitrary WAV buffer down to a target shape (16
+// kHz mono 16-bit by default — WHISPER_INPUT) via a real afconvert subprocess. Every temp
+// path this function creates is removed before it returns, on success, on a non-zero exit,
+// on a timeout, and on a throw from anywhere in between — it owns cleanup of its own
+// directory only.
+//
+// `options.target` lets a caller resample to a shape other than WHISPER_INPUT — e.g.
+// prepareClientOutput() below passes the *requested* headerless format's own shape, so a
+// future second headerless row with a different rate/channels/bitDepth than WHISPER_INPUT
+// is resampled correctly instead of silently reusing whisper's target (see REVIEW.md
+// WR-02). The afconvert `-d`/`-c` tokens are built from `target`, not from the recipe row's
+// own fixed tokens, so this stays correct for any registered shape.
 export async function convertWavToWhisperWav(wavBuffer, options = {}) {
   const recipe = resolveWhisperConversionRecipe();
+  const target = options.target ?? WHISPER_INPUT;
   const bin = resolveAfconvertBin(options);
   const timeout = options.timeoutMs ?? DEFAULT_AFCONVERT_TIMEOUT_MS;
   const maxBuffer = options.maxBuffer ?? DEFAULT_AFCONVERT_MAX_BUFFER;
@@ -95,15 +122,17 @@ export async function convertWavToWhisperWav(wavBuffer, options = {}) {
     const outputPath = path.join(tmpDir, `${stem}-out.${recipe.extension}`);
     fs.writeFileSync(inputPath, wavBuffer);
 
-    // Array-form execFile only — never a shell string. Every flag value comes from the
-    // registry row, never from request data.
+    // Array-form execFile only — never a shell string. The file-format flag comes from the
+    // registry row; the data-format/channel flags are derived from `target` (registry-driven
+    // on every real call site) rather than the recipe's own fixed tokens — never from
+    // request data either way.
     const argv = [
       '-f',
       recipe.afconvertFileFormat,
       '-d',
-      recipe.afconvertDataFormat,
+      `LEI${target.bitDepth}@${target.sampleRate}`,
       '-c',
-      String(recipe.afconvertChannels),
+      String(target.channels),
       inputPath,
       outputPath,
     ];
@@ -183,7 +212,10 @@ export async function prepareClientOutput(replyWavBuffer, requestedFormatId, opt
     let spawned = false;
 
     if (!matchesTarget(sourceFormat, target)) {
-      const result = await convertWavToWhisperWav(replyWavBuffer, options);
+      // Pass `target` explicitly — this branch resamples to the *requested* headerless
+      // format's own shape, not implicitly to WHISPER_INPUT (see WR-02: the two are only
+      // numerically equal today because pcm16 is the sole registered headerless row).
+      const result = await convertWavToWhisperWav(replyWavBuffer, { ...options, target });
       if (result.error) {
         return result;
       }

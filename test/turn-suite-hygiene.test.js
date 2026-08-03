@@ -91,6 +91,7 @@ const PHASE_TEST_FILES = fs
 const HTTP_SOCKET_EXEMPT_FILES = new Set([
   path.join(TEST_DIR, 'http-turn.test.js'),
   path.join(TEST_DIR, 'http-capabilities.test.js'),
+  path.join(TEST_DIR, 'http-health.test.js'),
 ]);
 const HTTP_SOCKET_EXEMPT_PATTERNS = [
   ['node', ':', 'net'].join(''),

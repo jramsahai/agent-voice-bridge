@@ -23,6 +23,8 @@ import {
 import { listSupportedFormats } from '../../packages/shared/audio/format-registry.js';
 import { buildError } from '../../packages/shared/errors/error-response.js';
 import { isKnownErrorCode } from '../../packages/shared/errors/error-codes.js';
+import { getBackendStatus, BACKEND_UP } from '../../packages/shared/health/backend-health-cache.js';
+import { probeExecutable, probeHttpService } from '../../packages/shared/health/probes.js';
 
 // Every rejection this handler ever writes goes through buildError() (the one error
 // envelope — packages/shared/errors/error-response.js) and then this function, so every
@@ -324,6 +326,45 @@ export function createRequestHandler({ config, adapters, webDir }) {
     res.end();
   }
 
+  // Mirrors tts-kokoro-onnx.js's own private getKokoroServiceUrl() precedence
+  // (ttsConfig.serviceUrl -> KOKORO_TTS_URL env -> the fixed local default) so this route
+  // probes the same URL speakWithKokoroFast would actually call. Kept as a local copy
+  // rather than an import because that helper is not exported and this plan's file scope
+  // does not extend to tts-kokoro-onnx.js.
+  function resolveKokoroServiceUrl(ttsConfig = {}) {
+    return ttsConfig.serviceUrl || process.env.KOKORO_TTS_URL || 'http://127.0.0.1:4319';
+  }
+
+  // GET /v1/health — the reachability of all three backends, each read through the same
+  // TTL-windowed getBackendStatus cache the speech adapter reads (same 'speech' backend
+  // name), so this route and a live turn share one probe window rather than keeping two.
+  // Caching all three (not just speech) is a deliberate generalisation beyond OPS-05's
+  // literal wording: a monitoring tool polling health every few seconds would otherwise
+  // reintroduce the identical fixed-penalty-per-call problem for transcribe/agent
+  // (03-RESEARCH.md Pitfall 5). Resolved with Promise.all so a slow probe never serialises
+  // the other two, and the three lines are always emitted in this fixed declaration order
+  // regardless of which probe settles first, so the body is stable between calls. A probe
+  // that fails to invoke at all (missing binary, unresolvable path) is already collapsed to
+  // BACKEND_DOWN by getBackendStatus's own contract — no try/catch of its own is needed
+  // here. Served without acquiring the shared turn lock: this route never calls runTurn().
+  async function handleHealth(req, res) {
+    const [transcribe, agent, speech] = await Promise.all([
+      getBackendStatus('transcribe', () => probeExecutable(config.stt?.command ?? '')),
+      getBackendStatus('agent', () => probeExecutable(config.openclaw?.command ?? '')),
+      getBackendStatus('speech', () => probeHttpService(resolveKokoroServiceUrl(config.tts))),
+    ]);
+
+    // Named backends only — no service URL, configured command, resolved path, or probe
+    // error text may ever appear in this body (T-3-05): an unauthenticated-adjacent
+    // diagnostic surface is not the place to publish the deployment's own layout.
+    const allUp = transcribe === BACKEND_UP && agent === BACKEND_UP && speech === BACKEND_UP;
+    sendLinesBody(res, allUp ? 200 : 503, {}, [
+      ['transcribe', transcribe],
+      ['agent', agent],
+      ['speech', speech],
+    ]);
+  }
+
   // GET /v1/capabilities — the whole turn vocabulary, discoverable as text before a
   // client's first turn. Every value is read from an existing exported constant or derived
   // from the registry (listSupportedFormats()/listReplyFormats()/defaultOutputFormatId()),
@@ -362,6 +403,10 @@ export function createRequestHandler({ config, adapters, webDir }) {
       if (req.method === 'GET' && req.url === '/v1/capabilities') {
         if (!validateRequest(req, res, sendLineErrorHead)) return;
         return handleCapabilities(req, res);
+      }
+      if (req.method === 'GET' && req.url === '/v1/health') {
+        if (!validateRequest(req, res, sendLineErrorHead)) return;
+        return await handleHealth(req, res);
       }
       return sendErrorHead(res, buildError('NOT_FOUND'));
     } catch (error) {

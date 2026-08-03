@@ -320,6 +320,7 @@ test('several conversions launched concurrently all succeed and leave no temp re
 const HTTP_SOCKET_EXEMPT_FILES = new Set([
   path.join(repoRoot, 'test', 'http-turn.test.js'),
   path.join(repoRoot, 'test', 'http-capabilities.test.js'),
+  path.join(repoRoot, 'test', 'http-health.test.js'),
 ]);
 
 test('no source file this phase created references a network client, a fetch call, or a models directory', () => {

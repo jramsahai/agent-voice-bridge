@@ -14,11 +14,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 import { runTurn } from '../packages/shared/pipeline/turn-pipeline.js';
 import { turnLockPathFor } from '../packages/shared/session/turn-lock.js';
+import { transcribeWithWhisperLocal } from '../packages/shared/adapters/stt-whisper-local.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
 
 // Read turn-pipeline.js's own temp-directory prefix from its source text (regex, not a new
 // export), same convention test/turn-pipeline.test.js and test/convert.test.js already use,
@@ -444,4 +450,230 @@ test('regression: acquireTurnLock still precedes the first await in runTurn afte
   assert.ok(acquireIndex >= 0);
   assert.ok(awaitIndex >= 0);
   assert.ok(acquireIndex < awaitIndex);
+});
+
+// =====================================================================================
+// Task 2: signal threading through every real adapter, and speech-adapter temp-dir hygiene
+// =====================================================================================
+
+// --- The real production adapter, exercised against a real child process, no model ---
+
+// transcribeWithWhisperLocal is itself an async function, so the promise it returns is a
+// fresh wrapper promise created by the language runtime around its own `await
+// execFileAsync(...)` — util.promisify's `.child` attachment lives on that *inner* promise,
+// which this function's caller never sees. There is no handle to the real ChildProcess
+// reachable from outside the module, so this test finds the running process the same way an
+// external operator would: by querying the OS process table for the exact command line this
+// call must have started, using the real, always-present `pgrep` utility.
+async function findMatchingPids(pattern) {
+  return new Promise((resolve, reject) => {
+    execFile('pgrep', ['-f', pattern], (error, stdout) => {
+      if (error) {
+        // pgrep's own documented exit code for "no processes matched" is 1 — not a real
+        // failure, just an empty result.
+        if (error.code === 1) return resolve([]);
+        return reject(error);
+      }
+      resolve(
+        stdout
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map(Number),
+      );
+    });
+  });
+}
+
+async function waitUntil(conditionFn, { timeoutMs = 2000, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const result = await conditionFn();
+    if (result) return result;
+    if (Date.now() > deadline) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+test('transcribeWithWhisperLocal aborts a real child process promptly, proven by the child\'s own termination outcome', async () => {
+  const controller = new AbortController();
+  // sttConfig.command points at a real, always-present short-lived binary; the "audio path"
+  // argument becomes sleep's duration argument — no whisper binary, no model, no network. A
+  // duration distinct from every other sleep invocation in this file keeps the pgrep pattern
+  // below from ever matching an unrelated process.
+  const sleepSeconds = '11';
+  const callPromise = transcribeWithWhisperLocal(sleepSeconds, { command: 'sleep' }, { signal: controller.signal });
+
+  const pids = await waitUntil(async () => {
+    const found = await findMatchingPids(`sleep ${sleepSeconds}`);
+    return found.length > 0 ? found : undefined;
+  });
+  assert.ok(pids?.length === 1, 'expected exactly one matching sleep process spawned by the adapter');
+  const [pid] = pids;
+  assert.doesNotThrow(() => process.kill(pid, 0), 'expected the child to be alive before the abort');
+
+  controller.abort();
+  await assert.rejects(callPromise);
+
+  const goneAt = await waitUntil(() => {
+    try {
+      process.kill(pid, 0);
+      return undefined;
+    } catch {
+      return true;
+    }
+  });
+  assert.equal(
+    goneAt,
+    true,
+    'the production transcription adapter\'s child process must be genuinely gone, not merely have its promise settle',
+  );
+});
+
+test('transcribeWithWhisperLocal called with only two arguments behaves exactly as before', async () => {
+  const result = await transcribeWithWhisperLocal('two-arg-call', { command: 'echo' });
+  assert.equal(result.text, 'two-arg-call');
+});
+
+// --- Structural assertions across all five adapter files ---
+
+const ADAPTERS_DIR = path.join(repoRoot, 'packages/shared/adapters');
+
+function collectJsFiles(dir) {
+  const files = [];
+  for (const entry of fs.readdirSync(dir)) {
+    const fullPath = path.join(dir, entry);
+    const stats = fs.statSync(fullPath);
+    if (stats.isDirectory()) {
+      files.push(...collectJsFiles(fullPath));
+    } else if (entry.endsWith('.js')) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+// Extracts the parenthesized argument-list text immediately following the occurrence of
+// a call-site marker starting at markerIndex, by counting balanced parens — robust to
+// nested object literals and multi-line calls, unlike a single non-greedy regex.
+function extractCallArgs(source, markerIndex) {
+  let depth = 0;
+  let start = -1;
+  for (let i = markerIndex; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === '(') {
+      if (depth === 0) start = i + 1;
+      depth += 1;
+    } else if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(start, i);
+      }
+    }
+  }
+  throw new Error(`unbalanced parens scanning from index ${markerIndex}`);
+}
+
+// calleeName is passed as a plain runtime string, never written adjoined to an open paren in
+// this file's own static source (not even in a comment) — this file lives under test/, which
+// the offline scan in test/convert.test.js walks recursively, and that scan forbids the
+// literal text formed by the network-call function name immediately followed by '(' from
+// appearing anywhere under test/, built by concatenation there for the same reason.
+function findAllCallSites(source, calleeName) {
+  const sites = [];
+  const marker = `${calleeName}(`;
+  let idx = source.indexOf(marker);
+  while (idx !== -1) {
+    sites.push(extractCallArgs(source, idx));
+    idx = source.indexOf(marker, idx + marker.length);
+  }
+  return sites;
+}
+
+test('source scan: every child-process options object across packages/shared/adapters/ includes a signal', () => {
+  const files = collectJsFiles(ADAPTERS_DIR);
+  assert.ok(files.length > 0, 'sanity: expected at least one adapter file');
+  let sawAtLeastOneCall = false;
+  for (const file of files) {
+    const source = fs.readFileSync(file, 'utf8');
+    const callSites = findAllCallSites(source, 'execFileAsync');
+    for (const args of callSites) {
+      sawAtLeastOneCall = true;
+      assert.ok(
+        /signal/.test(args),
+        `${path.relative(repoRoot, file)}: an execFileAsync call is missing a signal in its options`,
+      );
+    }
+  }
+  assert.ok(sawAtLeastOneCall, 'sanity: expected at least one execFileAsync call across the adapters');
+});
+
+test('source scan: every request options object across packages/shared/adapters/ includes a signal', () => {
+  const files = collectJsFiles(ADAPTERS_DIR);
+  let sawAtLeastOneCall = false;
+  for (const file of files) {
+    const source = fs.readFileSync(file, 'utf8');
+    const callSites = findAllCallSites(source, 'fetch');
+    for (const args of callSites) {
+      sawAtLeastOneCall = true;
+      assert.ok(/signal/.test(args), `${path.relative(repoRoot, file)}: a fetch call is missing a signal in its options`);
+    }
+  }
+  assert.ok(sawAtLeastOneCall, 'sanity: expected at least one fetch call across the adapters');
+});
+
+test('the health probe\'s existing timeout-derived signal is composed with the caller\'s rather than replaced, and both are reachable from the composed value', async () => {
+  const { composeAbortSignals } = await import('../packages/shared/adapters/tts-kokoro-onnx.js');
+  assert.equal(typeof composeAbortSignals, 'function', 'expected tts-kokoro-onnx.js to export composeAbortSignals');
+
+  const callerController = new AbortController();
+  const timeoutController = new AbortController();
+  const composed = composeAbortSignals(callerController.signal, timeoutController.signal);
+
+  assert.equal(composed.aborted, false);
+  callerController.abort();
+  assert.equal(composed.aborted, true, 'the composed signal must abort when the caller\'s own signal aborts');
+
+  const composedFromTimeoutOnly = composeAbortSignals(undefined, timeoutController.signal);
+  assert.equal(composedFromTimeoutOnly.aborted, false);
+  timeoutController.abort();
+  assert.equal(
+    composedFromTimeoutOnly.aborted,
+    true,
+    'the composed signal must abort when the timeout-derived signal aborts, with no caller signal supplied',
+  );
+
+  // A single supplied signal is returned as-is, so a caller with no signal never pays for
+  // a needless wrapper object.
+  const soleController = new AbortController();
+  assert.equal(composeAbortSignals(soleController.signal), soleController.signal);
+  assert.equal(composeAbortSignals(undefined), undefined);
+});
+
+test('source scan: every temporary-directory creation under packages/shared/adapters/ sits inside the shared cleanup helper', () => {
+  const files = collectJsFiles(ADAPTERS_DIR);
+  assert.ok(files.length > 0);
+  for (const file of files) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.ok(
+      !source.includes('mkdtempSync('),
+      `${path.relative(repoRoot, file)}: creates a temp directory outside withTempDir (a raw mkdtempSync call was found)`,
+    );
+  }
+});
+
+test('no adapter file imports anything outside node: builtins and this repository\'s own files', () => {
+  const files = collectJsFiles(ADAPTERS_DIR);
+  for (const file of files) {
+    const source = fs.readFileSync(file, 'utf8');
+    const specifiers = [...source.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
+    for (const specifier of specifiers) {
+      const isNodeBuiltin = specifier.startsWith('node:');
+      const isRelative = specifier.startsWith('.');
+      assert.ok(
+        isNodeBuiltin || isRelative,
+        `${path.relative(repoRoot, file)} imports '${specifier}', which is neither a node: builtin nor a relative path`,
+      );
+    }
+  }
 });

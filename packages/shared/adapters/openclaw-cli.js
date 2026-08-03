@@ -71,7 +71,7 @@ function getOpenClawCommand(openclawConfig) {
   return openclawConfig.command || process.env.OPENCLAW_BIN || 'openclaw';
 }
 
-async function runOpenClawAgent(message, openclawConfig) {
+async function runOpenClawAgent(message, openclawConfig, { signal } = {}) {
   const command = getOpenClawCommand(openclawConfig);
   const args = ['agent', '--message', message, '--json'];
 
@@ -88,9 +88,13 @@ async function runOpenClawAgent(message, openclawConfig) {
   let stdout;
   let stderr;
   try {
+    // Array-form argv, no shell: forwarding signal here means aborting the caller's
+    // controller terminates this child directly. A shell-spawned child's own children would
+    // not be killed by the same signal — no call in this codebase uses shell: true today.
     ({ stdout, stderr } = await execFileAsync(command, args, {
       timeout: 180000,
-      maxBuffer: 10 * 1024 * 1024
+      maxBuffer: 10 * 1024 * 1024,
+      signal,
     }));
   } catch (error) {
     if (error.code === 'ENOENT') {
@@ -109,25 +113,25 @@ async function runOpenClawAgent(message, openclawConfig) {
   };
 }
 
-async function primeVoiceSession(openclawConfig) {
+async function primeVoiceSession(openclawConfig, { signal } = {}) {
   if (!openclawConfig.sessionId || hasSessionBeenPrimed(openclawConfig.sessionId)) {
     return null;
   }
 
   const primingMessage = `Voice conversation mode instructions: ${getVoiceInstructions(openclawConfig)}`;
-  const result = await runOpenClawAgent(primingMessage, openclawConfig);
+  const result = await runOpenClawAgent(primingMessage, openclawConfig, { signal });
   markSessionPrimed(openclawConfig.sessionId);
   return result;
 }
 
-export async function sendTurnToOpenClaw(text, openclawConfig) {
+export async function sendTurnToOpenClaw(text, openclawConfig, { signal } = {}) {
   if (!text || !text.trim()) {
     throw new Error('OpenClaw handoff requires non-empty text');
   }
 
-  await primeVoiceSession(openclawConfig);
+  await primeVoiceSession(openclawConfig, { signal });
 
-  const result = await runOpenClawAgent(text.trim(), openclawConfig);
+  const result = await runOpenClawAgent(text.trim(), openclawConfig, { signal });
   const cleanedReply = cleanTextForSpeech(result.rawReply);
 
   return {

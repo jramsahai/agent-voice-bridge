@@ -36,11 +36,14 @@ test('an already-aborted signal propagates out of speakWithKokoroFast rather tha
   const controller = new AbortController();
   controller.abort();
 
-  // mkdtempSync is withTempDir's own first statement, and both of this module's own reply
-  // paths (the FastAPI branch and the spawn-based fallback) wrap their work in withTempDir —
-  // so a call count of zero is a structural proof that neither reply path was ever reached,
-  // immune to any concurrent, unrelated activity elsewhere in the suite (the same technique
-  // this phase's own turn-lock-concurrency.test.js established for the identical problem).
+  // mkdtempSync is withTempDir's own first statement. Since plan 03-06, the spawn-based
+  // fallback is the only reply path that creates a temp directory at all — the FastAPI
+  // branch now returns the service's own WAV response body directly, with no afconvert
+  // subprocess and no temp directory. So a call count of zero proves the fallback was never
+  // reached; the FastAPI branch is separately excluded here because the service URL under
+  // test is unreachable, immune to any concurrent, unrelated activity elsewhere in the suite
+  // (the same technique this phase's own turn-lock-concurrency.test.js established for the
+  // identical problem).
   const mkdtempSpy = t.mock.method(fs, 'mkdtempSync');
 
   await assert.rejects(() =>

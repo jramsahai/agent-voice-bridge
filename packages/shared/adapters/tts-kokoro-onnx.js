@@ -45,30 +45,16 @@ async function speakWithFastApi(text, ttsConfig, { signal } = {}) {
     throw new Error(`Kokoro FastAPI error ${res.status}: ${err}`);
   }
 
+  // The service's own response body is already a WAV — returned as-is (FMT-02). No temp
+  // directory, no afconvert subprocess: this is now a net removal of a child process from
+  // the warm speech path, since the m4a conversion this used to do here is gone entirely.
   const wavBuffer = Buffer.from(await res.arrayBuffer());
 
-  // Convert WAV to M4A for smaller payload. Wrapped in withTempDir so this directory is
-  // guaranteed removed on success, on a non-zero afconvert exit, on a timeout, and on an
-  // abort — previously created via a bare mkdtempSync with no cleanup path at all.
-  return withTempDir('voice-bridge-kokoro-', async (tmpDir) => {
-    const wavPath = path.join(tmpDir, 'reply.wav');
-    const m4aPath = path.join(tmpDir, 'reply.m4a');
-    fs.writeFileSync(wavPath, wavBuffer);
-    // Array-form argv, no shell — same caveat as every other execFileAsync call site in this
-    // codebase: forwarding signal terminates this child directly on abort.
-    await execFileAsync('/usr/bin/afconvert', ['-f', 'm4af', '-d', 'aac', wavPath, m4aPath], {
-      timeout: 120000,
-      maxBuffer: 10 * 1024 * 1024,
-      signal,
-    });
-    const audioBuffer = fs.readFileSync(m4aPath);
-
-    return {
-      audioBuffer,
-      mimeType: 'audio/mp4',
-      meta: { voice, speed, method: 'fastapi', serviceUrl },
-    };
-  });
+  return {
+    audioBuffer: wavBuffer,
+    mimeType: 'audio/wav',
+    meta: { voice, speed, method: 'fastapi', serviceUrl },
+  };
 }
 
 /**
@@ -78,25 +64,21 @@ async function speakWithKokoroOnnx(text, ttsConfig, { signal } = {}) {
   const command = ttsConfig.command || 'tts-kokoro';
   const voice = ttsConfig.voice || 'af_heart';
 
-  // Wrapped in withTempDir so this directory is guaranteed removed on success, on either
-  // child's non-zero exit, on a timeout, and on an abort.
+  // Wrapped in withTempDir so this directory is guaranteed removed on success, on the
+  // command's non-zero exit, on a timeout, and on an abort. This is now the only reply path
+  // in this module that creates a temp directory at all — the FastAPI path above needs none.
   return withTempDir('voice-bridge-kokoro-', async (tmpDir) => {
     const wavPath = path.join(tmpDir, 'reply.wav');
-    const m4aPath = path.join(tmpDir, 'reply.m4a');
 
     // Array-form argv, no shell — same caveat as every other execFileAsync call site in this
-    // codebase: forwarding signal terminates this child directly on abort.
+    // codebase: forwarding signal terminates this child directly on abort. The command
+    // already writes a WAV to wavPath (FMT-02) — no conversion needed.
     await execFileAsync(command, [text, wavPath, voice], { timeout: 120000, maxBuffer: 10 * 1024 * 1024, signal });
-    await execFileAsync('/usr/bin/afconvert', ['-f', 'm4af', '-d', 'aac', wavPath, m4aPath], {
-      timeout: 120000,
-      maxBuffer: 10 * 1024 * 1024,
-      signal,
-    });
-    const audioBuffer = fs.readFileSync(m4aPath);
+    const audioBuffer = fs.readFileSync(wavPath);
 
     return {
       audioBuffer,
-      mimeType: 'audio/mp4',
+      mimeType: 'audio/wav',
       meta: { voice, command, method: 'spawn' },
     };
   });

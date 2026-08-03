@@ -14,7 +14,7 @@ export async function speakWithMacosSay(text, ttsConfig, { signal } = {}) {
   // a bare mkdtempSync with no cleanup path at all (carried-in debt PROJECT.md records).
   return withTempDir('voice-bridge-tts-', async (tmpDir) => {
     const aiffPath = path.join(tmpDir, 'reply.aiff');
-    const m4aPath = path.join(tmpDir, 'reply.m4a');
+    const wavPath = path.join(tmpDir, 'reply.wav');
 
     // Array-form argv, no shell: forwarding signal here means aborting the caller's
     // controller terminates this child directly. A shell-spawned child's own children would
@@ -24,17 +24,20 @@ export async function speakWithMacosSay(text, ttsConfig, { signal } = {}) {
       maxBuffer: 10 * 1024 * 1024,
       signal,
     });
-    // Same array-form/shell caveat as the /usr/bin/say call above.
-    await execFileAsync('/usr/bin/afconvert', ['-f', 'm4af', '-d', 'aac', aiffPath, m4aPath], {
+    // /usr/bin/say cannot write WAV directly, so this conversion stays — only its target
+    // changes (FMT-02). File-format/data-format/channel tokens match the `wav` registry
+    // row's own afconvert* fields; the channel flag is explicit per RESEARCH.md Pitfall 3
+    // (LEI16@16000 alone would leave a stereo source stereo).
+    await execFileAsync('/usr/bin/afconvert', ['-f', 'WAVE', '-d', 'LEI16@16000', '-c', '1', aiffPath, wavPath], {
       timeout: 120000,
       maxBuffer: 10 * 1024 * 1024,
       signal,
     });
-    const audioBuffer = fs.readFileSync(m4aPath);
+    const audioBuffer = fs.readFileSync(wavPath);
 
     return {
       audioBuffer,
-      mimeType: 'audio/mp4',
+      mimeType: 'audio/wav',
       meta: { voice }
     };
   });

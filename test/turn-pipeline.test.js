@@ -293,6 +293,33 @@ test('guard clause: an audioFilename with a path separator is rejected the same 
   assert.equal(fs.existsSync(turnLockPathFor(sessionId)), false);
 });
 
+// WR-01: isPlainFilename previously rejected only a path separator, not '.' or '..'.
+// audioFilename: '..' passed validation and resolved (via path.join(dir, '..')) to the
+// pipeline's own temp-directory *parent* — os.tmpdir() itself. This never became an
+// arbitrary write in practice (fs.writeFileSync against a directory throws EISDIR), but the
+// guard itself was not doing the job the sibling sessionId guard does, and the safety margin
+// depended on an accident of temp-dir depth rather than a property this function enforces.
+for (const badFilename of ['.', '..']) {
+  test(`guard clause: an audioFilename of '${badFilename}' is rejected before any adapter call, lock artifact or temp directory`, async () => {
+    const sessionId = uniqueSessionId(`filename-guard-${badFilename === '.' ? 'dot' : 'dotdot'}`);
+    const { adapters, calls } = makeFakes();
+
+    await assert.rejects(() =>
+      runTurn({
+        audioBuffer: Buffer.from('bytes'),
+        adapters,
+        sttConfig: {},
+        openclawConfig: { sessionId },
+        ttsConfig: {},
+        audioFilename: badFilename,
+      }),
+    );
+
+    assert.equal(calls.transcribe, 0);
+    assert.equal(fs.existsSync(turnLockPathFor(sessionId)), false);
+  });
+}
+
 // --- Lock span and ordering ---
 
 test('after a successful turn the lock artifact does not exist', async () => {

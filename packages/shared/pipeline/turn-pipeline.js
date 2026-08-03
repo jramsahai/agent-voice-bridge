@@ -40,7 +40,14 @@ async function runStage(callAdapter, signal) {
 }
 
 function isPlainFilename(value) {
-  return typeof value === 'string' && value.length > 0 && !value.includes(path.sep) && !value.includes('/');
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    !value.includes(path.sep) &&
+    !value.includes('/') &&
+    value !== '.' &&
+    value !== '..'
+  );
 }
 
 // Every property read of sessionId in this module reads from openclawConfig and nowhere

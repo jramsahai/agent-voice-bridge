@@ -187,6 +187,19 @@ test('buildTurnResponseHead returns a plain, socket-free object with no ServerRe
   assert.equal(head.replyBuffer.toString('utf8'), 'b');
 });
 
+test('buildTurnResponseHead declares zero transcript-bytes and starts the reply segment at body offset 0 for a zero-length transcript', () => {
+  const head = buildTurnResponseHead({
+    transcript: '',
+    reply: 'reply text',
+    outputFormatId: defaultOutputFormatId(),
+    audioPresent: false,
+  });
+
+  assert.equal(head.headers['X-Voice-Transcript-Bytes'], '0');
+  assert.equal(head.transcriptBuffer.length, 0);
+  assert.equal(head.replyBuffer.toString('utf8'), 'reply text');
+});
+
 // =====================================================================================
 // Task 1: one error contract for every /v1/turn failure, and the raw-body size ceiling
 // =====================================================================================

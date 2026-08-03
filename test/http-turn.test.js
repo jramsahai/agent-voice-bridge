@@ -1022,3 +1022,54 @@ test('CR-01 regression: a corrupt speech buffer thrown as AUDIO_MALFORMED after 
     await closeServer(server);
   }
 });
+
+test('CR-02 regression: GET / against a webDir missing index.html returns 404 instead of crashing the process', async () => {
+  const config = buildTestConfig();
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  // A real, existing directory with no index.html/app.js in it — createReadStream() fails
+  // with ENOENT, the exact unguarded-stream-error path CR-02 describes. This project's own
+  // repo root always exists and never happens to contain these two filenames at its top
+  // level.
+  const handler = createRequestHandler({ config, adapters, webDir: process.cwd() });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+
+    const response = await new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/' }, (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    assert.equal(response.statusCode, 404);
+
+    // Process survival proof, same shape as the CR-01 test above: a second GET /app.js
+    // against the same missing-file webDir, and an ordinary /v1/turn request, must both
+    // still succeed.
+    const appJsResponse = await new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/app.js' }, (res) => {
+        res.on('data', () => {});
+        res.on('end', () => resolve({ statusCode: res.statusCode }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(appJsResponse.statusCode, 404);
+
+    const followUp = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'pcm16', 'X-Voice-Want-Audio': '0' },
+    });
+    assert.equal(followUp.statusCode, 200);
+  } finally {
+    await closeServer(server);
+  }
+});

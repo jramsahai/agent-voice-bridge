@@ -65,9 +65,21 @@ function sendLineErrorHead(res, envelope) {
   ]);
 }
 
+// CR-02: fs.createReadStream() errors (ENOENT, EACCES, etc.) surface asynchronously on the
+// stream's 'error' event. An EventEmitter with no 'error' listener throws that error as an
+// uncaught exception, which crashes the whole Node process — taking down every other
+// in-flight request, not just this static one. writeHead(200) is deferred until the stream
+// actually opens, so a missing/unreadable file never commits to a 200 status.
 function sendFile(res, filePath, contentType) {
   const stream = fs.createReadStream(filePath);
-  res.writeHead(200, { 'content-type': contentType });
+  stream.on('error', (error) => {
+    console.error('[voice-bridge] failed to serve static file', filePath, error);
+    if (!res.headersSent) {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    }
+    res.end();
+  });
+  stream.once('open', () => res.writeHead(200, { 'content-type': contentType }));
   stream.pipe(res);
 }
 

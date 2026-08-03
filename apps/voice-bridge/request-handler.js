@@ -75,6 +75,35 @@ function clientIp(req) {
   return req.socket.remoteAddress || 'unknown';
 }
 
+// The discovery routes' own rate-limit ceiling (T-3-06/D-05, locked): a sustained one poll
+// per second, ten times the turn endpoint's effective default rate — a wire-visible
+// operational decision a monitoring configuration and a firmware polling interval are both
+// written against, not a tuning knob to be changed lightly. Exported so an operator (and
+// this plan's own tests) reads the actual ceiling rather than a copied literal. Phase 4's
+// OPS-04 re-keys the buckets these constants size by named client identity; nothing here
+// makes that harder.
+export const DISCOVERY_RATE_LIMIT_MAX_REQUESTS = 60;
+export const DISCOVERY_RATE_LIMIT_WINDOW_MS = 60_000;
+
+// Generic sliding-window bucket check, parameterised over the Map, ceiling, and window so
+// the turn endpoint and the two discovery endpoints can each get their own bucket without
+// duplicating the sliding-window logic itself (T-3-06): an unlimited diagnostic surface is
+// its own denial-of-service lever, so the discovery routes are rate-limited rather than
+// exempted outright, just on a separate, more generous budget that a monitoring poller
+// cannot exhaust and that cannot itself exhaust the turn budget.
+function checkRateLimitBucket(buckets, maxRequests, windowMs, key) {
+  const now = Date.now();
+  const bucket = buckets.get(key) ?? [];
+  const fresh = bucket.filter((ts) => now - ts < windowMs);
+  if (fresh.length >= maxRequests) {
+    buckets.set(key, fresh);
+    return false;
+  }
+  fresh.push(now);
+  buckets.set(key, fresh);
+  return true;
+}
+
 // Returns a routed, injectable HTTP handler suitable for http.createServer. Everything the
 // legacy server.js held at module scope (config-derived constants, the rate-limit bucket
 // Map) moves into this factory's closure, so two handler instances in one test process
@@ -87,7 +116,13 @@ export function createRequestHandler({ config, adapters, webDir }) {
   const allowedOrigins = new Set(config.security?.allowedOrigins ?? []);
   const expectedHost = config.security?.expectedHost ?? null;
   const requireToken = config.security?.token ?? '';
-  const rateLimitBuckets = new Map();
+  // Two independent buckets (T-3-06/D-05): POST /v1/turn draws on turnRateLimitBuckets at
+  // the configured turn ceiling; the two GET /v1/* discovery routes draw on
+  // discoveryRateLimitBuckets at the fixed DISCOVERY_RATE_LIMIT_* ceiling above. The bucket
+  // is selected by the matched route in the router, before any handler runs — never by a
+  // request header — so a caller cannot choose which budget its own request draws from.
+  const turnRateLimitBuckets = new Map();
+  const discoveryRateLimitBuckets = new Map();
 
   // Ported functionally unchanged from the legacy server.js: timing-safe token compare,
   // per-IP sliding window, expected-host and allowed-origin checks. Only the rejection
@@ -102,24 +137,26 @@ export function createRequestHandler({ config, adapters, webDir }) {
     return timingSafeEqual(left, right);
   }
 
-  function checkRateLimit(req) {
-    const key = clientIp(req);
-    const now = Date.now();
-    const bucket = rateLimitBuckets.get(key) ?? [];
-    const fresh = bucket.filter((ts) => now - ts < RATE_LIMIT_WINDOW_MS);
-    if (fresh.length >= RATE_LIMIT_MAX_REQUESTS) {
-      rateLimitBuckets.set(key, fresh);
-      return false;
-    }
-    fresh.push(now);
-    rateLimitBuckets.set(key, fresh);
-    return true;
+  function checkTurnRateLimit(req) {
+    return checkRateLimitBucket(turnRateLimitBuckets, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS, clientIp(req));
+  }
+
+  function checkDiscoveryRateLimit(req) {
+    return checkRateLimitBucket(
+      discoveryRateLimitBuckets,
+      DISCOVERY_RATE_LIMIT_MAX_REQUESTS,
+      DISCOVERY_RATE_LIMIT_WINDOW_MS,
+      clientIp(req),
+    );
   }
 
   // `sendError` lets a caller swap the rejection renderer without duplicating the gate
   // itself — GET /v1/capabilities and GET /v1/health pass sendLineErrorHead so a rejection
   // from this same gate still matches each route's own line-based content type.
-  function validateRequest(req, res, sendError = sendErrorHead) {
+  // `checkLimit` lets a caller swap which rate-limit bucket this gate draws from — the two
+  // discovery routes pass checkDiscoveryRateLimit so a burst against them can never draw
+  // down the turn endpoint's own budget, and vice versa.
+  function validateRequest(req, res, { sendError = sendErrorHead, checkLimit = checkTurnRateLimit } = {}) {
     const origin = req.headers.origin;
     const host = req.headers.host;
     const authHeader = req.headers.authorization || '';
@@ -140,7 +177,7 @@ export function createRequestHandler({ config, adapters, webDir }) {
       sendError(res, buildError('UNAUTHORIZED'));
       return false;
     }
-    if (!checkRateLimit(req)) {
+    if (!checkLimit(req)) {
       sendError(res, buildError('RATE_LIMITED'));
       return false;
     }
@@ -401,11 +438,11 @@ export function createRequestHandler({ config, adapters, webDir }) {
         return await handleTurn(req, res);
       }
       if (req.method === 'GET' && req.url === '/v1/capabilities') {
-        if (!validateRequest(req, res, sendLineErrorHead)) return;
+        if (!validateRequest(req, res, { sendError: sendLineErrorHead, checkLimit: checkDiscoveryRateLimit })) return;
         return handleCapabilities(req, res);
       }
       if (req.method === 'GET' && req.url === '/v1/health') {
-        if (!validateRequest(req, res, sendLineErrorHead)) return;
+        if (!validateRequest(req, res, { sendError: sendLineErrorHead, checkLimit: checkDiscoveryRateLimit })) return;
         return await handleHealth(req, res);
       }
       return sendErrorHead(res, buildError('NOT_FOUND'));

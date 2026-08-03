@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 
-import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
+import { createRequestHandler, DISCOVERY_RATE_LIMIT_MAX_REQUESTS } from '../apps/voice-bridge/request-handler.js';
 import {
   getBackendStatus,
   resetBackendHealthCache,
@@ -316,6 +316,77 @@ test('a wrong bearer token returns 401 with a line-based body, not the JSON enve
     const idx = firstLine.indexOf(': ');
     assert.ok(idx > 0, 'first line must split into a key and a value on \': \'');
     assert.equal(firstLine.slice(0, idx), 'error-code');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+function makeFakeAdapters({ transcript, reply, wavBuffer }) {
+  return {
+    transcribe: async () => ({ text: transcript, meta: {} }),
+    agent: async () => ({ text: reply, rawText: reply, meta: {} }),
+    speak: async () => ({ audioBuffer: wavBuffer, mimeType: 'audio/wav', meta: {} }),
+  };
+}
+
+// =====================================================================================
+// Task 3: the discovery endpoints' own rate-limit bucket
+// =====================================================================================
+
+test(`${DISCOVERY_RATE_LIMIT_MAX_REQUESTS} sequential GET /v1/health requests from one address all return 200 or 503, never 429`, async () => {
+  const handler = createRequestHandler({ config: buildTestConfig(), adapters: {}, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    for (let i = 0; i < DISCOVERY_RATE_LIMIT_MAX_REQUESTS; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const response = await getPath(port, '/v1/health');
+      assert.ok([200, 503].includes(response.statusCode), `request ${i + 1} must return 200 or 503, never 429`);
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('after a burst that exhausts the discovery bucket, a POST /v1/turn from the same address is still admitted', async () => {
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const config = buildTestConfig({ security: { rateLimitMaxRequests: 6, rateLimitWindowMs: 15_000 } });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    for (let i = 0; i < DISCOVERY_RATE_LIMIT_MAX_REQUESTS; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await getPath(port, '/v1/health');
+    }
+    const turnResponse = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    assert.notEqual(turnResponse.statusCode, 429, 'an exhausted discovery bucket must never block a turn');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test(`request number ${DISCOVERY_RATE_LIMIT_MAX_REQUESTS + 1} to GET /v1/health inside one window returns 429 with a line-based RATE_LIMITED body`, async () => {
+  const handler = createRequestHandler({ config: buildTestConfig(), adapters: {}, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    for (let i = 0; i < DISCOVERY_RATE_LIMIT_MAX_REQUESTS; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await getPath(port, '/v1/health');
+    }
+    const overLimit = await getPath(port, '/v1/health');
+    assert.equal(overLimit.statusCode, 429);
+    assert.equal(overLimit.headers['x-error-code'], 'RATE_LIMITED');
+    const firstLine = overLimit.body.split('\n')[0];
+    const idx = firstLine.indexOf(': ');
+    assert.ok(idx > 0, 'first line must split into a key and a value on \': \' — it is not JSON');
+    assert.equal(firstLine.slice(0, idx), 'error-code');
+    assert.equal(firstLine.slice(idx + 2), 'RATE_LIMITED');
   } finally {
     await closeServer(server);
   }

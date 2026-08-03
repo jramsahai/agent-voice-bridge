@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 
-import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
+import { createRequestHandler, DISCOVERY_RATE_LIMIT_MAX_REQUESTS } from '../apps/voice-bridge/request-handler.js';
 import {
   MAX_REQUEST_AUDIO_BYTES,
   TRANSCRIPT_BYTES_HEADER,
@@ -269,6 +269,106 @@ test('GET /v1/capabilities issued while a fake-adapter turn is in flight returns
     gate.release();
     const turnResponse = await turnPromise;
     assert.equal(turnResponse.statusCode, 200);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+function makeFakeAdapters({ transcript, reply, wavBuffer }) {
+  return {
+    transcribe: async () => ({ text: transcript, meta: {} }),
+    agent: async () => ({ text: reply, rawText: reply, meta: {} }),
+    speak: async () => ({ audioBuffer: wavBuffer, mimeType: 'audio/wav', meta: {} }),
+  };
+}
+
+// =====================================================================================
+// Task 3: the discovery endpoints' own rate-limit bucket
+// =====================================================================================
+
+test(`${DISCOVERY_RATE_LIMIT_MAX_REQUESTS} sequential GET /v1/capabilities requests from one address all return 200`, async () => {
+  const handler = createRequestHandler({ config: buildTestConfig(), adapters: {}, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    for (let i = 0; i < DISCOVERY_RATE_LIMIT_MAX_REQUESTS; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const response = await getPath(port, '/v1/capabilities');
+      assert.equal(response.statusCode, 200, `request ${i + 1} must return 200`);
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a burst that exhausts the turn bucket leaves a subsequent GET /v1/capabilities admissible, and a burst that exhausts the discovery bucket leaves a subsequent POST /v1/turn admissible', async () => {
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const config = buildTestConfig({ security: { rateLimitMaxRequests: 6, rateLimitWindowMs: 15_000 } });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+
+    // Exhaust the turn bucket: six admitted, the seventh refused 429.
+    for (let i = 0; i < 6; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const response = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+      assert.equal(response.statusCode, 200, `turn ${i + 1} must be admitted`);
+    }
+    const seventhTurn = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    assert.equal(seventhTurn.statusCode, 429);
+
+    const capabilitiesAfterTurnBurst = await getPath(port, '/v1/capabilities');
+    assert.equal(capabilitiesAfterTurnBurst.statusCode, 200, 'a poller must not be crowded out by an exhausted turn bucket');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('after a burst that exhausts the discovery bucket, a POST /v1/turn from the same address is still admitted', async () => {
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const config = buildTestConfig({ security: { rateLimitMaxRequests: 6, rateLimitWindowMs: 15_000 } });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+
+    for (let i = 0; i < DISCOVERY_RATE_LIMIT_MAX_REQUESTS; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await getPath(port, '/v1/capabilities');
+    }
+    const turnResponse = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    assert.notEqual(turnResponse.statusCode, 429, 'an exhausted discovery bucket must never block a turn');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test(`request number ${DISCOVERY_RATE_LIMIT_MAX_REQUESTS + 1} to GET /v1/capabilities inside one window returns 429 with a line-based RATE_LIMITED body`, async () => {
+  const handler = createRequestHandler({ config: buildTestConfig(), adapters: {}, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    for (let i = 0; i < DISCOVERY_RATE_LIMIT_MAX_REQUESTS; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await getPath(port, '/v1/capabilities');
+    }
+    const overLimit = await getPath(port, '/v1/capabilities');
+    assert.equal(overLimit.statusCode, 429);
+    assert.equal(overLimit.headers['x-error-code'], 'RATE_LIMITED');
+    const firstLine = overLimit.body.split('\n')[0];
+    const idx = firstLine.indexOf(': ');
+    assert.ok(idx > 0, 'first line must split into a key and a value on \': \' — it is not JSON');
+    assert.equal(firstLine.slice(0, idx), 'error-code');
+    assert.equal(firstLine.slice(idx + 2), 'RATE_LIMITED');
   } finally {
     await closeServer(server);
   }

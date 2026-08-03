@@ -99,6 +99,23 @@ export function makeMalformedWav(kind) {
       header.write('WAVE', 8, 'ascii');
       return Buffer.concat([header, dataChunk]);
     }
+    case 'undersized-fmt-chunk': {
+      // Declares a fmt chunk of 2 bytes — passes walkChunks()'s only size check (it doesn't
+      // run past the buffer end) but is far short of the 16 bytes readWavFormat() requires.
+      const fmtChunk = Buffer.alloc(8 + 2);
+      fmtChunk.write('fmt ', 0, 'ascii');
+      fmtChunk.writeUInt32LE(2, 4);
+      fmtChunk.writeUInt16LE(1, 8);
+      const dataChunk = Buffer.alloc(8);
+      dataChunk.write('data', 0, 'ascii');
+      dataChunk.writeUInt32LE(0, 4);
+      const body = Buffer.concat([fmtChunk, dataChunk]);
+      const header = Buffer.alloc(12);
+      header.write('RIFF', 0, 'ascii');
+      header.writeUInt32LE(4 + body.length, 4);
+      header.write('WAVE', 8, 'ascii');
+      return Buffer.concat([header, body]);
+    }
     case 'size-beyond-buffer': {
       const dataChunk = Buffer.alloc(8);
       dataChunk.write('data', 0, 'ascii');

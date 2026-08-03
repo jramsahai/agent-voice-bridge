@@ -113,11 +113,19 @@ export function wavToPcm(wavBuffer) {
   return wavBuffer.subarray(offset, offset + size);
 }
 
+// wFormatTag(2) + nChannels(2) + nSamplesPerSec(4) + nAvgBytesPerSec(4) + nBlockAlign(2) +
+// wBitsPerSample(2) — the minimum a PCM fmt chunk must declare before readWavFormat()'s
+// fixed-offset reads (up to fmt.offset + 14) are safe to perform.
+const MIN_FMT_CHUNK_SIZE = 16;
+
 export function readWavFormat(wavBuffer) {
   const chunks = walkChunks(wavBuffer);
   const fmt = chunks.get('fmt ');
   if (!fmt) {
     throw malformedError('WAV buffer has no fmt chunk');
+  }
+  if (fmt.size < MIN_FMT_CHUNK_SIZE) {
+    throw malformedError(`fmt chunk is ${fmt.size} bytes, smaller than the minimum ${MIN_FMT_CHUNK_SIZE}`);
   }
   return {
     sampleRate: wavBuffer.readUInt32LE(fmt.offset + 4),

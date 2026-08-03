@@ -158,6 +158,13 @@ test('AUDIO_MALFORMED is a real code in the catalogue', () => {
   assert.ok('AUDIO_MALFORMED' in ERROR_CODES);
 });
 
+test('readWavFormat throws AUDIO_MALFORMED (not a RangeError) for a fmt chunk declaring fewer than 16 bytes', () => {
+  assert.throws(
+    () => readWavFormat(makeMalformedWav('undersized-fmt-chunk')),
+    (err) => err.code === 'AUDIO_MALFORMED',
+  );
+});
+
 // --- Writer boundaries (extending the tracer's coverage) ---
 
 test('pcmToWav throws above MAX_PCM_BYTES', () => {

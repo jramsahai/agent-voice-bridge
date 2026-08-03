@@ -198,7 +198,9 @@ export async function prepareTranscriptionInput(audioBuffer, declaredFormatId, o
 }
 
 // Same throw-vs-resolve contract as prepareTranscriptionInput above: an unsupported
-// requestedFormatId resolves to `{ error }`; a malformed replyWavBuffer throws.
+// requestedFormatId resolves to `{ error }` — as does a *registered* but container-format
+// requestedFormatId, which is out of scope for this direction (see WR-04) — while a
+// malformed replyWavBuffer throws.
 export async function prepareClientOutput(replyWavBuffer, requestedFormatId, options = {}) {
   const entry = lookupFormat(requestedFormatId);
   if (!entry) {
@@ -240,9 +242,15 @@ export async function prepareClientOutput(replyWavBuffer, requestedFormatId, opt
 
   // Container-format output requests (returning a WAV rather than headerless PCM) are not
   // exercised by any client this milestone ships — the codec-free promise is the only
-  // output path this phase's requirements (FMT-04) cover. Documented as out of scope
-  // rather than guessed at.
-  throw new Error(
-    `prepareClientOutput: container format '${requestedFormatId}' as a reply format is out of scope for this milestone`,
-  );
+  // output path this phase's requirements (FMT-04) cover. `requestedFormatId` is a
+  // *registered* id here (it passed lookupFormat above), so this is out-of-scope-for-this-
+  // direction input, not a programmer error — resolved the same way every other rejection
+  // path in this module is, rather than thrown (see WR-04).
+  return {
+    error: buildError(
+      'FMT_UNSUPPORTED',
+      `Requested reply format '${requestedFormatId}' is not available as a reply format.`,
+      { status: 415 },
+    ),
+  };
 }

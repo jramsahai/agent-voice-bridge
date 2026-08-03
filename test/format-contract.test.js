@@ -207,3 +207,11 @@ test('prepareTranscriptionInput throws (per the documented contract) for a malfo
     },
   );
 });
+
+test('prepareClientOutput resolves (does not reject) with a 415 envelope for a registered container-format reply request', async () => {
+  const wav = makeCanonicalWav({ pcm: makePcm16({ samples: 100 }) });
+  const result = await prepareClientOutput(wav, 'wav');
+  assert.ok(result.error, 'expected a resolved error envelope, not a thrown error');
+  assert.equal(result.error.status, 415);
+  assert.equal(result.error.body.error.code, 'FMT_UNSUPPORTED');
+});

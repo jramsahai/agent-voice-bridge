@@ -144,14 +144,42 @@ export function createRequestHandler({ config, adapters, webDir }) {
       return sendErrorHead(res, prepared.error);
     }
 
-    // A transcript that is missing or trims to nothing is rejected before the agent stage
-    // ever runs, via a thin per-turn wrapper over the injected transcribe adapter — not a
-    // second adapter-selection seam (Phase 2's ARISK-01): this wrapper never chooses which
-    // implementation runs, it only inspects the already-selected adapter's own resolved
-    // value and forwards every argument to it unchanged. Throwing here (rather than
-    // resolving) lets runStage()'s existing error propagation carry the .code straight to
-    // this handler's catch block, which maps it to the frozen catalogue (TRANSCRIPT_EMPTY,
-    // 422) — replacing the ad hoc 422 string the legacy handler predates.
+    // Disconnect detection: a per-turn AbortController fed by the *response's* own 'close'
+    // event, not the deprecated `.aborted` boolean IncomingMessage exposes (deprecated since
+    // Node v17 — 03-RESEARCH.md's Don't Hand-Roll table). Verified empirically against this runtime
+    // (Node v26.5.0) rather than assumed from research: `req`'s (IncomingMessage) 'close'
+    // fires as soon as the *request* body has been fully received — which happens on every
+    // ordinary turn, seconds before the response is anywhere near done — so listening there
+    // would abort every turn spuriously. `res`'s (ServerResponse) 'close' event is the one
+    // that fires early, with `res.writableEnded` still false, precisely when the underlying
+    // connection is torn down before the response completes, and fires only after
+    // `res.writableEnded` is already true on an ordinary successful completion. runTurn()'s
+    // own between-stage checks and runStage()'s abort normalization do the rest — this is
+    // wiring onto an existing Phase 2 contract, not new pipeline logic.
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        controller.abort();
+      }
+    });
+
+    // Composes over the injected adapters inside this handler's own closure only — not a
+    // second adapter-selection seam (Phase 2's ARISK-01 stays intact: nothing here chooses
+    // which implementation runs, each wrapper only inspects the already-selected adapter's
+    // own resolved value, or observes when it is invoked, and forwards every argument
+    // unchanged). The transcribe wrapper rejects a missing/whitespace-only transcript before
+    // the agent stage ever runs (TRANSCRIPT_EMPTY, 422 — replacing the legacy ad hoc 422
+    // string). The agent/speak wrappers exist so this handler can write the text preamble to
+    // the wire the moment the agent stage resolves — before awaiting the speak stage's own
+    // resolution — since speak is only ever invoked, by the pipeline's own fixed stage
+    // order, once transcript and reply are already committed.
+    let capturedTranscript;
+    let capturedReply;
+    let resolveTextReady;
+    const textReady = new Promise((resolve) => {
+      resolveTextReady = resolve;
+    });
+
     const turnAdapters = {
       ...adapters,
       transcribe: async (...args) => {
@@ -161,13 +189,23 @@ export function createRequestHandler({ config, adapters, webDir }) {
           err.code = 'TRANSCRIPT_EMPTY';
           throw err;
         }
+        capturedTranscript = result.text;
         return result;
+      },
+      agent: async (...args) => {
+        const result = await adapters.agent(...args);
+        capturedReply = result.rawText ?? result.text;
+        return result;
+      },
+      speak: (...args) => {
+        resolveTextReady();
+        return adapters.speak(...args);
       },
     };
 
     // runTurn()'s signature and internals are a locked Phase 2 contract — called here,
     // never modified.
-    const result = await runTurn({
+    const runTurnPromise = runTurn({
       audioBuffer: prepared.wavBuffer,
       adapters: turnAdapters,
       sttConfig: config.stt,
@@ -175,16 +213,57 @@ export function createRequestHandler({ config, adapters, webDir }) {
       ttsConfig: config.tts,
       wantAudio,
       audioFilename: 'input.wav',
+      signal: controller.signal,
     });
 
-    let audioBuffer = Buffer.alloc(0);
-    if (result.speech) {
-      const output = await prepareClientOutput(result.speech.audioBuffer, outputFormatId);
-      if (output.error) {
-        return sendErrorHead(res, output.error);
+    if (wantAudio) {
+      // A turn that never reaches the speak stage (an error thrown by transcribe/agent, or
+      // an abort caught between stages) never resolves textReady on its own — race it
+      // against the turn's own settlement so that case falls through to the ordinary
+      // re-await below instead of waiting forever for a speak call that will never happen.
+      await Promise.race([textReady, runTurnPromise.then(() => {}, () => {})]);
+
+      if (capturedTranscript !== undefined && capturedReply !== undefined) {
+        // Compute both length headers and call writeHead before the first write of any
+        // kind (03-RESEARCH.md Pitfall 2) — both are known now, since the pipeline resolves
+        // transcript and reply together, before speech starts. Writing them here, before
+        // awaiting runTurnPromise to completion, is what lets the client read the full text
+        // preamble while synthesis is still in flight.
+        const head = buildTurnResponseHead({
+          transcript: capturedTranscript,
+          reply: capturedReply,
+          outputFormatId,
+          audioPresent: true,
+        });
+        res.writeHead(head.status, head.headers);
+        res.write(head.transcriptBuffer);
+        res.write(head.replyBuffer);
+
+        const result = await runTurnPromise;
+        let audioBuffer = Buffer.alloc(0);
+        if (result.speech) {
+          const output = await prepareClientOutput(result.speech.audioBuffer, outputFormatId);
+          if (output.error) {
+            // Headers are already on the wire — there is no fresh status line left to
+            // report a conversion failure through. Log server-side and end the response
+            // rather than attempt a second writeHead.
+            console.error('[voice-bridge] output conversion failed after headers were sent', output.error);
+            return res.end();
+          }
+          audioBuffer = output.buffer;
+        }
+        res.write(audioBuffer);
+        return res.end();
       }
-      audioBuffer = output.buffer;
     }
+
+    // Text-only turn (wantAudio false — prepareClientOutput is never called on this path,
+    // since a conversion on a null speech buffer is the obvious way this branch breaks), or
+    // a wantAudio-true turn that errored/aborted before ever reaching the speak stage.
+    // Either way nothing has been written to the wire yet, so the single-await shape below
+    // still applies, and in the error case runTurnPromise's rejection propagates unchanged
+    // to the outer catch.
+    const result = await runTurnPromise;
 
     const head = buildTurnResponseHead({
       transcript: result.transcript,
@@ -199,7 +278,6 @@ export function createRequestHandler({ config, adapters, webDir }) {
     res.writeHead(head.status, head.headers);
     res.write(head.transcriptBuffer);
     res.write(head.replyBuffer);
-    res.write(audioBuffer);
     res.end();
   }
 

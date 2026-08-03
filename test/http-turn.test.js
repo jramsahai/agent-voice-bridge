@@ -454,3 +454,261 @@ test('an unknown path returns 404 with x-error-code NOT_FOUND', async () => {
     await closeServer(server);
   }
 });
+
+// =====================================================================================
+// Task 2: text-only turns, text-before-synthesis ordering, and mid-turn disconnect
+// =====================================================================================
+
+test('X-Voice-Want-Audio set to the disabled token returns 200 with no audio segment and the fake speak adapter is never called', async () => {
+  let speakCallCount = 0;
+  const fakeTranscript = 'hello';
+  const fakeReply = 'ok then';
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => ({ text: fakeTranscript, meta: {} }),
+    agent: async () => ({ text: fakeReply, rawText: fakeReply, meta: {} }),
+    speak: async () => {
+      speakCallCount += 1;
+      throw new Error('speak must not be called when audio is disabled');
+    },
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'pcm16', 'X-Voice-Want-Audio': '0' },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers['x-voice-audio-present'], '0');
+    const transcriptBytes = Number(response.headers['x-voice-transcript-bytes']);
+    const replyBytes = Number(response.headers['x-voice-reply-bytes']);
+    assert.equal(response.body.length, transcriptBytes + replyBytes);
+    assert.equal(speakCallCount, 0);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('the same request with X-Voice-Want-Audio absent returns audio-present 1 and a non-empty audio segment', async () => {
+  const fakeTranscript = 'hello';
+  const fakeReply = 'ok then';
+  const replyWav = makeCanonicalWav({ pcm: makePcm16({ samples: 20 }) });
+  const config = buildTestConfig();
+  const adapters = makeFakeAdapters({ transcript: fakeTranscript, reply: fakeReply, wavBuffer: replyWav });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers['x-voice-audio-present'], '1');
+    const transcriptBytes = Number(response.headers['x-voice-transcript-bytes']);
+    const replyBytes = Number(response.headers['x-voice-reply-bytes']);
+    assert.ok(response.body.length > transcriptBytes + replyBytes);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('the client can read the full text preamble before the speak stage resolves — an ordering proof, not a timing one', async () => {
+  const gate = makeGate();
+  const fakeTranscript = 'hello there';
+  const fakeReply = 'a careful reply';
+  const replyWav = makeCanonicalWav({ pcm: makePcm16({ samples: 50 }) });
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => ({ text: fakeTranscript, meta: {} }),
+    agent: async () => ({ text: fakeReply, rawText: fakeReply, meta: {} }),
+    speak: async () => {
+      await gate.promise;
+      return { audioBuffer: replyWav, mimeType: 'audio/wav', meta: {} };
+    },
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const requestBody = makePcm16({ samples: 10 });
+    const result = await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: '/v1/turn',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': requestBody.length,
+            'X-Voice-Input-Format': 'pcm16',
+          },
+        },
+        (res) => {
+          const expectedTextBytes =
+            Number(res.headers['x-voice-transcript-bytes']) + Number(res.headers['x-voice-reply-bytes']);
+          let receivedBytes = 0;
+          let released = false;
+          const chunks = [];
+          res.on('data', (chunk) => {
+            chunks.push(chunk);
+            receivedBytes += chunk.length;
+            // The client has now received both full text segments off the wire — only
+            // now does the test let synthesis finish. If the handler ever buffered the
+            // whole turn before writing anything, this data event (and this release)
+            // would never fire until well after speak had already resolved on its own —
+            // this is an assertion on arrival order, not on elapsed time.
+            if (!released && receivedBytes >= expectedTextBytes) {
+              released = true;
+              gate.release();
+            }
+          });
+          res.on('end', () => resolve({ headers: res.headers, body: Buffer.concat(chunks) }));
+        },
+      );
+      req.on('error', reject);
+      req.write(requestBody);
+      req.end();
+    });
+
+    assert.equal(Number(result.headers['x-voice-audio-present']), 1);
+    const transcriptBytes = Number(result.headers['x-voice-transcript-bytes']);
+    const replyBytes = Number(result.headers['x-voice-reply-bytes']);
+    assert.equal(result.body.subarray(0, transcriptBytes).toString('utf8'), fakeTranscript);
+    assert.equal(result.body.subarray(transcriptBytes, transcriptBytes + replyBytes).toString('utf8'), fakeReply);
+    assert.deepEqual(result.body.subarray(transcriptBytes + replyBytes), wavToPcm(replyWav));
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a fake agent adapter returning an empty string yields reply-bytes 0 with the audio segment starting immediately after the transcript', async () => {
+  const fakeTranscript = 'hello';
+  const replyWav = makeCanonicalWav({ pcm: makePcm16({ samples: 20 }) });
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => ({ text: fakeTranscript, meta: {} }),
+    agent: async () => ({ text: '', rawText: '', meta: {} }),
+    speak: async () => ({ audioBuffer: replyWav, mimeType: 'audio/wav', meta: {} }),
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers['x-voice-reply-bytes'], '0');
+    const transcriptBytes = Number(response.headers['x-voice-transcript-bytes']);
+    const audioSegment = response.body.subarray(transcriptBytes);
+    assert.deepEqual(audioSegment, wavToPcm(replyWav));
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('two overlapping requests where the first is text-only still yield one 200 and one 409', async () => {
+  const gate = makeGate();
+  const calls = [];
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => {
+      calls.push('transcribe');
+      await gate.promise;
+      return { text: 'hi', meta: {} };
+    },
+    agent: async () => {
+      calls.push('agent');
+      return { text: 'ok', rawText: 'ok', meta: {} };
+    },
+    speak: async () => {
+      calls.push('speak');
+      throw new Error('speak must not be called for a text-only turn');
+    },
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const firstPromise = postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'pcm16', 'X-Voice-Want-Audio': '0' },
+    });
+    await waitUntil(() => calls.length === 1);
+
+    const second = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    assert.equal(second.statusCode, 409);
+    assert.equal(second.headers['x-error-code'], 'TURN_BUSY');
+
+    gate.release();
+    const first = await firstPromise;
+    assert.equal(first.statusCode, 200);
+    assert.deepEqual(calls, ['transcribe', 'agent']);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a client that destroys its socket mid-turn causes the in-flight fake speak adapter to observe an aborted signal', async () => {
+  const gate = makeGate();
+  let observedAborted = null;
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => ({ text: 'hello', meta: {} }),
+    agent: async () => ({ text: 'a careful reply', rawText: 'a careful reply', meta: {} }),
+    speak: async (text, ttsConfig, { signal } = {}) => {
+      await gate.promise;
+      observedAborted = signal?.aborted ?? false;
+      if (signal?.aborted) {
+        // Realistic adapter behavior: a well-behaved adapter rejects once it observes its
+        // own signal aborted, letting the pipeline's runStage() normalize this to
+        // TurnAbortedError rather than resolving a reply nobody will ever receive.
+        throw new Error('speak observed an aborted signal');
+      }
+      return { audioBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }), mimeType: 'audio/wav', meta: {} };
+    },
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const body = makePcm16({ samples: 10 });
+    let headersReceived = false;
+    const clientReq = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: '/v1/turn',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': body.length,
+          'X-Voice-Input-Format': 'pcm16',
+        },
+      },
+      (res) => {
+        headersReceived = true;
+        res.on('data', () => {});
+        res.on('error', () => {});
+      },
+    );
+    // Destroying the request mid-flight is expected to surface a client-side socket error —
+    // this is the disconnect being proven, not a failure of the test.
+    clientReq.on('error', () => {});
+    clientReq.write(body);
+    clientReq.end();
+
+    await waitUntil(() => headersReceived);
+    clientReq.destroy();
+
+    // The server's req 'close' event is driven by the underlying socket teardown, not
+    // synchronous with clientReq.destroy() — give the event loop a short window for it to
+    // actually fire and abort the controller before releasing the gate.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    gate.release();
+    await waitUntil(() => observedAborted !== null);
+
+    assert.equal(observedAborted, true);
+  } finally {
+    await closeServer(server);
+  }
+});

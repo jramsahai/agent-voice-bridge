@@ -81,6 +81,20 @@ const PHASE_TEST_FILES = fs
   .map((name) => path.join(TEST_DIR, name))
   .filter((filePath) => filePath !== THIS_FILE && importsFromPhaseSourceDirs(filePath));
 
+// Phase 3's test/http-turn.test.js legitimately opens a real loopback socket to prove
+// Phase 3's HTTP layer end to end — exempted here too (test/convert.test.js's own Phase 1
+// scan, which walks all of test/ recursively, is the guard that actually trips on it today;
+// this exemption is kept in step so a future PHASE_TEST_FILES membership change can never
+// silently reintroduce this guard's own flag against that file's real socket). Only the
+// three socket-related substrings below are exempted; the secure-transport builtin pattern
+// and the models-directory pattern stay enforced for every file, including this one.
+const HTTP_SOCKET_EXEMPT_FILES = new Set([path.join(TEST_DIR, 'http-turn.test.js')]);
+const HTTP_SOCKET_EXEMPT_PATTERNS = [
+  ['node', ':', 'net'].join(''),
+  ['node', ':', 'http'].join(''),
+  ['fetch', '('].join(''),
+];
+
 test('sanity: this phase\'s source-directory walk and test-file discovery both found something', () => {
   assert.ok(PHASE_SOURCE_FILES.length > 0, 'expected at least one source file under session/, lifecycle/ or pipeline/');
   assert.ok(
@@ -135,12 +149,29 @@ test('no file across this phase\'s own source directories or test files referenc
   const filesToScan = [...PHASE_SOURCE_FILES, ...PHASE_TEST_FILES];
   for (const filePath of filesToScan) {
     const source = fs.readFileSync(filePath, 'utf8');
-    for (const pattern of FORBIDDEN_NETWORK_MODEL_PATTERNS) {
+    const patternsToCheck = HTTP_SOCKET_EXEMPT_FILES.has(filePath)
+      ? FORBIDDEN_NETWORK_MODEL_PATTERNS.filter((pattern) => !HTTP_SOCKET_EXEMPT_PATTERNS.includes(pattern))
+      : FORBIDDEN_NETWORK_MODEL_PATTERNS;
+    for (const pattern of patternsToCheck) {
       assert.ok(
         !source.includes(pattern),
         `${path.relative(repoRoot, filePath)} must not reference '${pattern}' — this phase's suite must run offline and model-free`,
       );
     }
+  }
+});
+
+test('sanity: the documented HTTP-socket exemption still exists and still uses a pattern it is exempted for', () => {
+  for (const filePath of HTTP_SOCKET_EXEMPT_FILES) {
+    assert.ok(
+      fs.existsSync(filePath),
+      `exempted file ${path.relative(repoRoot, filePath)} no longer exists — remove the stale exemption`,
+    );
+    const source = fs.readFileSync(filePath, 'utf8');
+    assert.ok(
+      HTTP_SOCKET_EXEMPT_PATTERNS.some((pattern) => source.includes(pattern)),
+      `${path.relative(repoRoot, filePath)} no longer uses any pattern it was exempted for — remove the stale exemption`,
+    );
   }
 });
 

@@ -1,5 +1,7 @@
-// The single place every error code the service can return is defined. Every later
-// phase imports from this already-complete catalogue rather than appending its own row.
+// The single place every error code the service can return is defined. This catalogue is
+// never complete — a later phase adds its own row here, deliberately, and once a code is
+// published its key and status are pinned: an existing entry's code or status is never
+// redefined, only new entries are appended.
 
 export const ERROR_CODES = Object.freeze({
   FMT_UNSUPPORTED: Object.freeze({
@@ -17,6 +19,18 @@ export const ERROR_CODES = Object.freeze({
   AUDIO_CONVERSION_FAILED: Object.freeze({
     status: 500,
     title: 'Audio conversion failed.',
+  }),
+  TURN_BUSY: Object.freeze({
+    status: 409,
+    title: 'Another turn is already in progress. Try again shortly.',
+  }),
+  TURN_ABORTED: Object.freeze({
+    // 499 is not an IANA-registered status; it is the long-standing reverse-proxy
+    // convention for a client that closed the request before the server could respond. By
+    // definition nothing is listening to receive it over the wire — it exists so the
+    // pipeline's internal failure shape has a stable identity that Phase 3 can log and map.
+    status: 499,
+    title: 'The turn was aborted before it could complete.',
   }),
 });
 

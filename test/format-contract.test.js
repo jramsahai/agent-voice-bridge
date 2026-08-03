@@ -9,6 +9,7 @@ import os from 'node:os';
 
 import { ERROR_CODES, isKnownErrorCode } from '../packages/shared/errors/error-codes.js';
 import { buildError, unsupportedFormatError } from '../packages/shared/errors/error-response.js';
+import { TurnBusyError, TurnAbortedError, assertTurnCodeRegistered } from '../packages/shared/errors/turn-errors.js';
 import {
   AUDIO_FORMATS,
   listSupportedFormats,
@@ -111,15 +112,40 @@ test('every ERROR_CODES entry round-trips through buildError with matching heade
   }
 });
 
-test('ERROR_CODES holds exactly the four codes this phase can produce', () => {
+test('ERROR_CODES holds exactly the six codes phases 1 and 2 can produce', () => {
   assert.deepEqual(
     Object.keys(ERROR_CODES).sort(),
-    ['AUDIO_CONVERSION_FAILED', 'AUDIO_MALFORMED', 'AUDIO_TOO_LARGE', 'FMT_UNSUPPORTED'].sort(),
+    [
+      'AUDIO_CONVERSION_FAILED',
+      'AUDIO_MALFORMED',
+      'AUDIO_TOO_LARGE',
+      'FMT_UNSUPPORTED',
+      'TURN_ABORTED',
+      'TURN_BUSY',
+    ].sort(),
   );
   assert.equal(ERROR_CODES.FMT_UNSUPPORTED.status, 415);
   assert.equal(ERROR_CODES.AUDIO_MALFORMED.status, 400);
   assert.equal(ERROR_CODES.AUDIO_TOO_LARGE.status, 413);
   assert.equal(ERROR_CODES.AUDIO_CONVERSION_FAILED.status, 500);
+  assert.equal(ERROR_CODES.TURN_BUSY.status, 409);
+  assert.equal(ERROR_CODES.TURN_ABORTED.status, 499);
+});
+
+test('TurnBusyError and TurnAbortedError construct with a registered catalogue code and a message with no path-like or numeric-identifier content', () => {
+  for (const ErrorClass of [TurnBusyError, TurnAbortedError]) {
+    const err = new ErrorClass();
+    assert.equal(isKnownErrorCode(err.code), true);
+    assert.equal(err.name, ErrorClass.name);
+    assert.ok(!/\d{2,}/.test(err.message), `${ErrorClass.name} message must carry no numeric-identifier content`);
+    assert.ok(!err.message.includes('/'), `${ErrorClass.name} message must carry no path-like content`);
+  }
+});
+
+test('assertTurnCodeRegistered throws for a code absent from the catalogue and passes through a registered one', () => {
+  assert.throws(() => assertTurnCodeRegistered('NOT_A_REAL_TURN_CODE'));
+  assert.doesNotThrow(() => assertTurnCodeRegistered('TURN_BUSY'));
+  assert.equal(assertTurnCodeRegistered('TURN_ABORTED'), 'TURN_ABORTED');
 });
 
 test('isKnownErrorCode reflects the catalogue', () => {

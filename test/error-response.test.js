@@ -231,7 +231,14 @@ test('a serialised envelope for every code contains no host path, home directory
 test('the published error code list is exactly the pinned literal', () => {
   // A failure here means a published contract is changing — confirm the change is an
   // addition or retirement, never a silent redefinition, before updating this literal.
-  const PUBLISHED_CODES = ['AUDIO_CONVERSION_FAILED', 'AUDIO_MALFORMED', 'AUDIO_TOO_LARGE', 'FMT_UNSUPPORTED'];
+  const PUBLISHED_CODES = [
+    'AUDIO_CONVERSION_FAILED',
+    'AUDIO_MALFORMED',
+    'AUDIO_TOO_LARGE',
+    'FMT_UNSUPPORTED',
+    'TURN_ABORTED',
+    'TURN_BUSY',
+  ];
   assert.deepEqual(Object.keys(ERROR_CODES).sort(), PUBLISHED_CODES.sort());
 });
 
@@ -243,9 +250,36 @@ test('the published error code -> status mapping is exactly the pinned literal',
     AUDIO_MALFORMED: 400,
     AUDIO_TOO_LARGE: 413,
     AUDIO_CONVERSION_FAILED: 500,
+    TURN_BUSY: 409,
+    TURN_ABORTED: 499,
   };
   const actual = Object.fromEntries(Object.entries(ERROR_CODES).map(([key, value]) => [key, value.status]));
   assert.deepEqual(Object.entries(actual).sort(), Object.entries(PUBLISHED_STATUS).sort());
+});
+
+// --- Turn codes: explicit round-trip and leak-freedom, in addition to the generic loops
+// above (which already cover every catalogue entry including these two) — asserted
+// explicitly against a process id and the temp-directory root, since a turn's lock artifact
+// and holder pid live under os.tmpdir() and neither may ever appear in a client-facing
+// envelope. ---
+
+test('TURN_BUSY and TURN_ABORTED round-trip through buildError with matching body and header codes', () => {
+  for (const code of ['TURN_BUSY', 'TURN_ABORTED']) {
+    const { status, headers, body } = buildError(code, ERROR_CODES[code].title);
+    assert.equal(status, ERROR_CODES[code].status);
+    assert.equal(headers['X-Error-Code'], body.error.code);
+    assert.equal(body.error.code, code);
+  }
+});
+
+test('the TURN_BUSY and TURN_ABORTED envelopes leak no os.tmpdir() path, process id, or stack frame', () => {
+  const tmpRoot = os.tmpdir();
+  for (const code of ['TURN_BUSY', 'TURN_ABORTED']) {
+    const serialised = JSON.stringify(buildError(code, ERROR_CODES[code].title));
+    assert.ok(!serialised.includes(tmpRoot), `${code} envelope must not leak os.tmpdir()`);
+    assert.ok(!serialised.includes(String(process.pid)), `${code} envelope must not leak process.pid`);
+    assert.ok(!serialised.includes('at Object.'), `${code} envelope must not leak a stack frame`);
+  }
 });
 
 test('no two ERROR_CODES entries share a title', () => {

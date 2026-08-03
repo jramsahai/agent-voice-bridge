@@ -241,13 +241,46 @@ test('every one of this phase\'s test files that directly acquires the lock also
 // Plan 02-03 fixed this once (test/turn-pipeline.test.js, test/tempfiles.test.js) and this
 // plan fixed the one remaining instance (test/turn-pipeline-abort.test.js); this test exists
 // so a future file cannot silently reintroduce the pattern.
-test('none of this phase\'s test files proves temp hygiene by reading the shared os.tmpdir() listing directly', () => {
+//
+// Widened per WR-04 (02-REVIEW.md): the pattern reappeared in test/format-contract.test.js, a
+// file PHASE_TEST_FILES above never covered, because it imports from packages/shared/audio and
+// packages/shared/errors rather than this phase's own session/lifecycle/pipeline directories.
+// The hazard is suite-wide, not scoped to this phase's own source, so this specific guard scans
+// every *.test.js file under test/ — not just PHASE_TEST_FILES — with one documented exemption:
+// test/convert.test.js is a Phase 1 file, out of scope for this phase to modify, and its use of
+// the pattern is a different claim than the one that broke here ("a real afconvert subprocess
+// invocation left no residue behind," measured after a real spawn actually happened) rather than
+// format-contract.test.js's broken claim ("no subprocess was ever spawned at all," which has a
+// deterministic, non-racy proof available — see the fix below). A future file reintroducing the
+// listing-read pattern for that latter kind of claim must use a call-count or an
+// already-returned meta flag instead, exactly as format-contract.test.js now does.
+const RACY_LISTING_READ_EXEMPT_FILES = new Set([path.join(TEST_DIR, 'convert.test.js')]);
+
+test('no test file in the suite proves temp hygiene by reading the shared os.tmpdir() listing directly, aside from the one documented, out-of-scope exemption', () => {
   const racyListingRead = /fs\.readdirSync\(\s*os\.tmpdir\(\)\s*\)/;
-  for (const filePath of PHASE_TEST_FILES) {
+  const allTestFiles = fs
+    .readdirSync(TEST_DIR)
+    .filter((name) => name.endsWith('.test.js'))
+    .map((name) => path.join(TEST_DIR, name))
+    .filter((filePath) => filePath !== THIS_FILE);
+  assert.ok(allTestFiles.length > 0, 'sanity: expected at least one test file under test/');
+  for (const filePath of allTestFiles) {
+    if (RACY_LISTING_READ_EXEMPT_FILES.has(filePath)) continue;
     const source = fs.readFileSync(filePath, 'utf8');
     assert.ok(
       !racyListingRead.test(source),
-      `${path.relative(repoRoot, filePath)}: reads os.tmpdir()'s own listing directly — this is the racy shared-prefix diff pattern this phase already fixed once; capture a turn's own directory from the transcribe adapter's recorded audioPath instead`,
+      `${path.relative(repoRoot, filePath)}: reads os.tmpdir()'s own listing directly — this is the racy shared-prefix diff pattern this phase already fixed once; capture a turn's own directory from the transcribe adapter's recorded audioPath instead, or assert a deterministic call-count/meta flag proving nothing was spawned`,
+    );
+  }
+});
+
+test('sanity: the one documented exemption to the listing-read guard above still exists and still uses the pattern it is exempted for', () => {
+  for (const filePath of RACY_LISTING_READ_EXEMPT_FILES) {
+    assert.ok(fs.existsSync(filePath), `exempted file ${path.relative(repoRoot, filePath)} no longer exists — remove the stale exemption`);
+    const source = fs.readFileSync(filePath, 'utf8');
+    assert.ok(
+      /fs\.readdirSync\(\s*os\.tmpdir\(\)\s*\)/.test(source),
+      `${path.relative(repoRoot, filePath)} no longer uses the pattern it was exempted for — remove the stale exemption`,
     );
   }
 });

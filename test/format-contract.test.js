@@ -4,8 +4,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
 
 import { ERROR_CODES, isKnownErrorCode } from '../packages/shared/errors/error-codes.js';
 import { buildError, unsupportedFormatError } from '../packages/shared/errors/error-response.js';
@@ -19,25 +17,6 @@ import {
 import { MAX_PCM_BYTES, pcmToWav } from '../packages/shared/audio/wav.js';
 import { prepareTranscriptionInput, prepareClientOutput, toErrorEnvelope } from '../packages/shared/audio/convert.js';
 import { makePcm16, makeCanonicalWav } from './helpers/fixtures.js';
-
-// Read convert.js's own temp-directory prefix from its source text (regex, not a new
-// export), same pattern test/convert.test.js already uses. Asserting that no such temp
-// directory was created is a reliable "no subprocess spawned" signal regardless of when the
-// module was imported — unlike mock.method(childProcess, 'execFile', ...), which cannot
-// intercept convert.js's own promisify(execFile), captured once at module-load time, no
-// matter when the mock is installed (see REVIEW.md WR-06).
-const CONVERT_SOURCE_URL = new URL('../packages/shared/audio/convert.js', import.meta.url);
-const CONVERT_SOURCE = fs.readFileSync(CONVERT_SOURCE_URL, 'utf8');
-
-function readTempDirPrefix() {
-  const match = CONVERT_SOURCE.match(/TEMP_DIR_PREFIX\s*=\s*'([^']+)'/);
-  assert.ok(match, 'convert.js must declare a documented TEMP_DIR_PREFIX constant');
-  return match[1];
-}
-
-function listMatchingTempEntries(prefix) {
-  return fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith(prefix));
-}
 
 // --- Registry ---
 
@@ -173,35 +152,30 @@ test('pcmToWav throws AUDIO_TOO_LARGE above MAX_PCM_BYTES', () => {
 
 // --- Codec-free round trip (the tracer's whole point) ---
 
+// WR-04: this pair previously also diffed a before/after snapshot of the shared, process-wide
+// os.tmpdir() prefix listing to prove "no convert.js temp directory was created" — exactly the
+// racy pattern test/turn-suite-hygiene.test.js documents fighting and eliminating elsewhere in
+// this phase (node --test runs test files in parallel, and test/convert.test.js's own real
+// afconvert exercises legitimately create-and-remove entries under that same shared prefix
+// during the snapshot window). meta.spawned === false, already asserted below, is convert.js's
+// own authoritative signal that its subprocess-spawning path (the only place it ever creates a
+// temp directory) was never reached — a deterministic proof that needs no directory listing at
+// all, the same call-count-shaped technique this phase's own tests use elsewhere.
 test('prepareTranscriptionInput(pcm16) produces a byte-identical WAV with no subprocess spawned', async () => {
   const pcm = makePcm16({ samples: 16000 });
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
   const { wavBuffer, meta } = await prepareTranscriptionInput(pcm, 'pcm16');
   assert.deepEqual(wavBuffer, makeCanonicalWav({ pcm }));
   assert.equal(meta.converted, false);
-  assert.equal(meta.spawned, false);
-  assert.deepEqual(
-    listMatchingTempEntries(prefix).sort(),
-    before.sort(),
-    'no convert.js temp directory was created — the codec-free path never reached execFileAsync',
-  );
+  assert.equal(meta.spawned, false, 'no convert.js temp directory was created — the codec-free path never reached execFileAsync');
 });
 
 test('prepareClientOutput(pcm16) extracts byte-identical PCM with no subprocess spawned', async () => {
   const pcm = makePcm16({ samples: 16000 });
   const wav = makeCanonicalWav({ pcm });
-  const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
   const { buffer, mimeType, meta } = await prepareClientOutput(wav, 'pcm16');
   assert.deepEqual(buffer, pcm);
   assert.equal(mimeType, lookupFormat('pcm16').mimeType);
-  assert.equal(meta.spawned, false);
-  assert.deepEqual(
-    listMatchingTempEntries(prefix).sort(),
-    before.sort(),
-    'no convert.js temp directory was created — the codec-free path never reached execFileAsync',
-  );
+  assert.equal(meta.spawned, false, 'no convert.js temp directory was created — the codec-free path never reached execFileAsync');
 });
 
 // --- Rejection path ---

@@ -32,7 +32,14 @@ async function isFastApiAvailable(serviceUrl, { signal } = {}) {
       signal: composeAbortSignals(signal, AbortSignal.timeout(2000)),
     });
     return res.ok;
-  } catch {
+  } catch (err) {
+    // A genuinely-down service and the 2-second health timeout both collapse to "not
+    // available" — the caller falls through to the heavier spawn path either way. The
+    // caller's own turn-level abort is different: it must propagate so speakWithKokoroFast's
+    // caller (runStage in turn-pipeline.js) can normalize it to TurnAbortedError, instead of
+    // this probe silently reporting "down" and speakWithKokoroFast spawning a whole new
+    // temp directory and child process for a caller that has already vanished.
+    if (signal?.aborted) throw err;
     return false;
   }
 }

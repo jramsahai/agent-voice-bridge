@@ -108,6 +108,14 @@ export function findDataChunk(wavBuffer) {
   return { offset: data.offset, size: data.size };
 }
 
+// Returns a *view* over wavBuffer's own underlying memory (Buffer#subarray), not a copy —
+// unlike pcmToWav() below, which always builds a fresh buffer via Buffer.concat. This is
+// deliberate: copying every extracted PCM payload would work against this service's own
+// streaming constraint (a reply must be playable before it is fully downloaded; a client
+// must not need to hold a whole reply in RAM). Callers must not mutate the returned buffer
+// in place, and must not mutate or reuse wavBuffer after extracting PCM from it — either
+// will silently corrupt the other. Call Buffer.from(wavToPcm(...)) at the call site if an
+// independent copy is ever required.
 export function wavToPcm(wavBuffer) {
   const { offset, size } = findDataChunk(wavBuffer);
   return wavBuffer.subarray(offset, offset + size);

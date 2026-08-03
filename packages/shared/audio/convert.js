@@ -231,7 +231,9 @@ export async function prepareClientOutput(replyWavBuffer, requestedFormatId, opt
     }
 
     // Chunk-walking strip, never a fixed offset — the source may be this service's own
-    // canonical WAV, or afconvert output with a filler chunk ahead of 'data'.
+    // canonical WAV, or afconvert output with a filler chunk ahead of 'data'. wavToPcm()
+    // returns a view over wavToStrip's own memory, not a copy (see its doc comment in
+    // wav.js) — callers of prepareClientOutput must not mutate this buffer in place.
     const buffer = wavToPcm(wavToStrip);
     return {
       buffer,

@@ -25,7 +25,6 @@ function validConfig() {
       },
       expectedHost: 'device.example.ts.net',
       allowedOrigins: ['https://device.example.ts.net'],
-      maxJsonBytes: 2_000_000,
       rateLimitWindowMs: 15_000,
       rateLimitMaxRequests: 6,
     },

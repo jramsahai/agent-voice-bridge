@@ -34,7 +34,6 @@ function buildTestConfig({ security = {}, tts = { voices: ['af_heart', 'af_bella
       clients: {},
       expectedHost: null,
       allowedOrigins: [],
-      maxJsonBytes: 50_000_000,
       rateLimitWindowMs: 15_000,
       rateLimitMaxRequests: 1000,
       ...security,

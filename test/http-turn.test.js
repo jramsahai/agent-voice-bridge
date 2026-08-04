@@ -28,7 +28,6 @@ function buildTestConfig(securityOverrides = {}) {
       clients: {},
       expectedHost: null,
       allowedOrigins: [],
-      maxJsonBytes: 50_000_000,
       rateLimitWindowMs: 15_000,
       rateLimitMaxRequests: 1000,
       ...securityOverrides,

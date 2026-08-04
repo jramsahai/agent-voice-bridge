@@ -28,7 +28,6 @@
     "allowedOrigins": [
       "https://your-device.your-tailnet.ts.net"
     ],
-    "maxJsonBytes": 2000000,
     "rateLimitWindowMs": 15000,
     "rateLimitMaxRequests": 6
   }

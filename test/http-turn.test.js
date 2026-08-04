@@ -1255,3 +1255,40 @@ test('rate-limit buckets are keyed by resolved client identity, not by source ad
   await handler(makeFakeTurnReq({ headers: headersFor('beta-token'), body, remoteAddress: '10.0.0.3' }), thirdRes);
   assert.equal(thirdRes.statusCode, 200);
 });
+
+// =====================================================================================
+// Plan 04-02: OPS-01's credential-free guarantee, proven end to end through the real call
+// site — not just through a direct logTurnCompletion() call (see test/turn-log.test.js).
+// =====================================================================================
+
+test('OPS-01: a real turn whose configured client token, transcript, and reply are each a distinct sentinel yields a collected record containing none of the three', async () => {
+  const TOKEN_SENTINEL = 'sentinel-token-h3x9v2qz';
+  const TRANSCRIPT_SENTINEL = 'sentinel-transcript-r5t1c8mn';
+  const REPLY_SENTINEL = 'sentinel-reply-w2n7q4kd';
+  const wavBuffer = makeCanonicalWav({ pcm: makePcm16({ samples: 20 }) });
+  const adapters = makeFakeAdapters({ transcript: TRANSCRIPT_SENTINEL, reply: REPLY_SENTINEL, wavBuffer });
+  const config = buildTestConfig({ clients: { sentinel: TOKEN_SENTINEL } });
+  const records = [];
+  const handler = createRequestHandler({
+    config,
+    adapters,
+    webDir: '/nonexistent',
+    logTurn: (record) => records.push(record),
+  });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'pcm16', Authorization: `Bearer ${TOKEN_SENTINEL}` },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(records.length, 1);
+    const serialised = JSON.stringify(records[0]);
+    assert.ok(!serialised.includes(TOKEN_SENTINEL));
+    assert.ok(!serialised.includes(TRANSCRIPT_SENTINEL));
+    assert.ok(!serialised.includes(REPLY_SENTINEL));
+  } finally {
+    await closeServer(server);
+  }
+});

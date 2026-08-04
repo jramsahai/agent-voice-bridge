@@ -233,3 +233,50 @@ test('emitting a real signal on the fake process object drives the same shutdown
 
   assert.deepEqual(exitFn.calls, [0]);
 });
+
+// =====================================================================================
+// Plan 04-05 (gap closure): 04-VERIFICATION.md gap 2 (WR-02) — a controller admitted to
+// inFlightControllers after the first abort pass has already run must still be aborted,
+// before server.closeAllConnections() and before exitFn. D-15: shutdown()'s body runs
+// synchronously up to its first await (the Promise.race), so calling shutdown('SIGTERM')
+// without awaiting it places a controller added afterward after the first pass as a fact
+// of language semantics, not a timing hope.
+// =====================================================================================
+
+test('WR-02: a controller added to the in-flight set after the first abort pass has already run is still aborted, before the force-close call and before the exit function', async () => {
+  const server = makeFakeServer({ cooperative: false });
+  const processRef = makeFakeProcess();
+  const exitFn = makeFakeExit();
+  const inFlightControllers = makeControllers(1);
+  const [earlyController] = inFlightControllers;
+
+  const { shutdown } = installShutdownHandlers({
+    server,
+    inFlightControllers,
+    processRef,
+    exitFn,
+    timeoutMs: 5,
+  });
+
+  const lateController = new AbortController();
+  let closeAllConnectionsCountAtLateAbort = null;
+  lateController.signal.addEventListener('abort', () => {
+    closeAllConnectionsCountAtLateAbort = server.closeAllConnectionsCallCount;
+  });
+
+  const settled = shutdown('SIGTERM');
+
+  // Asserts the premise rather than assuming it: the controller present at signal time is
+  // already aborted at the moment the late controller is added below, which is what makes
+  // "added after the first pass" a fact of this test rather than a hope about timing.
+  assert.equal(earlyController.signal.aborted, true);
+
+  inFlightControllers.add(lateController);
+
+  await settled;
+
+  assert.equal(lateController.signal.aborted, true);
+  assert.equal(closeAllConnectionsCountAtLateAbort, 0);
+  assert.equal(server.closeAllConnectionsCallCount, 1);
+  assert.deepEqual(exitFn.calls, [1]);
+});

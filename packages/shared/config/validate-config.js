@@ -101,7 +101,12 @@ export function validateConfig(config) {
     );
   }
 
-  // 7. allowedOrigins / rate-limit numbers
+  // 7. expectedHost / allowedOrigins / rate-limit numbers
+  if (config.security.expectedHost !== undefined && config.security.expectedHost !== null) {
+    if (typeof config.security.expectedHost !== 'string' || config.security.expectedHost.length === 0) {
+      errors.push('security.expectedHost must be a non-empty string when present');
+    }
+  }
   if (config.security.allowedOrigins !== undefined) {
     const origins = config.security.allowedOrigins;
     if (!Array.isArray(origins) || origins.some((entry) => typeof entry !== 'string')) {

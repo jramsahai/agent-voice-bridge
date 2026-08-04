@@ -7,6 +7,8 @@
 // that broke it, because this is exactly the surface (a terminal, a screen share, a pasted
 // bug report) where a secret leaks.
 
+import { ANONYMOUS_CLIENT_NAME } from '../security/token-auth.js';
+
 export const MIN_CLIENT_TOKEN_LENGTH = 16;
 export const PLACEHOLDER_TOKEN_PREFIX = 'replace-with-';
 
@@ -66,6 +68,15 @@ export function validateConfig(config) {
     for (const [name, token] of Object.entries(clients)) {
       if (typeof name !== 'string' || name.length === 0) {
         errors.push(`security.clients has an invalid client name: ${JSON.stringify(name)}`);
+      }
+      // IN-02: a client literally named __anonymous__ still authenticates correctly via its
+      // own token, but its resolved identity becomes indistinguishable in turn logs and
+      // rate-limit bucket keys from the auth-disabled fallback identity — an operability
+      // footgun, not a security hole.
+      if (name === ANONYMOUS_CLIENT_NAME) {
+        errors.push(
+          `security.clients must not use the reserved name "${ANONYMOUS_CLIENT_NAME}" — it collides with the auth-disabled fallback identity`,
+        );
       }
       if (typeof token !== 'string') {
         errors.push(`security.clients.${name} must be a string token`);

@@ -226,12 +226,29 @@ export function createRequestHandler({
 
     const negotiated = negotiate(req.headers);
     if (negotiated.error) {
+      // WR-01: this resolves rather than throws, so it never reaches the router's outer
+      // catch (which is the only other place that calls logTurn) — log it here explicitly
+      // so a bad format-negotiation header still produces a turn-log line.
+      logTurn({
+        client: clientName,
+        outcome: TURN_OUTCOMES.ERROR,
+        durationsMs: {},
+        errorCode: negotiated.error.headers['X-Error-Code'],
+      });
       return sendErrorHead(res, negotiated.error);
     }
     const { inputFormatId, outputFormatId, wantAudio } = negotiated;
 
     const prepared = await prepareTranscriptionInput(rawBody, inputFormatId);
     if (prepared.error) {
+      // WR-01: same rationale as the negotiate() branch above — prepared.error resolves
+      // rather than throws, so it never reaches the router's outer catch either.
+      logTurn({
+        client: clientName,
+        outcome: TURN_OUTCOMES.ERROR,
+        durationsMs: {},
+        errorCode: prepared.error.headers['X-Error-Code'],
+      });
       return sendErrorHead(res, prepared.error);
     }
 

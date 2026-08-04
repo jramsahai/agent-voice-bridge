@@ -29,7 +29,7 @@ const UNREACHABLE_SERVICE_URL = 'http://127.0.0.1:1';
 function buildTestConfig({ security = {}, stt = {}, openclaw = {}, tts = {} } = {}) {
   return {
     security: {
-      token: '',
+      clients: {},
       expectedHost: null,
       allowedOrigins: [],
       maxJsonBytes: 50_000_000,
@@ -303,7 +303,7 @@ test('GET /v1/health issued while a fake-adapter turn is in flight returns 200 o
 
 test('a wrong bearer token returns 401 with a line-based body, not the JSON envelope', async () => {
   const handler = createRequestHandler({
-    config: buildTestConfig({ security: { token: 'the-real-token' } }),
+    config: buildTestConfig({ security: { clients: { 'test-client': 'the-real-token' } } }),
     adapters: {},
     webDir: '/nonexistent',
   });

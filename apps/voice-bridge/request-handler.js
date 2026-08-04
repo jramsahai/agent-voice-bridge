@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { timingSafeEqual } from 'node:crypto';
 
 import { runTurn } from '../../packages/shared/pipeline/turn-pipeline.js';
 import { prepareTranscriptionInput, prepareClientOutput } from '../../packages/shared/audio/convert.js';
@@ -25,6 +24,21 @@ import { buildError } from '../../packages/shared/errors/error-response.js';
 import { isKnownErrorCode } from '../../packages/shared/errors/error-codes.js';
 import { getBackendStatus, BACKEND_UP } from '../../packages/shared/health/backend-health-cache.js';
 import { probeExecutable, probeHttpService } from '../../packages/shared/health/probes.js';
+import { buildClientDigests, resolveClientIdentity, ANONYMOUS_CLIENT_NAME } from '../../packages/shared/security/token-auth.js';
+import {
+  checkRateLimitBucket,
+  DISCOVERY_RATE_LIMIT_MAX_REQUESTS,
+  DISCOVERY_RATE_LIMIT_WINDOW_MS,
+  FAILED_AUTH_BUCKET_KEY,
+  FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS,
+  FAILED_AUTH_RATE_LIMIT_WINDOW_MS,
+} from '../../packages/shared/security/rate-limit.js';
+import { logTurnCompletion, TURN_OUTCOMES } from '../../packages/shared/logging/turn-log.js';
+
+// Re-exported so test/http-capabilities.test.js and test/http-health.test.js keep importing
+// these two constants from this same path — they now live in
+// packages/shared/security/rate-limit.js; this is a pure re-export, not a redefinition.
+export { DISCOVERY_RATE_LIMIT_MAX_REQUESTS, DISCOVERY_RATE_LIMIT_WINDOW_MS };
 
 // Every rejection this handler ever writes goes through buildError() (the one error
 // envelope — packages/shared/errors/error-response.js) and then this function, so every
@@ -83,82 +97,43 @@ function sendFile(res, filePath, contentType) {
   stream.pipe(res);
 }
 
-function clientIp(req) {
-  return req.socket.remoteAddress || 'unknown';
-}
-
-// The discovery routes' own rate-limit ceiling (T-3-06/D-05, locked): a sustained one poll
-// per second, ten times the turn endpoint's effective default rate — a wire-visible
-// operational decision a monitoring configuration and a firmware polling interval are both
-// written against, not a tuning knob to be changed lightly. Exported so an operator (and
-// this plan's own tests) reads the actual ceiling rather than a copied literal. Phase 4's
-// OPS-04 re-keys the buckets these constants size by named client identity; nothing here
-// makes that harder.
-export const DISCOVERY_RATE_LIMIT_MAX_REQUESTS = 60;
-export const DISCOVERY_RATE_LIMIT_WINDOW_MS = 60_000;
-
-// Generic sliding-window bucket check, parameterised over the Map, ceiling, and window so
-// the turn endpoint and the two discovery endpoints can each get their own bucket without
-// duplicating the sliding-window logic itself (T-3-06): an unlimited diagnostic surface is
-// its own denial-of-service lever, so the discovery routes are rate-limited rather than
-// exempted outright, just on a separate, more generous budget that a monitoring poller
-// cannot exhaust and that cannot itself exhaust the turn budget.
-function checkRateLimitBucket(buckets, maxRequests, windowMs, key) {
-  const now = Date.now();
-  const bucket = buckets.get(key) ?? [];
-  const fresh = bucket.filter((ts) => now - ts < windowMs);
-  if (fresh.length >= maxRequests) {
-    buckets.set(key, fresh);
-    return false;
-  }
-  fresh.push(now);
-  buckets.set(key, fresh);
-  return true;
-}
-
 // Returns a routed, injectable HTTP handler suitable for http.createServer. Everything the
 // legacy server.js held at module scope (config-derived constants, the rate-limit bucket
 // Map) moves into this factory's closure, so two handler instances in one test process
 // cannot exhaust each other's budget. `adapters` reaches runTurn only from this factory's
 // own argument — nothing derived from a request may ever be written into it (Phase 2's
 // recorded ARISK-01, mirrored here as T-3-03).
-export function createRequestHandler({ config, adapters, webDir }) {
+export function createRequestHandler({
+  config,
+  adapters,
+  webDir,
+  logTurn = logTurnCompletion,
+  rateLimitBuckets = { turn: new Map(), discovery: new Map(), failedAuth: new Map() },
+}) {
   const RATE_LIMIT_WINDOW_MS = config.security?.rateLimitWindowMs ?? 15_000;
   const RATE_LIMIT_MAX_REQUESTS = config.security?.rateLimitMaxRequests ?? 6;
   const allowedOrigins = new Set(config.security?.allowedOrigins ?? []);
   const expectedHost = config.security?.expectedHost ?? null;
-  const requireToken = config.security?.token ?? '';
-  // Two independent buckets (T-3-06/D-05): POST /v1/turn draws on turnRateLimitBuckets at
-  // the configured turn ceiling; the two GET /v1/* discovery routes draw on
-  // discoveryRateLimitBuckets at the fixed DISCOVERY_RATE_LIMIT_* ceiling above. The bucket
-  // is selected by the matched route in the router, before any handler runs — never by a
-  // request header — so a caller cannot choose which budget its own request draws from.
-  const turnRateLimitBuckets = new Map();
-  const discoveryRateLimitBuckets = new Map();
+  // Built once at factory-init time, alongside allowedOrigins/expectedHost above — never
+  // recomputed per request, since config is static for the process lifetime. authEnabled
+  // false is the generalized auth-disabled escape hatch (D-04, locked): every request
+  // resolves to the single fixed ANONYMOUS_CLIENT_NAME identity, exactly as an empty
+  // security.token did before this phase. rateLimitBuckets is a factory parameter (not a
+  // module-level Map) so two handler instances in one test process cannot exhaust each
+  // other's budget, and so a test can hand in Maps it can inspect directly.
+  const clientDigests = buildClientDigests(config.security?.clients);
+  const authEnabled = clientDigests.length > 0;
 
-  // Ported functionally unchanged from the legacy server.js: timing-safe token compare,
-  // per-IP sliding window, expected-host and allowed-origin checks. Only the rejection
-  // response shape changed this plan (buildError()/sendErrorHead instead of a bare
-  // sendJson({error: string})).
-  function isAuthorizedToken(receivedToken) {
-    if (!requireToken) return true;
-    if (!receivedToken) return false;
-    const left = Buffer.from(receivedToken);
-    const right = Buffer.from(requireToken);
-    if (left.length !== right.length) return false;
-    return timingSafeEqual(left, right);
+  function checkTurnRateLimit(clientName) {
+    return checkRateLimitBucket(rateLimitBuckets.turn, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS, clientName);
   }
 
-  function checkTurnRateLimit(req) {
-    return checkRateLimitBucket(turnRateLimitBuckets, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS, clientIp(req));
-  }
-
-  function checkDiscoveryRateLimit(req) {
+  function checkDiscoveryRateLimit(clientName) {
     return checkRateLimitBucket(
-      discoveryRateLimitBuckets,
+      rateLimitBuckets.discovery,
       DISCOVERY_RATE_LIMIT_MAX_REQUESTS,
       DISCOVERY_RATE_LIMIT_WINDOW_MS,
-      clientIp(req),
+      clientName,
     );
   }
 
@@ -167,7 +142,11 @@ export function createRequestHandler({ config, adapters, webDir }) {
   // from this same gate still matches each route's own line-based content type.
   // `checkLimit` lets a caller swap which rate-limit bucket this gate draws from — the two
   // discovery routes pass checkDiscoveryRateLimit so a burst against them can never draw
-  // down the turn endpoint's own budget, and vice versa.
+  // down the turn endpoint's own budget, and vice versa. Both buckets are now keyed by the
+  // resolved client identity, never by source address (D-02/AUTH-05). Returns { ok: false }
+  // on every rejection and { ok: true, clientName } on success, so a caller learns the
+  // resolved identity without a second lookup — this whole gate stays ahead of any body read
+  // (AUTH-04), unchanged in ordering from before this phase.
   function validateRequest(req, res, { sendError = sendErrorHead, checkLimit = checkTurnRateLimit } = {}) {
     const origin = req.headers.origin;
     const host = req.headers.host;
@@ -179,21 +158,38 @@ export function createRequestHandler({ config, adapters, webDir }) {
     // attacker how to fix its request.
     if (expectedHost && host !== expectedHost) {
       sendError(res, buildError('FORBIDDEN'));
-      return false;
+      return { ok: false };
     }
     if (allowedOrigins.size && origin && !allowedOrigins.has(origin)) {
       sendError(res, buildError('FORBIDDEN'));
-      return false;
+      return { ok: false };
     }
-    if (!isAuthorizedToken(bearerToken)) {
-      sendError(res, buildError('UNAUTHORIZED'));
-      return false;
+
+    const clientName = authEnabled ? resolveClientIdentity(clientDigests, bearerToken) : ANONYMOUS_CLIENT_NAME;
+    if (clientName === null) {
+      // Closes WR-01 (03-REVIEW.md): failed-auth attempts draw on their own fixed-key
+      // bucket, checked before the 401 is sent, so credential guessing is throttled the same
+      // as any other caller class — never keyed by address (D-05).
+      if (
+        !checkRateLimitBucket(
+          rateLimitBuckets.failedAuth,
+          FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS,
+          FAILED_AUTH_RATE_LIMIT_WINDOW_MS,
+          FAILED_AUTH_BUCKET_KEY,
+        )
+      ) {
+        sendError(res, buildError('RATE_LIMITED'));
+      } else {
+        sendError(res, buildError('UNAUTHORIZED'));
+      }
+      return { ok: false };
     }
-    if (!checkLimit(req)) {
+
+    if (!checkLimit(clientName)) {
       sendError(res, buildError('RATE_LIMITED'));
-      return false;
+      return { ok: false };
     }
-    return true;
+    return { ok: true, clientName };
   }
 
   // Same running-total loop shape as the legacy readJsonBody, minus the toString('utf8')
@@ -224,7 +220,7 @@ export function createRequestHandler({ config, adapters, webDir }) {
     return Buffer.concat(chunks);
   }
 
-  async function handleTurn(req, res) {
+  async function handleTurn(req, res, { clientName }) {
     const rawBody = await readRawBody(req);
 
     const negotiated = negotiate(req.headers);
@@ -274,26 +270,45 @@ export function createRequestHandler({ config, adapters, webDir }) {
       resolveTextReady = resolve;
     });
 
+    // OPS-01's timing source (04-RESEARCH.md Pattern 2): populated incrementally inside
+    // these same wrapper closures rather than read from runTurn()'s returned
+    // meta.durationsMs, which does not exist on a rejected promise. A turn that fails during
+    // agent still has stageDurationsMs.transcribe populated when a later exit point logs it.
+    const stageDurationsMs = {};
+
     const turnAdapters = {
       ...adapters,
       transcribe: async (...args) => {
-        const result = await adapters.transcribe(...args);
-        if (!result.text || result.text.trim() === '') {
-          const err = new Error('transcription returned no text');
-          err.code = 'TRANSCRIPT_EMPTY';
-          throw err;
+        const start = Date.now();
+        try {
+          const result = await adapters.transcribe(...args);
+          if (!result.text || result.text.trim() === '') {
+            const err = new Error('transcription returned no text');
+            err.code = 'TRANSCRIPT_EMPTY';
+            throw err;
+          }
+          capturedTranscript = result.text;
+          return result;
+        } finally {
+          stageDurationsMs.transcribe = Date.now() - start;
         }
-        capturedTranscript = result.text;
-        return result;
       },
       agent: async (...args) => {
-        const result = await adapters.agent(...args);
-        capturedReply = result.rawText ?? result.text;
-        return result;
+        const start = Date.now();
+        try {
+          const result = await adapters.agent(...args);
+          capturedReply = result.rawText ?? result.text;
+          return result;
+        } finally {
+          stageDurationsMs.agent = Date.now() - start;
+        }
       },
       speak: (...args) => {
         resolveTextReady();
-        return adapters.speak(...args);
+        const start = Date.now();
+        return adapters.speak(...args).finally(() => {
+          stageDurationsMs.speak = Date.now() - start;
+        });
       },
     };
 
@@ -347,6 +362,10 @@ export function createRequestHandler({ config, adapters, webDir }) {
           audioBuffer = output.buffer;
         }
         res.write(audioBuffer);
+        // The one exit point this task owns (04-01-PLAN.md, locked). Plan 04-02 owns every
+        // remaining exit point and the error/abort outcomes. clientName reaches only this
+        // call and the rate-limit bucket key above — nowhere else (T-4-05).
+        logTurn({ client: clientName, outcome: TURN_OUTCOMES.OK, durationsMs: stageDurationsMs });
         return res.end();
       }
     }
@@ -446,15 +465,18 @@ export function createRequestHandler({ config, adapters, webDir }) {
         return sendFile(res, path.join(webDir, 'app.js'), 'application/javascript; charset=utf-8');
       }
       if (req.method === 'POST' && req.url === '/v1/turn') {
-        if (!validateRequest(req, res)) return;
-        return await handleTurn(req, res);
+        const gate = validateRequest(req, res);
+        if (!gate.ok) return;
+        return await handleTurn(req, res, { clientName: gate.clientName });
       }
       if (req.method === 'GET' && req.url === '/v1/capabilities') {
-        if (!validateRequest(req, res, { sendError: sendLineErrorHead, checkLimit: checkDiscoveryRateLimit })) return;
+        const gate = validateRequest(req, res, { sendError: sendLineErrorHead, checkLimit: checkDiscoveryRateLimit });
+        if (!gate.ok) return;
         return handleCapabilities(req, res);
       }
       if (req.method === 'GET' && req.url === '/v1/health') {
-        if (!validateRequest(req, res, { sendError: sendLineErrorHead, checkLimit: checkDiscoveryRateLimit })) return;
+        const gate = validateRequest(req, res, { sendError: sendLineErrorHead, checkLimit: checkDiscoveryRateLimit });
+        if (!gate.ok) return;
         return await handleHealth(req, res);
       }
       return sendErrorHead(res, buildError('NOT_FOUND'));

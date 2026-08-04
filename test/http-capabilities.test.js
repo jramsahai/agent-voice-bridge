@@ -31,7 +31,7 @@ function uniqueSessionId(label) {
 function buildTestConfig({ security = {}, tts = { voices: ['af_heart', 'af_bella'] } } = {}) {
   return {
     security: {
-      token: '',
+      clients: {},
       expectedHost: null,
       allowedOrigins: [],
       maxJsonBytes: 50_000_000,
@@ -216,7 +216,7 @@ test('the body names all three request header names and both byte-count response
 
 test('a request with a wrong bearer token returns 401 with a line-based body, not the JSON envelope', async () => {
   const handler = createRequestHandler({
-    config: buildTestConfig({ security: { token: 'the-real-token' } }),
+    config: buildTestConfig({ security: { clients: { 'test-client': 'the-real-token' } } }),
     adapters: {},
     webDir: '/nonexistent',
   });

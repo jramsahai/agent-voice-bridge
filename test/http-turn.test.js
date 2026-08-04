@@ -15,6 +15,7 @@ import { buildTurnResponseHead, MAX_REQUEST_AUDIO_BYTES } from '../packages/shar
 import { defaultOutputFormatId } from '../packages/shared/transport/negotiate.js';
 import { wavToPcm } from '../packages/shared/audio/wav.js';
 import { prepareClientOutput } from '../packages/shared/audio/convert.js';
+import { buildClientDigests, resolveClientIdentity } from '../packages/shared/security/token-auth.js';
 import { makePcm16, makeCanonicalWav, makeStereoWav } from './helpers/fixtures.js';
 
 function uniqueSessionId(label) {
@@ -24,7 +25,7 @@ function uniqueSessionId(label) {
 function buildTestConfig(securityOverrides = {}) {
   return {
     security: {
-      token: '',
+      clients: {},
       expectedHost: null,
       allowedOrigins: [],
       maxJsonBytes: 50_000_000,
@@ -206,7 +207,7 @@ test('buildTurnResponseHead declares zero transcript-bytes and starts the reply 
 // =====================================================================================
 
 test('a wrong bearer token returns 401 with x-error-code UNAUTHORIZED', async () => {
-  const config = buildTestConfig({ token: 'the-real-token' });
+  const config = buildTestConfig({ clients: { 'test-client': 'the-real-token' } });
   const adapters = makeFakeAdapters({ transcript: 'hi', reply: 'ok', wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }) });
   const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
   const server = await startServer(handler);
@@ -801,7 +802,7 @@ test('wire hygiene: a 200 text-only response carries no cookie, no redirect stat
 });
 
 test('wire hygiene: a 401 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
-  const config = buildTestConfig({ token: 'the-real-token' });
+  const config = buildTestConfig({ clients: { 'test-client': 'the-real-token' } });
   const adapters = makeFakeAdapters({
     transcript: 'hi',
     reply: 'ok',
@@ -1072,4 +1073,185 @@ test('CR-02 regression: GET / against a webDir missing index.html returns 404 in
   } finally {
     await closeServer(server);
   }
+});
+
+// =====================================================================================
+// Plan 04-01: multi-client identity end to end — two named clients, resolved name reaching
+// the injected logTurn collector, an unknown token refused before the body is read, and
+// identity- (never address-) keyed rate-limit buckets.
+// =====================================================================================
+
+// A fake, never-connects-a-real-socket async-iterable request, exercised directly against
+// the handler function createRequestHandler() returns — used to prove AUTH-04's
+// before-body-read ordering (test 4) and rate-limit-bucket identity (test 5) without needing
+// a second real TCP client whose own socket.remoteAddress cannot be spoofed.
+function makeFakeTurnReq({ headers, body, remoteAddress = '127.0.0.1' }) {
+  let advanced = false;
+  let yielded = false;
+  return {
+    method: 'POST',
+    url: '/v1/turn',
+    headers,
+    socket: { remoteAddress },
+    get bodyIteratorAdvanced() {
+      return advanced;
+    },
+    [Symbol.asyncIterator]() {
+      return {
+        next: async () => {
+          advanced = true;
+          if (!yielded && body) {
+            yielded = true;
+            return { done: false, value: body };
+          }
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+}
+
+// A fake ServerResponse capturing status/headers/body without ever touching a real socket.
+function makeFakeTurnRes() {
+  const chunks = [];
+  return {
+    statusCode: null,
+    headers: {},
+    headersSent: false,
+    writableEnded: false,
+    writeHead(status, headers = {}) {
+      this.statusCode = status;
+      this.headers = headers;
+      this.headersSent = true;
+    },
+    write(chunk) {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      return true;
+    },
+    end(chunk) {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      this.writableEnded = true;
+    },
+    on() {
+      // handleTurn registers a 'close' listener; this fake response never fires it.
+    },
+    get body() {
+      return Buffer.concat(chunks);
+    },
+  };
+}
+
+test('two named clients each authenticate with their own token over a real socket, and the injected logTurn collector records the resolved name and three numeric stage durations per turn', async () => {
+  const fakeTranscript = 'what time is it';
+  const fakeReply = 'noon';
+  const wavBuffer = makeCanonicalWav({ pcm: makePcm16({ samples: 20 }) });
+  const adapters = makeFakeAdapters({ transcript: fakeTranscript, reply: fakeReply, wavBuffer });
+  const config = buildTestConfig({ clients: { alpha: 'alpha-token', beta: 'beta-token' } });
+  const records = [];
+  const handler = createRequestHandler({
+    config,
+    adapters,
+    webDir: '/nonexistent',
+    logTurn: (record) => records.push(record),
+  });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+
+    const alphaResponse = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'pcm16', Authorization: 'Bearer alpha-token' },
+    });
+    assert.equal(alphaResponse.statusCode, 200);
+
+    const betaResponse = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'pcm16', Authorization: 'Bearer beta-token' },
+    });
+    assert.equal(betaResponse.statusCode, 200);
+
+    assert.equal(records.length, 2);
+    assert.equal(records[0].client, 'alpha');
+    assert.equal(records[1].client, 'beta');
+    for (const record of records) {
+      assert.equal(typeof record.durationsMs.transcribe, 'number');
+      assert.equal(typeof record.durationsMs.agent, 'number');
+      assert.equal(typeof record.durationsMs.speak, 'number');
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a token matching neither configured client returns 401 with x-error-code UNAUTHORIZED', async () => {
+  const config = buildTestConfig({ clients: { alpha: 'alpha-token', beta: 'beta-token' } });
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'pcm16', Authorization: 'Bearer someone-elses-token' },
+    });
+    assert.equal(response.statusCode, 401);
+    assert.equal(response.headers['x-error-code'], 'UNAUTHORIZED');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('AUTH-04: an unresolvable-token request is refused 401 before the fake request body-reading iterator is ever advanced', async () => {
+  const config = buildTestConfig({ clients: { alpha: 'alpha-token' } });
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+
+  const req = makeFakeTurnReq({
+    headers: { 'x-voice-input-format': 'pcm16', authorization: 'Bearer wrong-token' },
+    body: makePcm16({ samples: 10 }),
+  });
+  const res = makeFakeTurnRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 401);
+  assert.equal(req.bodyIteratorAdvanced, false);
+});
+
+test('resolveClientIdentity(buildClientDigests({ a: "x" }), "") returns null and does not throw', () => {
+  const digests = buildClientDigests({ a: 'x' });
+  assert.equal(resolveClientIdentity(digests, ''), null);
+});
+
+test('rate-limit buckets are keyed by resolved client identity, not by source address: two requests carrying one client\'s token from two different socket addresses draw on one bucket, and the other client\'s token is still admitted', async () => {
+  const config = buildTestConfig({ clients: { alpha: 'alpha-token', beta: 'beta-token' }, rateLimitMaxRequests: 1 });
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+
+  const body = makePcm16({ samples: 10 });
+  const headersFor = (token) => ({ 'x-voice-input-format': 'pcm16', authorization: `Bearer ${token}` });
+
+  const firstRes = makeFakeTurnRes();
+  await handler(makeFakeTurnReq({ headers: headersFor('alpha-token'), body, remoteAddress: '10.0.0.1' }), firstRes);
+  assert.equal(firstRes.statusCode, 200);
+
+  const secondRes = makeFakeTurnRes();
+  await handler(makeFakeTurnReq({ headers: headersFor('alpha-token'), body, remoteAddress: '10.0.0.2' }), secondRes);
+  assert.equal(secondRes.statusCode, 429);
+
+  const thirdRes = makeFakeTurnRes();
+  await handler(makeFakeTurnReq({ headers: headersFor('beta-token'), body, remoteAddress: '10.0.0.3' }), thirdRes);
+  assert.equal(thirdRes.statusCode, 200);
 });

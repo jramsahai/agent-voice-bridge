@@ -520,6 +520,15 @@ export function createRequestHandler({
   }
 
   return async function requestHandler(req, res) {
+    // CR-01: a write attempted against a response whose socket is already gone (client
+    // disconnected before any header was ever flushed) surfaces as an 'error' event on this
+    // stream, not a thrown exception the surrounding try/catch can see. With zero listeners
+    // that event throws and crashes the whole process, taking every other in-flight turn
+    // down with it — the same crash class 03-REVIEW.md's CR-01/CR-02 already closed for two
+    // other trigger points. Log-and-swallow, mirroring the guard sendFile() already applies.
+    res.on('error', (error) => {
+      console.error('[voice-bridge] response stream error', error);
+    });
     // Populated only on the /v1/turn branch below — its presence in the catch is exactly
     // what gates "only log from the catch when the request that failed was a turn request"
     // (04-RESEARCH.md Pitfall 3): a rejected static file read or a 404 never sets this, so

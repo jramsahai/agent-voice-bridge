@@ -671,6 +671,7 @@ test('two overlapping requests where the first is text-only still yield one 200 
 
 test('a client that destroys its socket mid-turn causes the in-flight fake speak adapter to observe an aborted signal', async () => {
   const gate = makeGate();
+  const inFlightControllers = new Set();
   let observedAborted = null;
   const config = buildTestConfig();
   const adapters = {
@@ -688,7 +689,7 @@ test('a client that destroys its socket mid-turn causes the in-flight fake speak
       return { audioBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }), mimeType: 'audio/wav', meta: {} };
     },
   };
-  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent', inFlightControllers });
   const server = await startServer(handler);
   try {
     const port = server.address().port;
@@ -722,9 +723,10 @@ test('a client that destroys its socket mid-turn causes the in-flight fake speak
     clientReq.destroy();
 
     // The server's response 'close' event is driven by the underlying socket teardown, not
-    // synchronous with clientReq.destroy() — give the event loop a short window for it to
-    // actually fire and abort the controller before releasing the gate.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // synchronous with clientReq.destroy() — poll the tracked controller's own signal
+    // directly, rather than sleeping a fixed guess at how long that teardown takes, so this
+    // assertion is deterministic instead of CI-load-dependent (WR-07).
+    await waitUntil(() => [...inFlightControllers][0]?.signal.aborted === true);
     gate.release();
     await waitUntil(() => observedAborted !== null);
 
@@ -1375,7 +1377,10 @@ test('inFlightControllers is empty after a turn whose client disconnected mid-fl
     await waitUntil(() => inFlightControllers.size === 1);
     clientReq.destroy();
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Poll the tracked controller's own signal directly rather than sleeping a fixed guess
+    // at how long socket teardown takes, so this assertion is deterministic instead of
+    // CI-load-dependent (WR-07).
+    await waitUntil(() => [...inFlightControllers][0]?.signal.aborted === true);
     gate.release();
     await waitUntil(() => inFlightControllers.size === 0);
     assert.equal(inFlightControllers.size, 0);

@@ -25,6 +25,7 @@ import { isKnownErrorCode } from '../../packages/shared/errors/error-codes.js';
 import { getBackendStatus, BACKEND_UP } from '../../packages/shared/health/backend-health-cache.js';
 import { probeExecutable, probeHttpService } from '../../packages/shared/health/probes.js';
 import { buildClientDigests, resolveClientIdentity, ANONYMOUS_CLIENT_NAME } from '../../packages/shared/security/token-auth.js';
+import { getKokoroServiceUrl } from '../../packages/shared/adapters/tts-kokoro-onnx.js';
 import {
   checkRateLimitBucket,
   DISCOVERY_RATE_LIMIT_MAX_REQUESTS,
@@ -472,15 +473,6 @@ export function createRequestHandler({
     }
   }
 
-  // Mirrors tts-kokoro-onnx.js's own private getKokoroServiceUrl() precedence
-  // (ttsConfig.serviceUrl -> KOKORO_TTS_URL env -> the fixed local default) so this route
-  // probes the same URL speakWithKokoroFast would actually call. Kept as a local copy
-  // rather than an import because that helper is not exported and this plan's file scope
-  // does not extend to tts-kokoro-onnx.js.
-  function resolveKokoroServiceUrl(ttsConfig = {}) {
-    return ttsConfig.serviceUrl || process.env.KOKORO_TTS_URL || 'http://127.0.0.1:4319';
-  }
-
   // GET /v1/health — the reachability of all three backends, each read through the same
   // TTL-windowed getBackendStatus cache the speech adapter reads (same 'speech' backend
   // name), so this route and a live turn share one probe window rather than keeping two.
@@ -497,7 +489,7 @@ export function createRequestHandler({
     const [transcribe, agent, speech] = await Promise.all([
       getBackendStatus('transcribe', () => probeExecutable(config.stt?.command ?? '')),
       getBackendStatus('agent', () => probeExecutable(config.openclaw?.command ?? '')),
-      getBackendStatus('speech', () => probeHttpService(resolveKokoroServiceUrl(config.tts))),
+      getBackendStatus('speech', () => probeHttpService(getKokoroServiceUrl(config.tts))),
     ]);
 
     // Named backends only — no service URL, configured command, resolved path, or probe

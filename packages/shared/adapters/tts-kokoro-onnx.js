@@ -8,7 +8,13 @@ import { probeHttpService } from '../health/probes.js';
 
 const execFileAsync = promisify(execFile);
 
-function getKokoroServiceUrl(ttsConfig = {}) {
+// WR-06: the one source of truth for this precedence chain
+// (ttsConfig.serviceUrl -> KOKORO_TTS_URL env -> the fixed local default). Exported so
+// request-handler.js's health route and preflight.js's startup probe can import it instead
+// of each hand-maintaining their own copy — three independent copies meant a future change
+// to this precedence only had to be forgotten in one of them for health/preflight to
+// silently disagree with what this adapter actually calls.
+export function getKokoroServiceUrl(ttsConfig = {}) {
   return ttsConfig.serviceUrl || process.env.KOKORO_TTS_URL || 'http://127.0.0.1:4319';
 }
 

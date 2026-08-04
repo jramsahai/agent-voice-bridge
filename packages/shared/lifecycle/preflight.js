@@ -7,13 +7,7 @@
 // every branch without touching a real filesystem path or a real service.
 
 import { probeExecutable, probeHttpService } from '../health/probes.js';
-
-// Mirrors tts-kokoro-onnx.js's own private service-URL precedence (also duplicated by
-// request-handler.js's own resolveKokoroServiceUrl) so preflight probes the exact URL the
-// speech adapter would actually call at runtime.
-function resolveKokoroServiceUrl(ttsConfig = {}) {
-  return ttsConfig.serviceUrl || process.env.KOKORO_TTS_URL || 'http://127.0.0.1:4319';
-}
+import { getKokoroServiceUrl } from '../adapters/tts-kokoro-onnx.js';
 
 // Fixed declaration order (D-09, 04-03-PLAN.md): stt.command, openclaw.command,
 // /usr/bin/afconvert, then exactly one of [system speech binary | ONNX spawn-fallback
@@ -58,7 +52,7 @@ function buildChecks(config) {
     });
     checks.push({
       kind: 'soft',
-      probeArg: resolveKokoroServiceUrl(config.tts),
+      probeArg: getKokoroServiceUrl(config.tts),
       message: (arg) =>
         `speech service is not reachable at ${arg} — turns will use the command-spawn fallback until it is`,
       isExecutable: false,

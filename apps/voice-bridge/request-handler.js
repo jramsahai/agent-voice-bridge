@@ -109,6 +109,7 @@ export function createRequestHandler({
   webDir,
   logTurn = logTurnCompletion,
   rateLimitBuckets = { turn: new Map(), discovery: new Map(), failedAuth: new Map() },
+  inFlightControllers = new Set(),
 }) {
   const RATE_LIMIT_WINDOW_MS = config.security?.rateLimitWindowMs ?? 15_000;
   const RATE_LIMIT_MAX_REQUESTS = config.security?.rateLimitMaxRequests ?? 6;
@@ -247,162 +248,173 @@ export function createRequestHandler({
     // own between-stage checks and runStage()'s abort normalization do the rest — this is
     // wiring onto an existing Phase 2 contract, not new pipeline logic.
     const controller = new AbortController();
+    inFlightControllers.add(controller);
     res.on('close', () => {
       if (!res.writableEnded) {
         controller.abort();
       }
     });
 
-    // Composes over the injected adapters inside this handler's own closure only — not a
-    // second adapter-selection seam (Phase 2's ARISK-01 stays intact: nothing here chooses
-    // which implementation runs, each wrapper only inspects the already-selected adapter's
-    // own resolved value, or observes when it is invoked, and forwards every argument
-    // unchanged). The transcribe wrapper rejects a missing/whitespace-only transcript before
-    // the agent stage ever runs (TRANSCRIPT_EMPTY, 422 — replacing the legacy ad hoc 422
-    // string). The agent/speak wrappers exist so this handler can write the text preamble to
-    // the wire the moment the agent stage resolves — before awaiting the speak stage's own
-    // resolution — since speak is only ever invoked, by the pipeline's own fixed stage
-    // order, once transcript and reply are already committed.
-    let capturedTranscript;
-    let capturedReply;
-    let resolveTextReady;
-    const textReady = new Promise((resolve) => {
-      resolveTextReady = resolve;
-    });
+    // Every path through the rest of this function — success, a thrown error, or an abort —
+    // must remove this controller from the shared set once the turn settles, so a later
+    // shutdown sequence (04-04-PLAN.md) never aborts a controller whose turn already ended.
+    // This finally neither catches nor rethrows, so it changes no control flow reaching the
+    // router's own outer catch; deliberately narrower than wrapping handleTurn itself, which
+    // 04-RESEARCH.md Pitfall 3 warns against (that shape is how CR-01/CR-02 came back).
+    try {
+      // Composes over the injected adapters inside this handler's own closure only — not a
+      // second adapter-selection seam (Phase 2's ARISK-01 stays intact: nothing here chooses
+      // which implementation runs, each wrapper only inspects the already-selected adapter's
+      // own resolved value, or observes when it is invoked, and forwards every argument
+      // unchanged). The transcribe wrapper rejects a missing/whitespace-only transcript before
+      // the agent stage ever runs (TRANSCRIPT_EMPTY, 422 — replacing the legacy ad hoc 422
+      // string). The agent/speak wrappers exist so this handler can write the text preamble to
+      // the wire the moment the agent stage resolves — before awaiting the speak stage's own
+      // resolution — since speak is only ever invoked, by the pipeline's own fixed stage
+      // order, once transcript and reply are already committed.
+      let capturedTranscript;
+      let capturedReply;
+      let resolveTextReady;
+      const textReady = new Promise((resolve) => {
+        resolveTextReady = resolve;
+      });
 
-    // OPS-01's timing source (04-RESEARCH.md Pattern 2): populated incrementally inside
-    // these same wrapper closures rather than read from runTurn()'s returned
-    // meta.durationsMs, which does not exist on a rejected promise. A turn that fails during
-    // agent still has stageDurationsMs.transcribe populated when a later exit point logs it.
-    const stageDurationsMs = {};
-    // The out-parameter the router's own catch block reads from (04-RESEARCH.md Pitfall 3):
-    // stageDurationsMs is mutated in place by the wrapper closures below, so this reference,
-    // written once here, stays valid through every later mutation without a second handoff.
-    turnLogState.stageDurationsMs = stageDurationsMs;
+      // OPS-01's timing source (04-RESEARCH.md Pattern 2): populated incrementally inside
+      // these same wrapper closures rather than read from runTurn()'s returned
+      // meta.durationsMs, which does not exist on a rejected promise. A turn that fails during
+      // agent still has stageDurationsMs.transcribe populated when a later exit point logs it.
+      const stageDurationsMs = {};
+      // The out-parameter the router's own catch block reads from (04-RESEARCH.md Pitfall 3):
+      // stageDurationsMs is mutated in place by the wrapper closures below, so this reference,
+      // written once here, stays valid through every later mutation without a second handoff.
+      turnLogState.stageDurationsMs = stageDurationsMs;
 
-    const turnAdapters = {
-      ...adapters,
-      transcribe: async (...args) => {
-        const start = Date.now();
-        try {
-          const result = await adapters.transcribe(...args);
-          if (!result.text || result.text.trim() === '') {
-            const err = new Error('transcription returned no text');
-            err.code = 'TRANSCRIPT_EMPTY';
-            throw err;
+      const turnAdapters = {
+        ...adapters,
+        transcribe: async (...args) => {
+          const start = Date.now();
+          try {
+            const result = await adapters.transcribe(...args);
+            if (!result.text || result.text.trim() === '') {
+              const err = new Error('transcription returned no text');
+              err.code = 'TRANSCRIPT_EMPTY';
+              throw err;
+            }
+            capturedTranscript = result.text;
+            return result;
+          } finally {
+            stageDurationsMs.transcribe = Date.now() - start;
           }
-          capturedTranscript = result.text;
-          return result;
-        } finally {
-          stageDurationsMs.transcribe = Date.now() - start;
-        }
-      },
-      agent: async (...args) => {
-        const start = Date.now();
-        try {
-          const result = await adapters.agent(...args);
-          capturedReply = result.rawText ?? result.text;
-          return result;
-        } finally {
-          stageDurationsMs.agent = Date.now() - start;
-        }
-      },
-      speak: (...args) => {
-        resolveTextReady();
-        const start = Date.now();
-        return adapters.speak(...args).finally(() => {
-          stageDurationsMs.speak = Date.now() - start;
-        });
-      },
-    };
-
-    // runTurn()'s signature and internals are a locked Phase 2 contract — called here,
-    // never modified.
-    const runTurnPromise = runTurn({
-      audioBuffer: prepared.wavBuffer,
-      adapters: turnAdapters,
-      sttConfig: config.stt,
-      openclawConfig: config.openclaw,
-      ttsConfig: config.tts,
-      wantAudio,
-      audioFilename: 'input.wav',
-      signal: controller.signal,
-    });
-
-    if (wantAudio) {
-      // A turn that never reaches the speak stage (an error thrown by transcribe/agent, or
-      // an abort caught between stages) never resolves textReady on its own — race it
-      // against the turn's own settlement so that case falls through to the ordinary
-      // re-await below instead of waiting forever for a speak call that will never happen.
-      await Promise.race([textReady, runTurnPromise.then(() => {}, () => {})]);
-
-      if (capturedTranscript !== undefined && capturedReply !== undefined) {
-        // Compute both length headers and call writeHead before the first write of any
-        // kind (03-RESEARCH.md Pitfall 2) — both are known now, since the pipeline resolves
-        // transcript and reply together, before speech starts. Writing them here, before
-        // awaiting runTurnPromise to completion, is what lets the client read the full text
-        // preamble while synthesis is still in flight.
-        const head = buildTurnResponseHead({
-          transcript: capturedTranscript,
-          reply: capturedReply,
-          outputFormatId,
-          audioPresent: true,
-        });
-        res.writeHead(head.status, head.headers);
-        res.write(head.transcriptBuffer);
-        res.write(head.replyBuffer);
-
-        const result = await runTurnPromise;
-        let audioBuffer = Buffer.alloc(0);
-        if (result.speech) {
-          const output = await prepareClientOutput(result.speech.audioBuffer, outputFormatId);
-          if (output.error) {
-            // Headers are already on the wire — there is no fresh status line left to
-            // report a conversion failure through. Log server-side and end the response
-            // rather than attempt a second writeHead.
-            console.error('[voice-bridge] output conversion failed after headers were sent', output.error);
-            logTurn({
-              client: clientName,
-              outcome: TURN_OUTCOMES.ERROR,
-              durationsMs: stageDurationsMs,
-              errorCode: output.error.headers['X-Error-Code'],
-            });
-            return res.end();
+        },
+        agent: async (...args) => {
+          const start = Date.now();
+          try {
+            const result = await adapters.agent(...args);
+            capturedReply = result.rawText ?? result.text;
+            return result;
+          } finally {
+            stageDurationsMs.agent = Date.now() - start;
           }
-          audioBuffer = output.buffer;
+        },
+        speak: (...args) => {
+          resolveTextReady();
+          const start = Date.now();
+          return adapters.speak(...args).finally(() => {
+            stageDurationsMs.speak = Date.now() - start;
+          });
+        },
+      };
+
+      // runTurn()'s signature and internals are a locked Phase 2 contract — called here,
+      // never modified.
+      const runTurnPromise = runTurn({
+        audioBuffer: prepared.wavBuffer,
+        adapters: turnAdapters,
+        sttConfig: config.stt,
+        openclawConfig: config.openclaw,
+        ttsConfig: config.tts,
+        wantAudio,
+        audioFilename: 'input.wav',
+        signal: controller.signal,
+      });
+
+      if (wantAudio) {
+        // A turn that never reaches the speak stage (an error thrown by transcribe/agent, or
+        // an abort caught between stages) never resolves textReady on its own — race it
+        // against the turn's own settlement so that case falls through to the ordinary
+        // re-await below instead of waiting forever for a speak call that will never happen.
+        await Promise.race([textReady, runTurnPromise.then(() => {}, () => {})]);
+
+        if (capturedTranscript !== undefined && capturedReply !== undefined) {
+          // Compute both length headers and call writeHead before the first write of any
+          // kind (03-RESEARCH.md Pitfall 2) — both are known now, since the pipeline resolves
+          // transcript and reply together, before speech starts. Writing them here, before
+          // awaiting runTurnPromise to completion, is what lets the client read the full text
+          // preamble while synthesis is still in flight.
+          const head = buildTurnResponseHead({
+            transcript: capturedTranscript,
+            reply: capturedReply,
+            outputFormatId,
+            audioPresent: true,
+          });
+          res.writeHead(head.status, head.headers);
+          res.write(head.transcriptBuffer);
+          res.write(head.replyBuffer);
+
+          const result = await runTurnPromise;
+          let audioBuffer = Buffer.alloc(0);
+          if (result.speech) {
+            const output = await prepareClientOutput(result.speech.audioBuffer, outputFormatId);
+            if (output.error) {
+              // Headers are already on the wire — there is no fresh status line left to
+              // report a conversion failure through. Log server-side and end the response
+              // rather than attempt a second writeHead.
+              console.error('[voice-bridge] output conversion failed after headers were sent', output.error);
+              logTurn({
+                client: clientName,
+                outcome: TURN_OUTCOMES.ERROR,
+                durationsMs: stageDurationsMs,
+                errorCode: output.error.headers['X-Error-Code'],
+              });
+              return res.end();
+            }
+            audioBuffer = output.buffer;
+          }
+          res.write(audioBuffer);
+          // The one exit point this task owns (04-01-PLAN.md, locked). Plan 04-02 owns every
+          // remaining exit point and the error/abort outcomes. clientName reaches only this
+          // call and the rate-limit bucket key above — nowhere else (T-4-05).
+          logTurn({ client: clientName, outcome: TURN_OUTCOMES.OK, durationsMs: stageDurationsMs });
+          return res.end();
         }
-        res.write(audioBuffer);
-        // The one exit point this task owns (04-01-PLAN.md, locked). Plan 04-02 owns every
-        // remaining exit point and the error/abort outcomes. clientName reaches only this
-        // call and the rate-limit bucket key above — nowhere else (T-4-05).
-        logTurn({ client: clientName, outcome: TURN_OUTCOMES.OK, durationsMs: stageDurationsMs });
-        return res.end();
       }
+
+      // Text-only turn (wantAudio false — prepareClientOutput is never called on this path,
+      // since a conversion on a null speech buffer is the obvious way this branch breaks), or
+      // a wantAudio-true turn that errored/aborted before ever reaching the speak stage.
+      // Either way nothing has been written to the wire yet, so the single-await shape below
+      // still applies, and in the error case runTurnPromise's rejection propagates unchanged
+      // to the outer catch.
+      const result = await runTurnPromise;
+
+      const head = buildTurnResponseHead({
+        transcript: result.transcript,
+        reply: result.reply,
+        outputFormatId,
+        audioPresent: Boolean(result.speech),
+      });
+
+      // No body-length header is set and transfer-encoding is never set by hand — Node
+      // applies chunked framing automatically in that absence, and setting either one
+      // defeats it.
+      res.writeHead(head.status, head.headers);
+      res.write(head.transcriptBuffer);
+      res.write(head.replyBuffer);
+      logTurn({ client: clientName, outcome: TURN_OUTCOMES.OK, durationsMs: stageDurationsMs });
+      res.end();
+    } finally {
+      inFlightControllers.delete(controller);
     }
-
-    // Text-only turn (wantAudio false — prepareClientOutput is never called on this path,
-    // since a conversion on a null speech buffer is the obvious way this branch breaks), or
-    // a wantAudio-true turn that errored/aborted before ever reaching the speak stage.
-    // Either way nothing has been written to the wire yet, so the single-await shape below
-    // still applies, and in the error case runTurnPromise's rejection propagates unchanged
-    // to the outer catch.
-    const result = await runTurnPromise;
-
-    const head = buildTurnResponseHead({
-      transcript: result.transcript,
-      reply: result.reply,
-      outputFormatId,
-      audioPresent: Boolean(result.speech),
-    });
-
-    // No body-length header is set and transfer-encoding is never set by hand — Node
-    // applies chunked framing automatically in that absence, and setting either one
-    // defeats it.
-    res.writeHead(head.status, head.headers);
-    res.write(head.transcriptBuffer);
-    res.write(head.replyBuffer);
-    logTurn({ client: clientName, outcome: TURN_OUTCOMES.OK, durationsMs: stageDurationsMs });
-    res.end();
   }
 
   // Mirrors tts-kokoro-onnx.js's own private getKokoroServiceUrl() precedence

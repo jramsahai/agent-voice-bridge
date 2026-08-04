@@ -1261,6 +1261,158 @@ test('rate-limit buckets are keyed by resolved client identity, not by source ad
 // site — not just through a direct logTurnCompletion() call (see test/turn-log.test.js).
 // =====================================================================================
 
+// =====================================================================================
+// Plan 04-04 Task 1: inFlightControllers tracks every in-flight turn's own AbortController,
+// draining it on every way a turn can end — success, thrown error, and abort alike. This is
+// the set 04-04's shutdown handler will later abort from; proving it here (rather than in
+// shutdown.test.js) keeps the proof anchored to the real handleTurn() call site instead of a
+// double.
+// =====================================================================================
+
+test('inFlightControllers has size 1 while a turn is held open on an unresolved adapter promise, and size 0 once the turn completes', async () => {
+  const gate = makeGate();
+  const inFlightControllers = new Set();
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => {
+      await gate.promise;
+      return { text: 'hi', meta: {} };
+    },
+    agent: async () => ({ text: 'ok', rawText: 'ok', meta: {} }),
+    speak: async () => ({ audioBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }), mimeType: 'audio/wav', meta: {} }),
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent', inFlightControllers });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const turnPromise = postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    await waitUntil(() => inFlightControllers.size === 1);
+    assert.equal(inFlightControllers.size, 1);
+
+    gate.release();
+    const response = await turnPromise;
+    assert.equal(response.statusCode, 200);
+    assert.equal(inFlightControllers.size, 0);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('inFlightControllers is empty after a turn whose adapter threw', async () => {
+  const inFlightControllers = new Set();
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => ({ text: 'hi', meta: {} }),
+    agent: async () => {
+      throw new Error('agent failed on purpose');
+    },
+    speak: async () => {
+      throw new Error('speak must not be called');
+    },
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent', inFlightControllers });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    assert.equal(response.statusCode, 500);
+    assert.equal(inFlightControllers.size, 0);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('inFlightControllers is empty after a turn whose client disconnected mid-flight', async () => {
+  const gate = makeGate();
+  const inFlightControllers = new Set();
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => ({ text: 'hello', meta: {} }),
+    agent: async () => ({ text: 'a careful reply', rawText: 'a careful reply', meta: {} }),
+    speak: async (text, ttsConfig, { signal } = {}) => {
+      await gate.promise;
+      if (signal?.aborted) {
+        throw new Error('speak observed an aborted signal');
+      }
+      return { audioBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }), mimeType: 'audio/wav', meta: {} };
+    },
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent', inFlightControllers });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const body = makePcm16({ samples: 10 });
+    let headersReceived = false;
+    const clientReq = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: '/v1/turn',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': body.length,
+          'X-Voice-Input-Format': 'pcm16',
+        },
+      },
+      (res) => {
+        headersReceived = true;
+        res.on('data', () => {});
+        res.on('error', () => {});
+      },
+    );
+    clientReq.on('error', () => {});
+    clientReq.write(body);
+    clientReq.end();
+
+    await waitUntil(() => headersReceived);
+    await waitUntil(() => inFlightControllers.size === 1);
+    clientReq.destroy();
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    gate.release();
+    await waitUntil(() => inFlightControllers.size === 0);
+    assert.equal(inFlightControllers.size, 0);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('aborting the tracked controller directly while a turn is held open ends the response and drains the set — proving it is the same controller the disconnect path uses', async () => {
+  const gate = makeGate();
+  const inFlightControllers = new Set();
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async (audioBuffer, sttConfig, { signal } = {}) => {
+      await gate.promise;
+      if (signal?.aborted) {
+        throw new Error('transcribe observed an aborted signal');
+      }
+      return { text: 'hi', meta: {} };
+    },
+    agent: async () => ({ text: 'ok', rawText: 'ok', meta: {} }),
+    speak: async () => ({ audioBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }), mimeType: 'audio/wav', meta: {} }),
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent', inFlightControllers });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const turnPromise = postTurn(port, { body: makePcm16({ samples: 10 }), headers: { 'X-Voice-Input-Format': 'pcm16' } });
+    await waitUntil(() => inFlightControllers.size === 1);
+
+    const [controller] = inFlightControllers;
+    controller.abort();
+    gate.release();
+
+    const response = await turnPromise;
+    assert.equal(response.statusCode, 499);
+    await waitUntil(() => inFlightControllers.size === 0);
+    assert.equal(inFlightControllers.size, 0);
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test('OPS-01: a real turn whose configured client token, transcript, and reply are each a distinct sentinel yields a collected record containing none of the three', async () => {
   const TOKEN_SENTINEL = 'sentinel-token-h3x9v2qz';
   const TRANSCRIPT_SENTINEL = 'sentinel-transcript-r5t1c8mn';

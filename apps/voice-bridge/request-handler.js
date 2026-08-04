@@ -97,6 +97,15 @@ function sendFile(res, filePath, contentType) {
   stream.pipe(res);
 }
 
+// IN-02: the Host header's hostname component is case-insensitive per RFC 7230 §5.4, and a
+// client may legitimately carry an explicit standard-port suffix (`:80`/`:443`) that a
+// configured expectedHost typically does not. Normalizing both sides before the strict compare
+// avoids wrongly rejecting a request that only differs in case or an explicit standard port.
+function normalizeHostHeader(value) {
+  if (typeof value !== 'string') return value;
+  return value.toLowerCase().replace(/:(80|443)$/, '');
+}
+
 // Returns a routed, injectable HTTP handler suitable for http.createServer. Everything the
 // legacy server.js held at module scope (config-derived constants, the rate-limit bucket
 // Map) moves into this factory's closure, so two handler instances in one test process
@@ -182,7 +191,7 @@ export function createRequestHandler({
     // that same fixed-key bucket here closes the gap where a mismatched Host/Origin could be
     // sent an unbounded number of times without ever being rate-limited, mirroring the bad-
     // bearer-token path below.
-    if (expectedHost && host !== expectedHost) {
+    if (expectedHost && normalizeHostHeader(host) !== normalizeHostHeader(expectedHost)) {
       rejectWithFailedAuthThrottle(res, sendError, 'FORBIDDEN');
       return { ok: false };
     }

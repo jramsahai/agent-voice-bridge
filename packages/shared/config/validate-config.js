@@ -66,6 +66,11 @@ export function validateConfig(config) {
   if (clientsIsPlainObject) {
     const firstNameForToken = new Map();
     for (const [name, token] of Object.entries(clients)) {
+      // IN-04: Object.entries() on a plain object — including one parsed from JSON, the only
+      // realistic source here — can never yield a non-string key, so `typeof name !== 'string'`
+      // is unreachable today; kept as defensive-in-depth against a hypothetical future
+      // non-JSON config source rather than dropped, so a future reader doesn't spend time
+      // looking for how to trigger it.
       if (typeof name !== 'string' || name.length === 0) {
         errors.push(`security.clients has an invalid client name: ${JSON.stringify(name)}`);
       }

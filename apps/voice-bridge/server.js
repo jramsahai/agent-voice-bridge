@@ -13,7 +13,14 @@ const { config, configPath } = loadConfig();
 const rootDir = getRootDir();
 const webDir = path.join(rootDir, 'apps', 'voice-web');
 
-const configErrors = validateConfig(config);
+let configErrors;
+try {
+  configErrors = validateConfig(config);
+} catch (err) {
+  console.error(`[voice-bridge] invalid configuration at ${configPath}:`);
+  console.error(`[voice-bridge]   - ${err.message}`);
+  process.exit(1);
+}
 if (configErrors.length > 0) {
   console.error(`[voice-bridge] invalid configuration at ${configPath}:`);
   for (const message of configErrors) {

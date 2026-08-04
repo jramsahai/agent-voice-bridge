@@ -510,7 +510,11 @@ export function createRequestHandler({
   // supports because it is derived from the same source the transport itself reads.
   // Served without acquiring the shared turn lock: this route never calls runTurn().
   function handleCapabilities(req, res) {
-    const voices = config.tts?.voices ?? [config.tts?.voice];
+    // IN-01: if both tts.voices and tts.voice are absent, this evaluates to [undefined];
+    // filtering it out before joining turns a silent bare `voices: ` line into an honest
+    // empty list, rather than a value that reads as present but empty. Defense-in-depth
+    // only — WR-04's validateConfig() should already prevent this shape from passing startup.
+    const voices = (config.tts?.voices ?? [config.tts?.voice]).filter((v) => v !== undefined);
     sendLinesBody(res, 200, {}, [
       ['api-version', API_VERSION],
       ['input-formats', listSupportedFormats().join(',')],

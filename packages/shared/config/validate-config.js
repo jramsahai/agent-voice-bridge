@@ -115,14 +115,14 @@ export function validateConfig(config) {
   }
   if (config.security.rateLimitWindowMs !== undefined) {
     const value = config.security.rateLimitWindowMs;
-    if (!Number.isFinite(value) || value <= 0) {
-      errors.push('security.rateLimitWindowMs must be a finite number greater than zero');
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+      errors.push('security.rateLimitWindowMs must be a positive integer');
     }
   }
   if (config.security.rateLimitMaxRequests !== undefined) {
     const value = config.security.rateLimitMaxRequests;
-    if (!Number.isFinite(value) || value <= 0) {
-      errors.push('security.rateLimitMaxRequests must be a finite number greater than zero');
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+      errors.push('security.rateLimitMaxRequests must be a positive integer');
     }
   }
 

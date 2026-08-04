@@ -157,12 +157,40 @@ export function createRequestHandler({
     // Host and origin rejections deliberately collapse to the same FORBIDDEN code and the
     // same fixed title (T-3-16): telling a caller which of the two checks it failed tells an
     // attacker how to fix its request.
+    //
+    // WR-03: both Host and Origin are attacker-controlled, unauthenticated inputs — the same
+    // class of caller the failedAuth bucket already exists to throttle (D-05). Drawing on
+    // that same fixed-key bucket here closes the gap where a mismatched Host/Origin could be
+    // sent an unbounded number of times without ever being rate-limited, mirroring the bad-
+    // bearer-token path below.
     if (expectedHost && host !== expectedHost) {
-      sendError(res, buildError('FORBIDDEN'));
+      if (
+        !checkRateLimitBucket(
+          rateLimitBuckets.failedAuth,
+          FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS,
+          FAILED_AUTH_RATE_LIMIT_WINDOW_MS,
+          FAILED_AUTH_BUCKET_KEY,
+        )
+      ) {
+        sendError(res, buildError('RATE_LIMITED'));
+      } else {
+        sendError(res, buildError('FORBIDDEN'));
+      }
       return { ok: false };
     }
     if (allowedOrigins.size && origin && !allowedOrigins.has(origin)) {
-      sendError(res, buildError('FORBIDDEN'));
+      if (
+        !checkRateLimitBucket(
+          rateLimitBuckets.failedAuth,
+          FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS,
+          FAILED_AUTH_RATE_LIMIT_WINDOW_MS,
+          FAILED_AUTH_BUCKET_KEY,
+        )
+      ) {
+        sendError(res, buildError('RATE_LIMITED'));
+      } else {
+        sendError(res, buildError('FORBIDDEN'));
+      }
       return { ok: false };
     }
 

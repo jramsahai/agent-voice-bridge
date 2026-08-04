@@ -8,17 +8,30 @@
 export const TURN_LOG_EVENT = 'turn';
 export const TURN_OUTCOMES = Object.freeze({ OK: 'ok', ERROR: 'error', ABORTED: 'aborted' });
 
+const VALID_OUTCOMES = new Set(Object.values(TURN_OUTCOMES));
+
+// D-07: a stage that never ran logs null; a stage that ran and took under a millisecond logs
+// the number 0. Those are different facts, so this coerces anything that is not itself a
+// finite number (undefined, NaN, a string, an object) to null rather than letting a
+// non-numeric value leak onto the wire.
+function finiteOrNull(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
 export function logTurnCompletion({ client, outcome, durationsMs = {}, errorCode = null }) {
   const record = {
     event: TURN_LOG_EVENT,
     ts: new Date().toISOString(),
     client,
-    outcome,
+    // An outcome this module does not recognise is written as the error outcome rather than
+    // echoed onto the wire verbatim — the vocabulary a log consumer can rely on is exactly
+    // TURN_OUTCOMES, never an arbitrary caller-supplied string.
+    outcome: VALID_OUTCOMES.has(outcome) ? outcome : TURN_OUTCOMES.ERROR,
     errorCode,
     durationsMs: {
-      transcribe: durationsMs.transcribe ?? null,
-      agent: durationsMs.agent ?? null,
-      speak: durationsMs.speak ?? null,
+      transcribe: finiteOrNull(durationsMs.transcribe),
+      agent: finiteOrNull(durationsMs.agent),
+      speak: finiteOrNull(durationsMs.speak),
     },
   };
   // Machine-readable JSON, not prose — deliberately not using the '[voice-bridge]'

@@ -220,7 +220,7 @@ export function createRequestHandler({
     return Buffer.concat(chunks);
   }
 
-  async function handleTurn(req, res, { clientName }) {
+  async function handleTurn(req, res, { clientName, turnLogState }) {
     const rawBody = await readRawBody(req);
 
     const negotiated = negotiate(req.headers);
@@ -275,6 +275,10 @@ export function createRequestHandler({
     // meta.durationsMs, which does not exist on a rejected promise. A turn that fails during
     // agent still has stageDurationsMs.transcribe populated when a later exit point logs it.
     const stageDurationsMs = {};
+    // The out-parameter the router's own catch block reads from (04-RESEARCH.md Pitfall 3):
+    // stageDurationsMs is mutated in place by the wrapper closures below, so this reference,
+    // written once here, stays valid through every later mutation without a second handoff.
+    turnLogState.stageDurationsMs = stageDurationsMs;
 
     const turnAdapters = {
       ...adapters,
@@ -357,6 +361,12 @@ export function createRequestHandler({
             // report a conversion failure through. Log server-side and end the response
             // rather than attempt a second writeHead.
             console.error('[voice-bridge] output conversion failed after headers were sent', output.error);
+            logTurn({
+              client: clientName,
+              outcome: TURN_OUTCOMES.ERROR,
+              durationsMs: stageDurationsMs,
+              errorCode: output.error.headers['X-Error-Code'],
+            });
             return res.end();
           }
           audioBuffer = output.buffer;
@@ -391,6 +401,7 @@ export function createRequestHandler({
     res.writeHead(head.status, head.headers);
     res.write(head.transcriptBuffer);
     res.write(head.replyBuffer);
+    logTurn({ client: clientName, outcome: TURN_OUTCOMES.OK, durationsMs: stageDurationsMs });
     res.end();
   }
 
@@ -457,6 +468,11 @@ export function createRequestHandler({
   }
 
   return async function requestHandler(req, res) {
+    // Populated only on the /v1/turn branch below — its presence in the catch is exactly
+    // what gates "only log from the catch when the request that failed was a turn request"
+    // (04-RESEARCH.md Pitfall 3): a rejected static file read or a 404 never sets this, so
+    // neither ever emits a turn record.
+    let turnLogState = null;
     try {
       if (req.method === 'GET' && req.url === '/') {
         return sendFile(res, path.join(webDir, 'index.html'), 'text/html; charset=utf-8');
@@ -467,7 +483,8 @@ export function createRequestHandler({
       if (req.method === 'POST' && req.url === '/v1/turn') {
         const gate = validateRequest(req, res);
         if (!gate.ok) return;
-        return await handleTurn(req, res, { clientName: gate.clientName });
+        turnLogState = { clientName: gate.clientName, stageDurationsMs: null };
+        return await handleTurn(req, res, { clientName: gate.clientName, turnLogState });
       }
       if (req.method === 'GET' && req.url === '/v1/capabilities') {
         const gate = validateRequest(req, res, { sendError: sendLineErrorHead, checkLimit: checkDiscoveryRateLimit });
@@ -498,11 +515,27 @@ export function createRequestHandler({
             : '[voice-bridge] request failed after headers were already sent',
           error,
         );
+        if (turnLogState) {
+          logTurn({
+            client: turnLogState.clientName,
+            outcome: code === 'TURN_ABORTED' ? TURN_OUTCOMES.ABORTED : TURN_OUTCOMES.ERROR,
+            durationsMs: turnLogState.stageDurationsMs ?? {},
+            errorCode: code && isKnownErrorCode(code) ? code : 'INTERNAL_ERROR',
+          });
+        }
         if (!res.writableEnded) res.destroy();
         return;
       }
 
       if (code === 'TURN_ABORTED') {
+        if (turnLogState) {
+          logTurn({
+            client: turnLogState.clientName,
+            outcome: TURN_OUTCOMES.ABORTED,
+            durationsMs: turnLogState.stageDurationsMs ?? {},
+            errorCode: 'TURN_ABORTED',
+          });
+        }
         return sendErrorHead(res, buildError('TURN_ABORTED'));
       }
 
@@ -510,6 +543,14 @@ export function createRequestHandler({
       // AUDIO_CONVERSION_FAILED (thrown per wav.js/convert.js's documented throw-vs-resolve
       // contract) all carry a registered catalogue code already — map straight through.
       if (code && isKnownErrorCode(code)) {
+        if (turnLogState) {
+          logTurn({
+            client: turnLogState.clientName,
+            outcome: TURN_OUTCOMES.ERROR,
+            durationsMs: turnLogState.stageDurationsMs ?? {},
+            errorCode: code,
+          });
+        }
         return sendErrorHead(res, buildError(code));
       }
 
@@ -518,6 +559,14 @@ export function createRequestHandler({
       // convention) and must never reach the client — buildError('INTERNAL_ERROR') with no
       // message argument always falls back to the catalogue's fixed title.
       console.error('[voice-bridge] request failed', error);
+      if (turnLogState) {
+        logTurn({
+          client: turnLogState.clientName,
+          outcome: TURN_OUTCOMES.ERROR,
+          durationsMs: turnLogState.stageDurationsMs ?? {},
+          errorCode: 'INTERNAL_ERROR',
+        });
+      }
       return sendErrorHead(res, buildError('INTERNAL_ERROR'));
     }
   };

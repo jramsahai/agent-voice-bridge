@@ -3,6 +3,7 @@ import path from 'node:path';
 import { loadConfig, getRootDir } from '../../packages/shared/config/load-config.js';
 import { validateConfig } from '../../packages/shared/config/validate-config.js';
 import { runPreflightChecks } from '../../packages/shared/lifecycle/preflight.js';
+import { installShutdownHandlers } from '../../packages/shared/lifecycle/shutdown.js';
 import { transcribeWithWhisperLocal } from '../../packages/shared/adapters/stt-whisper-local.js';
 import { speakText } from '../../packages/shared/adapters/tts.js';
 import { sendTurnToOpenClaw } from '../../packages/shared/adapters/openclaw-cli.js';
@@ -39,9 +40,13 @@ const adapters = {
   speak: speakText,
 };
 
-const server = http.createServer(createRequestHandler({ config, adapters, webDir }));
+const inFlightControllers = new Set();
+
+const server = http.createServer(createRequestHandler({ config, adapters, webDir, inFlightControllers }));
 
 server.listen(config.server.port, config.server.host, () => {
   console.log(`voice bridge listening on http://${config.server.host}:${config.server.port}`);
   console.log(`using config ${configPath}`);
 });
+
+installShutdownHandlers({ server, inFlightControllers });

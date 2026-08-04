@@ -51,6 +51,11 @@ const inFlightControllers = new Set();
 
 const server = http.createServer(createRequestHandler({ config, adapters, webDir, inFlightControllers }));
 
+server.on('error', (err) => {
+  console.error(`[voice-bridge] failed to start server: ${err.message}`);
+  process.exit(1);
+});
+
 server.listen(config.server.port, config.server.host, () => {
   console.log(`voice bridge listening on http://${config.server.host}:${config.server.port}`);
   console.log(`using config ${configPath}`);

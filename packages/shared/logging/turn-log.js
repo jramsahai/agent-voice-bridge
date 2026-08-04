@@ -19,6 +19,13 @@ function finiteOrNull(value) {
 }
 
 export function logTurnCompletion({ client, outcome, durationsMs = {}, errorCode = null }) {
+  // WR-05: the default parameter above only applies when the argument is `undefined` — a
+  // call passing `durationsMs: null` explicitly still crashes below without this guard.
+  // Every current call site in request-handler.js already defends this exact case with
+  // `?? {}` before calling logTurn, which is a strong signal null is a live possibility on
+  // this path; this module is meant to be the single crash-proof source of truth for this
+  // log line, so it must not depend on every caller remembering that same guard.
+  const durations = durationsMs ?? {};
   const record = {
     event: TURN_LOG_EVENT,
     ts: new Date().toISOString(),
@@ -29,9 +36,9 @@ export function logTurnCompletion({ client, outcome, durationsMs = {}, errorCode
     outcome: VALID_OUTCOMES.has(outcome) ? outcome : TURN_OUTCOMES.ERROR,
     errorCode,
     durationsMs: {
-      transcribe: finiteOrNull(durationsMs.transcribe),
-      agent: finiteOrNull(durationsMs.agent),
-      speak: finiteOrNull(durationsMs.speak),
+      transcribe: finiteOrNull(durations.transcribe),
+      agent: finiteOrNull(durations.agent),
+      speak: finiteOrNull(durations.speak),
     },
   };
   // Machine-readable JSON, not prose — deliberately not using the '[voice-bridge]'

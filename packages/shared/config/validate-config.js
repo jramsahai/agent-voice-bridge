@@ -152,5 +152,17 @@ export function validateConfig(config) {
     }
   }
 
+  // WR-04: handleCapabilities() reads config.tts?.voices ?? [config.tts?.voice] then calls
+  // .join(',') on the result (request-handler.js). The ?? fallback only ever engages for a
+  // nullish value, so a non-array truthy value (e.g. a bare string) sails through
+  // unvalidated and throws a TypeError (no .join on a string) at request time instead of
+  // being caught once here at startup.
+  if (config.tts?.voices !== undefined) {
+    const voices = config.tts.voices;
+    if (!Array.isArray(voices) || voices.length === 0 || voices.some((v) => typeof v !== 'string')) {
+      errors.push('tts.voices must be a non-empty array of strings when present');
+    }
+  }
+
   return errors;
 }

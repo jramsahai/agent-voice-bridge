@@ -57,7 +57,12 @@ function sendErrorHead(res, envelope) {
 // because unlike the turn response this body is short, fully known upfront, and never
 // streamed.
 function sendLinesBody(res, status, headers, pairs) {
-  const bodyText = pairs.map(([key, value]) => `${key}: ${value}`).join('\n') + '\n';
+  // IN-03: the no-JSON-parser contract (one `key: value` pair per line) is only as strong as
+  // this function's own guarantee that no value ever smuggles in an embedded newline. Every
+  // current caller passes operator-controlled config values or catalogue-fixed error text, so
+  // this isn't reachable by an attacker today — stripped here so the invariant is enforced
+  // structurally rather than by caller discipline alone.
+  const bodyText = pairs.map(([key, value]) => `${key}: ${String(value).replace(/[\r\n]+/g, ' ')}`).join('\n') + '\n';
   const bodyBuffer = Buffer.from(bodyText, 'utf8');
   res.writeHead(status, {
     ...headers,

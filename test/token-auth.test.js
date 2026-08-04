@@ -3,6 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 
 import { buildClientDigests, resolveClientIdentity, ANONYMOUS_CLIENT_NAME } from '../packages/shared/security/token-auth.js';
 
@@ -77,4 +78,39 @@ test('the same token resolved ten times in a row returns the same name every tim
 test('ANONYMOUS_CLIENT_NAME is a fixed, non-empty string distinct from any real client name', () => {
   assert.equal(typeof ANONYMOUS_CLIENT_NAME, 'string');
   assert.ok(ANONYMOUS_CLIENT_NAME.length > 0);
+});
+
+test('GAP-1 / AUTH-03 / T-4-01: resolveClientIdentity loop compares every candidate digest without breaking early on a match (timing-safe no-early-exit)', () => {
+  const TOKEN_AUTH_SOURCE_URL = new URL('../packages/shared/security/token-auth.js', import.meta.url);
+  const source = fs.readFileSync(TOKEN_AUTH_SOURCE_URL, 'utf8');
+
+  const loopStartMarker = 'for (const [name, candidateDigest] of clientDigests) {';
+  const loopEndMarker = '  }';
+  // The exact final "}" of the loop — verify it's the one immediately before "  return matched;"
+  // by checking it appears in context.
+  const contextMarker = '  }\n  return matched;';
+
+  const loopStartIndex = source.indexOf(loopStartMarker);
+  const contextIndex = source.indexOf(contextMarker);
+  assert.notEqual(loopStartIndex, -1, `expected to find loop start "${loopStartMarker}" in token-auth.js`);
+  assert.notEqual(contextIndex, -1, `expected to find loop closing context in token-auth.js`);
+  assert.equal(loopStartIndex, source.lastIndexOf(loopStartMarker), `"${loopStartMarker}" must appear exactly once`);
+  assert.equal(contextIndex, source.lastIndexOf(contextMarker), `closing context must appear exactly once`);
+  assert.ok(loopStartIndex < contextIndex, 'loop start must precede its closing context');
+
+  // Extract the loop body: from the opening brace after loopStartMarker to the final "}" before "return matched;"
+  const loopBodyStart = loopStartIndex + loopStartMarker.length;
+  const loopBodyEnd = contextIndex + loopEndMarker.length;
+  const loopBody = source.slice(loopBodyStart, loopBodyEnd);
+
+  // Strip comment-only lines
+  const surviving = loopBody
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n');
+
+  // The loop must assign matched = name; on each iteration, but must never return or break early
+  assert.ok(surviving.includes('matched = name;'), 'loop body must contain matched = name; assignment');
+  assert.ok(!surviving.includes('return'), 'loop body must NOT contain return statement (timing side-channel)');
+  assert.ok(!surviving.includes('break'), 'loop body must NOT contain break statement (timing side-channel)');
 });

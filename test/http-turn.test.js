@@ -1541,3 +1541,40 @@ test('WR-01: both of handleTurn\'s sendErrorHead-direct-return branches call log
     assert.ok(surviving.includes('TURN_OUTCOMES.ERROR'), `region for "${openMarker}" must log TURN_OUTCOMES.ERROR`);
   }
 });
+
+test('GAP-2 / AUTH-05 / T-4-05: clientName reaches only rate-limit bucket key and logTurn calls, never adapter/config construction', () => {
+  const source = fs.readFileSync(REQUEST_HANDLER_SOURCE_URL, 'utf8');
+
+  // The critical forbidden regions where clientName must NEVER appear
+  // Extract these blocks and verify they contain no clientName token in the field/argument position
+
+  // Region 1: turnAdapters construction block — clientName must not appear
+  const turnAdaptersMarker = 'const turnAdapters = {';
+  const turnAdaptersStart = source.indexOf(turnAdaptersMarker);
+  assert.notEqual(turnAdaptersStart, -1, 'expected to find turnAdapters construction');
+  const turnAdaptersEnd = source.indexOf('      };', turnAdaptersStart); // The closing brace of the object
+  const turnAdaptersBlock = source.slice(turnAdaptersStart, turnAdaptersEnd + 7);
+  const turnAdaptersStripped = turnAdaptersBlock
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n');
+  assert.ok(
+    !turnAdaptersStripped.includes('clientName'),
+    'turnAdapters block must NOT contain clientName — config selection must use only config.* values (T-4-05)',
+  );
+
+  // Region 2: runTurn({ ... }) call — clientName must not appear in the arguments
+  const runTurnMarker = 'const runTurnPromise = runTurn({';
+  const runTurnStart = source.indexOf(runTurnMarker);
+  assert.notEqual(runTurnStart, -1, 'expected to find runTurn call');
+  const runTurnEnd = source.indexOf('      });', runTurnStart);
+  const runTurnBlock = source.slice(runTurnStart, runTurnEnd + 8);
+  const runTurnStripped = runTurnBlock
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n');
+  assert.ok(
+    !runTurnStripped.includes('clientName'),
+    'runTurn(...) call must NOT pass clientName as an argument — config objects are built from config.* only (T-4-05)',
+  );
+});

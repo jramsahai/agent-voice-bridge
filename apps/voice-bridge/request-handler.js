@@ -403,6 +403,13 @@ export function createRequestHandler({
 
           const result = await runTurnPromise;
           let audioBuffer = Buffer.alloc(0);
+          // WR-02: audioPresent was already written into the response head above as `true`
+          // the moment speak() was invoked, before result.speech was known. Every current
+          // adapter either resolves speak() with a truthy object or rejects — never resolves
+          // falsy — so that header is expected to always match reality by the time we get
+          // here. There is no fresh status line left to correct the header through once
+          // headers are on the wire, so a violated assumption can only be surfaced loudly
+          // server-side, not fixed client-side.
           if (result.speech) {
             const output = await prepareClientOutput(result.speech.audioBuffer, outputFormatId);
             if (output.error) {
@@ -419,6 +426,10 @@ export function createRequestHandler({
               return res.end();
             }
             audioBuffer = output.buffer;
+          } else {
+            console.error(
+              '[voice-bridge] wantAudio turn declared audio-present=1 but produced no speech',
+            );
           }
           res.write(audioBuffer);
           // The one exit point this task owns (04-01-PLAN.md, locked). Plan 04-02 owns every

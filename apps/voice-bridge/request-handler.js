@@ -138,6 +138,25 @@ export function createRequestHandler({
     );
   }
 
+  // WR-04: the failed-auth rate-limit-and-respond block was duplicated verbatim at all three
+  // rejection sites below (Host mismatch, Origin mismatch, unresolved bearer token) — extracted
+  // once here so a future change to the throttle (a new log line, a different bucket key, an
+  // additional check) only needs to be applied in one place.
+  function rejectWithFailedAuthThrottle(res, sendError, deniedError) {
+    if (
+      !checkRateLimitBucket(
+        rateLimitBuckets.failedAuth,
+        FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS,
+        FAILED_AUTH_RATE_LIMIT_WINDOW_MS,
+        FAILED_AUTH_BUCKET_KEY,
+      )
+    ) {
+      sendError(res, buildError('RATE_LIMITED'));
+    } else {
+      sendError(res, buildError(deniedError));
+    }
+  }
+
   // `sendError` lets a caller swap the rejection renderer without duplicating the gate
   // itself — GET /v1/capabilities and GET /v1/health pass sendLineErrorHead so a rejection
   // from this same gate still matches each route's own line-based content type.
@@ -164,33 +183,11 @@ export function createRequestHandler({
     // sent an unbounded number of times without ever being rate-limited, mirroring the bad-
     // bearer-token path below.
     if (expectedHost && host !== expectedHost) {
-      if (
-        !checkRateLimitBucket(
-          rateLimitBuckets.failedAuth,
-          FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS,
-          FAILED_AUTH_RATE_LIMIT_WINDOW_MS,
-          FAILED_AUTH_BUCKET_KEY,
-        )
-      ) {
-        sendError(res, buildError('RATE_LIMITED'));
-      } else {
-        sendError(res, buildError('FORBIDDEN'));
-      }
+      rejectWithFailedAuthThrottle(res, sendError, 'FORBIDDEN');
       return { ok: false };
     }
     if (allowedOrigins.size && origin && !allowedOrigins.has(origin)) {
-      if (
-        !checkRateLimitBucket(
-          rateLimitBuckets.failedAuth,
-          FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS,
-          FAILED_AUTH_RATE_LIMIT_WINDOW_MS,
-          FAILED_AUTH_BUCKET_KEY,
-        )
-      ) {
-        sendError(res, buildError('RATE_LIMITED'));
-      } else {
-        sendError(res, buildError('FORBIDDEN'));
-      }
+      rejectWithFailedAuthThrottle(res, sendError, 'FORBIDDEN');
       return { ok: false };
     }
 
@@ -199,18 +196,7 @@ export function createRequestHandler({
       // Closes WR-01 (03-REVIEW.md): failed-auth attempts draw on their own fixed-key
       // bucket, checked before the 401 is sent, so credential guessing is throttled the same
       // as any other caller class — never keyed by address (D-05).
-      if (
-        !checkRateLimitBucket(
-          rateLimitBuckets.failedAuth,
-          FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS,
-          FAILED_AUTH_RATE_LIMIT_WINDOW_MS,
-          FAILED_AUTH_BUCKET_KEY,
-        )
-      ) {
-        sendError(res, buildError('RATE_LIMITED'));
-      } else {
-        sendError(res, buildError('UNAUTHORIZED'));
-      }
+      rejectWithFailedAuthThrottle(res, sendError, 'UNAUTHORIZED');
       return { ok: false };
     }
 

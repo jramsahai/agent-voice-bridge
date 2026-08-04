@@ -67,6 +67,16 @@ export function installShutdownHandlers({
       console.error(
         `[voice-bridge] shutdown timeout exceeded with ${inFlightControllers.size} turn(s) still in flight — forcing connections closed`,
       );
+      // WR-02: server.close() only stops new TCP connections, not new HTTP requests
+      // dispatched on a keep-alive socket that was already open when shutdown began. Such a
+      // straggler's controller is added to inFlightControllers (request-handler.js) *after*
+      // the single abort pass above already ran, so it would otherwise never receive an
+      // abort signal — leaving its spawned child process (whisper-cli/openclaw/tts-kokoro)
+      // orphaned once this process exits. Re-scanning here, right before force-closing every
+      // connection, catches any controller added since the first pass.
+      for (const controller of inFlightControllers) {
+        controller.abort();
+      }
       server.closeAllConnections();
       exitFn(1);
       return;

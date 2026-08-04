@@ -245,8 +245,10 @@ export function createRequestHandler({
   }
 
   async function handleTurn(req, res, { clientName, turnLogState }) {
-    const rawBody = await readRawBody(req);
-
+    // WR-03: negotiate() only inspects headers and needs no body at all — run it before
+    // readRawBody() so a trivially wrong X-Voice-Input-Format header is rejected without
+    // first buffering the entire (size-capped) request body. Mirrors the same fail-fast
+    // discipline AUTH-04 already applies to the bearer token.
     const negotiated = negotiate(req.headers);
     if (negotiated.error) {
       // WR-01: this resolves rather than throws, so it never reaches the router's outer
@@ -261,6 +263,8 @@ export function createRequestHandler({
       return sendErrorHead(res, negotiated.error);
     }
     const { inputFormatId, outputFormatId, wantAudio } = negotiated;
+
+    const rawBody = await readRawBody(req);
 
     const prepared = await prepareTranscriptionInput(rawBody, inputFormatId);
     if (prepared.error) {

@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
@@ -16,7 +17,13 @@ import { defaultOutputFormatId } from '../packages/shared/transport/negotiate.js
 import { wavToPcm } from '../packages/shared/audio/wav.js';
 import { prepareClientOutput } from '../packages/shared/audio/convert.js';
 import { buildClientDigests, resolveClientIdentity } from '../packages/shared/security/token-auth.js';
+import { TURN_OUTCOMES } from '../packages/shared/logging/turn-log.js';
 import { makePcm16, makeCanonicalWav, makeStereoWav } from './helpers/fixtures.js';
+
+// Plan 04-05 (WR-01 gap closure): source read of handleTurn's own file, so the structural
+// test below can never drift from what actually ships — same convention as
+// test/turn-lock.test.js and test/wav.test.js.
+const REQUEST_HANDLER_SOURCE_URL = new URL('../apps/voice-bridge/request-handler.js', import.meta.url);
 
 function uniqueSessionId(label) {
   return `http-turn-test-${label}-${randomUUID()}`;
@@ -1441,5 +1448,91 @@ test('OPS-01: a real turn whose configured client token, transcript, and reply a
     assert.ok(!serialised.includes(REPLY_SENTINEL));
   } finally {
     await closeServer(server);
+  }
+});
+
+// =====================================================================================
+// Plan 04-05 (gap closure): 04-VERIFICATION.md gap 1 (WR-01) — a turn rejected before any
+// pipeline stage runs must still reach the turn log, naming the resolved client and the
+// right error code. D-13: the negotiate() branch is proven behaviorally below; the
+// prepareTranscriptionInput() branch is proven structurally instead, since it has no
+// offline-reachable trigger over HTTP.
+// =====================================================================================
+
+test('WR-01: two turns rejected at format negotiation under two different client tokens each yield exactly one collected record naming that client, outcome error, errorCode FMT_UNSUPPORTED, and no stage timings', async () => {
+  let transcribeCallCount = 0;
+  const config = buildTestConfig({ clients: { alpha: 'alpha-token', beta: 'beta-token' } });
+  const adapters = {
+    transcribe: async () => {
+      transcribeCallCount += 1;
+      return { text: 'hi', meta: {} };
+    },
+    agent: async () => ({ text: 'ok', rawText: 'ok', meta: {} }),
+    speak: async () => ({ audioBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }), mimeType: 'audio/wav', meta: {} }),
+  };
+  const records = [];
+  const handler = createRequestHandler({
+    config,
+    adapters,
+    webDir: '/nonexistent',
+    logTurn: (record) => records.push(record),
+  });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+
+    const alphaResponse = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'not-a-real-format', Authorization: 'Bearer alpha-token' },
+    });
+    const betaResponse = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { 'X-Voice-Input-Format': 'not-a-real-format', Authorization: 'Bearer beta-token' },
+    });
+
+    assert.equal(alphaResponse.statusCode, 415);
+    assert.equal(alphaResponse.headers['x-error-code'], 'FMT_UNSUPPORTED');
+    assert.equal(betaResponse.statusCode, 415);
+    assert.equal(betaResponse.headers['x-error-code'], 'FMT_UNSUPPORTED');
+
+    assert.equal(records.length, 2);
+    assert.equal(records[0].client, 'alpha');
+    assert.equal(records[1].client, 'beta');
+    for (const record of records) {
+      assert.equal(record.outcome, TURN_OUTCOMES.ERROR);
+      assert.equal(record.errorCode, 'FMT_UNSUPPORTED');
+      assert.deepEqual(record.durationsMs, {});
+    }
+    assert.equal(transcribeCallCount, 0);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('WR-01: both of handleTurn\'s sendErrorHead-direct-return branches call logTurn between the branch condition and the return, with comment lines excluded from the scan', () => {
+  const source = fs.readFileSync(REQUEST_HANDLER_SOURCE_URL, 'utf8');
+
+  const branchPairs = [
+    { openMarker: 'if (negotiated.error) {', returnMarker: 'return sendErrorHead(res, negotiated.error);' },
+    { openMarker: 'if (prepared.error) {', returnMarker: 'return sendErrorHead(res, prepared.error);' },
+  ];
+
+  for (const { openMarker, returnMarker } of branchPairs) {
+    const openIndex = source.indexOf(openMarker);
+    const returnIndex = source.indexOf(returnMarker);
+    assert.notEqual(openIndex, -1, `expected to find "${openMarker}" in request-handler.js`);
+    assert.notEqual(returnIndex, -1, `expected to find "${returnMarker}" in request-handler.js`);
+    assert.equal(openIndex, source.lastIndexOf(openMarker), `"${openMarker}" must appear exactly once`);
+    assert.equal(returnIndex, source.lastIndexOf(returnMarker), `"${returnMarker}" must appear exactly once`);
+    assert.ok(openIndex < returnIndex, `"${openMarker}" must precede its own "${returnMarker}"`);
+
+    const region = source.slice(openIndex, returnIndex);
+    const surviving = region
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n');
+
+    assert.ok(surviving.includes('logTurn({'), `region for "${openMarker}" must call logTurn({ before returning`);
+    assert.ok(surviving.includes('TURN_OUTCOMES.ERROR'), `region for "${openMarker}" must log TURN_OUTCOMES.ERROR`);
   }
 });

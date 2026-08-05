@@ -26,6 +26,7 @@
       .pill.busy { background: #7c2d12; }
       .pill[hidden] { display: none; }
       audio { width: 100%; margin-top: 12px; }
+      audio[hidden] { display: none; }
     </style>
   </head>
   <body>
@@ -43,7 +44,7 @@
       <div class="card">
         <div class="label">Reply</div>
         <pre id="reply">—</pre>
-        <audio id="player" controls></audio>
+        <audio id="player" controls hidden></audio>
       </div>
       <div class="card">
         <div class="label">Access token</div>

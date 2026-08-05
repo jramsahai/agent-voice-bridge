@@ -318,3 +318,68 @@ test('the splitTurnResponse call site in stopAndSend is wrapped in a catch that 
       "other statement, or the pre-existing player.play().catch(() => {}), which has no reportTurnError in its body",
   );
 });
+
+// =====================================================================================
+// G-05-4 (05-UAT.md): a 200 can carry no audio segment — request-handler.js derives
+// audioPresent from Boolean(result.speech), so the shipped page reaches this whenever the
+// speak stage yields no speech. The player must be detached on that path, or it stays
+// enabled over the PREVIOUS turn's blob URL and offers the prior reply's audio as if it
+// were this one (and over an empty src its play() aborts into an uncaught DOMException).
+// =====================================================================================
+
+test('a turn carrying no audio detaches the player rather than leaving the previous reply loaded', () => {
+  const playerCalls = [];
+  const fakePlayer = {
+    hidden: false,
+    pause() { playerCalls.push('pause'); },
+    removeAttribute(name) { playerCalls.push(`removeAttribute:${name}`); },
+    load() { playerCalls.push('load'); },
+  };
+  const revoked = [];
+  const resetPlayer = loadBrowserFunction('resetPlayer', {
+    player: fakePlayer,
+    URL: { revokeObjectURL(url) { revoked.push(url); } },
+    lastPlayerObjectUrl: 'blob:the-previous-reply',
+  });
+
+  resetPlayer();
+
+  assert.deepEqual(
+    revoked,
+    ['blob:the-previous-reply'],
+    'the prior turn\'s object URL must be revoked, not left allocated and reachable',
+  );
+  assert.ok(
+    playerCalls.includes('removeAttribute:src'),
+    'the src attribute must be removed — assigning src = "" resolves against the page URL instead of detaching',
+  );
+  assert.ok(
+    playerCalls.includes('load'),
+    'load() is what actually detaches the media resource after the src attribute is gone',
+  );
+  assert.equal(fakePlayer.hidden, true, 'the player must be hidden so there is no dead control to click');
+});
+
+test('the no-audio branch of stopAndSend calls resetPlayer, and index.html ships the player hidden', () => {
+  const stopAndSendSource = extractFunctionSource('stopAndSend');
+  const branchIndex = stopAndSendSource.indexOf('if (audioPcm)');
+  assert.ok(branchIndex !== -1, "sanity: stopAndSend must branch on 'if (audioPcm)'");
+
+  assert.match(
+    stopAndSendSource.slice(branchIndex),
+    /\}\s*else\s*\{[\s\S]*?resetPlayer\(\)/,
+    'the if (audioPcm) block must carry an else branch that calls resetPlayer() — without it a no-audio ' +
+      'turn leaves whatever the last audio turn loaded sitting in the player',
+  );
+
+  assert.match(
+    indexHtmlSource,
+    /<audio[^>]*\bid="player"[^>]*\bhidden\b[^>]*>/,
+    'the player must ship hidden, so it is not a dead clickable control before the first audio reply',
+  );
+  assert.match(
+    indexHtmlSource,
+    /audio\[hidden\]\s*\{\s*display:\s*none;\s*\}/,
+    'an audio[hidden] display rule must back the hidden attribute, matching the .pill[hidden] precedent',
+  );
+});

@@ -308,6 +308,19 @@ function wrapPcmAsWavBlob(pcmBytes) {
   return new Blob([buffer], { type: 'audio/wav' });
 }
 
+// Detach the player from whatever reply it last held and hide it, so a turn that carries
+// no audio can never present the previous turn's audio as its own (G-05-4).
+function resetPlayer() {
+  if (lastPlayerObjectUrl) {
+    URL.revokeObjectURL(lastPlayerObjectUrl);
+    lastPlayerObjectUrl = null;
+  }
+  player.pause();
+  player.removeAttribute('src');
+  player.load();
+  player.hidden = true;
+}
+
 async function stopAndSend() {
   if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
   setBusy(true);
@@ -392,7 +405,16 @@ async function stopAndSend() {
       const replyWavBlob = wrapPcmAsWavBlob(audioPcm);
       lastPlayerObjectUrl = URL.createObjectURL(replyWavBlob);
       player.src = lastPlayerObjectUrl;
+      player.hidden = false;
       await player.play().catch(() => {});
+    } else {
+      // G-05-4 (05-UAT.md): a 200 can carry no audio segment (request-handler.js sets
+      // audioPresent from Boolean(result.speech)). Leaving the player untouched here left
+      // it enabled over a stale src — either the PREVIOUS turn's blob URL, which offers
+      // the prior reply's audio as if it were this one, or an empty src, whose play()
+      // aborts and surfaces an uncaught DOMException. removeAttribute + load() is what
+      // actually detaches the media resource; src = '' resolves against the page URL.
+      resetPlayer();
     }
 
     setTurnBusyState(false);

@@ -142,6 +142,11 @@ function reportTurnError(code, message, hint) {
   console.error(code, message);
 }
 
+// IN-02 (05-REVIEW.md): the microphone stream is acquired once here and never released
+// (no stream.getTracks().forEach(track => track.stop()) anywhere), so the browser's
+// mic-in-use indicator stays lit for the page's remaining life after the first turn. This
+// is intentional, not an oversight: re-acquiring the stream on every turn would re-prompt
+// for permission each time, which is worse UX than a persistently-lit indicator.
 async function ensureRecorder() {
   if (mediaRecorder) return;
   stream = await navigator.mediaDevices.getUserMedia({ audio: true });

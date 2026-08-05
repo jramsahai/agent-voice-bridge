@@ -23,6 +23,7 @@ import {
   splitTurnBody,
   runCliTurn,
   playReplyPcm,
+  readCapabilities,
   main,
   DEFAULT_READ_TIMEOUT_MS,
   TOKEN_ENV_VAR,
@@ -958,4 +959,118 @@ test('parseCliArgs sets noPlay true when --no-play is given', async () => {
     assert.equal(parsed.ok, true);
     assert.equal(parsed.values.noPlay, true);
   });
+});
+
+// =====================================================================================
+// readCapabilities / --capabilities — line-based discovery, no JSON parser anywhere
+// (05-03, Task 2).
+// =====================================================================================
+
+test('parseCliArgs sets capabilities true and does not require --input in that mode', async () => {
+  await withEnvToken('some-token', () => {
+    const parsed = parseCliArgs(['--capabilities']);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.values.capabilities, true);
+  });
+});
+
+test('readCapabilities returns a Map with the expected capability keys against a real server', async () => {
+  const clientToken = 'cli-test-token-capabilities';
+  const config = buildTestConfig({ clients: { cliClient: clientToken } });
+  const adapters = makeFakeAdapters({
+    transcript: 'unused',
+    reply: 'unused',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: process.cwd() });
+  const server = await startServer(handler);
+  const port = server.address().port;
+
+  try {
+    const capabilities = await readCapabilities({ host: '127.0.0.1', port, token: clientToken });
+    assert.ok(capabilities instanceof Map);
+    for (const key of ['api-version', 'input-formats', 'reply-formats', 'max-audio-bytes']) {
+      assert.ok(capabilities.has(key), `capabilities must include the '${key}' key`);
+    }
+    assert.ok(
+      capabilities.get('reply-formats').split(',').includes('pcm16'),
+      'reply-formats must include the default headerless format id',
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("a line whose value itself contains ': ' splits on the first separator only, preserving the remainder verbatim", async () => {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const body = 'weird-key: value: with: colons\nother-key: plain\n';
+      res.writeHead(200, {
+        'content-type': 'text/plain; charset=utf-8',
+        'content-length': String(Buffer.byteLength(body)),
+      });
+      res.end(body);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  try {
+    const capabilities = await readCapabilities({ host: '127.0.0.1', port, token: 'unused' });
+    assert.equal(capabilities.get('weird-key'), 'value: with: colons');
+    assert.equal(capabilities.get('other-key'), 'plain');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('an unauthenticated capabilities probe exits with the HTTP-error code and prints the error code from the line body', async () => {
+  const config = buildTestConfig({ clients: { cliClient: 'the-real-token' } });
+  const adapters = makeFakeAdapters({
+    transcript: 'unused',
+    reply: 'unused',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: process.cwd() });
+  const server = await startServer(handler);
+  const port = server.address().port;
+
+  try {
+    const { result, stderr } = await captureConsole(() =>
+      main(['--capabilities', '--host', '127.0.0.1', '--port', String(port), '--token', 'wrong-token']),
+    );
+    assert.equal(result, EXIT_CODES.HTTP_ERROR);
+    assert.ok(stderr.some((line) => /UNAUTHORIZED/.test(line)));
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('main() --capabilities prints each capability pair as key: value and exits 0 without requiring --input', async () => {
+  const clientToken = 'cli-test-token-capabilities-main';
+  const config = buildTestConfig({ clients: { cliClient: clientToken } });
+  const adapters = makeFakeAdapters({
+    transcript: 'unused',
+    reply: 'unused',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: process.cwd() });
+  const server = await startServer(handler);
+  const port = server.address().port;
+
+  try {
+    const { result, stdout } = await captureConsole(() =>
+      main(['--capabilities', '--host', '127.0.0.1', '--port', String(port), '--token', clientToken]),
+    );
+    assert.equal(result, EXIT_CODES.OK);
+    assert.ok(stdout.some((line) => line.startsWith('api-version: ')));
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('the CLI source contains no JSON.parse call anywhere', () => {
+  const source = fs.readFileSync(new URL('../apps/voice-cli/cli.js', import.meta.url), 'utf8');
+  assert.ok(!/JSON\.parse/.test(source));
 });

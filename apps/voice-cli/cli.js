@@ -98,6 +98,8 @@ function printUsage(print) {
       '                   Resets on every received byte — a slow but steadily-arriving',
       '                   response is never killed by this.',
       '  --no-play        Write the reply PCM to --out but never invoke a player binary',
+      '  --capabilities   Print the service capability pairs (GET /v1/capabilities) and exit;',
+      '                   --input is not required in this mode',
       '  --help           Print this message and exit',
       '',
       `The recommended way to supply the bearer token is the ${TOKEN_ENV_VAR} environment`,
@@ -129,6 +131,7 @@ export function parseCliArgs(argv) {
     outPath: null,
     timeoutMs: DEFAULT_READ_TIMEOUT_MS,
     noPlay: false,
+    capabilities: false,
     help: false,
   };
   let flagToken = null;
@@ -156,6 +159,9 @@ export function parseCliArgs(argv) {
         break;
       case '--no-play':
         values.noPlay = true;
+        break;
+      case '--capabilities':
+        values.capabilities = true;
         break;
       case '--help':
         values.help = true;
@@ -185,7 +191,8 @@ export function parseCliArgs(argv) {
   // client never touches the shared configuration loader or the operator's local config file.
   values.token = flagToken || process.env[TOKEN_ENV_VAR] || null;
 
-  if (!values.inputPath) {
+  // --capabilities runs a discovery probe instead of a turn — it needs no input audio file.
+  if (!values.inputPath && !values.capabilities) {
     return { ok: false, exitCode: EXIT_CODES.USAGE, message: 'missing required --input <wav-file>' };
   }
   if (!values.token) {
@@ -348,6 +355,101 @@ export async function playReplyPcm(audioPcm, { playerBin = DEFAULT_PLAYER_BIN, e
   });
 }
 
+// Splits response text into a Map, on newline and then each line on its FIRST ': ' only —
+// exactly matching request-handler.js's own sendLinesBody() emission shape, so a value that
+// itself contains ': ' still parses correctly (only the first separator is meaningful). No
+// JSON parsing anywhere: this is the shape a client with no JSON parser is meant to read.
+function parseLinesBody(text) {
+  const pairs = new Map();
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    const idx = line.indexOf(': ');
+    if (idx === -1) continue;
+    pairs.set(line.slice(0, idx), line.slice(idx + 2));
+  }
+  return pairs;
+}
+
+// Issues GET /v1/capabilities over the same node:http request path postTurn uses for the
+// turn route — same bearer header, same accept-encoding: identity, same inactivity timeout
+// with an explicit req.destroy(), same hard refusal of a 3xx redirect or a content-encoding
+// response header (05-RESEARCH.md Pitfall 2/3; CLI-02's posture applies to every route this
+// client calls, not just the turn route). Resolves a Map built by parseLinesBody() on a 200
+// response; rejects with a tagged error (HTTP_ERROR/TIMEOUT/CONTRACT_VIOLATION) otherwise —
+// an HTTP_ERROR rejection carries statusCode and errorCode read from the line-based error
+// body (request-handler.js's sendLineErrorHead), never a JSON envelope.
+export function readCapabilities({ host, port, token, timeoutMs = DEFAULT_READ_TIMEOUT_MS }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host,
+        port,
+        method: 'GET',
+        path: '/v1/capabilities',
+        timeout: timeoutMs,
+        headers: {
+          authorization: `Bearer ${token}`,
+          'accept-encoding': 'identity',
+        },
+      },
+      (res) => {
+        // Same redirect and compression refusals as postTurn — see that function's comments
+        // for the full rationale (API-08; CLI-02).
+        if (res.statusCode >= 300 && res.statusCode <= 399) {
+          res.resume();
+          const err = new Error(
+            `received a ${res.statusCode} redirect response — the service is specified never ` +
+              `to redirect (API-08); no second request was issued`,
+          );
+          err.code = 'CONTRACT_VIOLATION';
+          req.destroy();
+          reject(err);
+          return;
+        }
+
+        const contentEncoding = res.headers['content-encoding'];
+        if (contentEncoding) {
+          res.resume();
+          const err = new Error(
+            `response carried a content-encoding header ('${contentEncoding}') — this client ` +
+              `only ever sends accept-encoding: identity and never decompresses a response`,
+          );
+          err.code = 'CONTRACT_VIOLATION';
+          req.destroy();
+          reject(err);
+          return;
+        }
+
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          const bodyText = Buffer.concat(chunks).toString('utf8');
+          if (res.statusCode !== 200) {
+            const pairs = parseLinesBody(bodyText);
+            const err = new Error(
+              pairs.get('error-message') ?? `capabilities request failed with status ${res.statusCode}`,
+            );
+            err.code = 'HTTP_ERROR';
+            err.statusCode = res.statusCode;
+            err.errorCode = pairs.get('error-code') ?? res.headers['x-error-code'] ?? 'UNKNOWN';
+            reject(err);
+            return;
+          }
+          resolve(parseLinesBody(bodyText));
+        });
+        res.on('error', reject);
+      },
+    );
+    req.on('timeout', () => {
+      const err = new Error(`read timeout exceeded after ${timeoutMs}ms`);
+      err.code = 'TIMEOUT';
+      req.destroy(err);
+    });
+    req.on('error', (err) => reject(err));
+    req.end();
+  });
+}
+
 // Composes the above into the CLI's one path: read the file, assert conformance, strip to raw
 // PCM (reusing wav.js — never re-walking RIFF chunks here), post, split, print, and write the
 // reply PCM when present. Every diagnostic line is built from a fixed set of named fields
@@ -430,6 +532,38 @@ export async function runCliTurn({
   return EXIT_CODES.OK;
 }
 
+// Runs the --capabilities discovery probe instead of a turn: same token/host/port, same exit
+// code vocabulary as a turn (TIMEOUT/CONTRACT_VIOLATION/HTTP_ERROR), and prints each pair back
+// as `key: value`, one per line — mirroring the wire body's own shape rather than reformatting
+// it. An HTTP_ERROR rejection prints the status and error code read from the line-based error
+// body, the same shape runCliTurn already uses for a rejected turn.
+async function runCliCapabilities({ host, port, token, timeoutMs = DEFAULT_READ_TIMEOUT_MS }) {
+  const reportError = (message) => console.error(redactToken(message, token));
+
+  try {
+    const capabilities = await readCapabilities({ host, port, token, timeoutMs });
+    for (const [key, value] of capabilities) {
+      console.log(`${key}: ${value}`);
+    }
+    return EXIT_CODES.OK;
+  } catch (error) {
+    if (error.code === 'TIMEOUT') {
+      reportError(`error: ${error.message}`);
+      return EXIT_CODES.TIMEOUT;
+    }
+    if (error.code === 'CONTRACT_VIOLATION') {
+      reportError(`error: ${error.message}`);
+      return EXIT_CODES.CONTRACT_VIOLATION;
+    }
+    if (error.code === 'HTTP_ERROR') {
+      reportError(`error ${error.statusCode} ${error.errorCode}`);
+      return EXIT_CODES.HTTP_ERROR;
+    }
+    reportError(`error: request failed: ${error.message}`);
+    return EXIT_CODES.HTTP_ERROR;
+  }
+}
+
 export async function main(argv) {
   const parsed = parseCliArgs(argv);
   if (!parsed.ok) {
@@ -444,6 +578,9 @@ export async function main(argv) {
   if (parsed.values.help) {
     printUsage(console.log);
     return EXIT_CODES.OK;
+  }
+  if (parsed.values.capabilities) {
+    return runCliCapabilities(parsed.values);
   }
   return runCliTurn(parsed.values);
 }

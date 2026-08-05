@@ -1168,6 +1168,70 @@ test('WEB-01: a browser-shaped turn — canonical WAV body, X-Voice-Input-Format
 });
 
 // =====================================================================================
+// Plan 05-05 Task 2: the turn lock (packages/shared/session/turn-lock.js) is keyed by
+// sessionId alone and carries no client field — this test proves that structural fact
+// behaviorally, across two distinct authenticated identities, in both directions. The
+// existing 409 coverage above (line ~409 and line ~630) proves the lock is global to a
+// process; it runs against a config with no named clients at all, so it never exercises the
+// identity axis this test adds.
+// =====================================================================================
+
+test('the turn lock refuses a different client\'s turn while another client holds it, symmetric in both directions', async () => {
+  async function assertCrossClientBusy({ holderToken, refusedToken }) {
+    const gate = makeGate();
+    const calls = [];
+    const config = buildTestConfig({ clients: { alpha: 'alpha-token', beta: 'beta-token' } });
+    const adapters = {
+      transcribe: async () => {
+        calls.push('transcribe');
+        await gate.promise;
+        return { text: 'hi', meta: {} };
+      },
+      agent: async () => {
+        calls.push('agent');
+        return { text: 'ok', rawText: 'ok', meta: {} };
+      },
+      speak: async () => {
+        calls.push('speak');
+        return { audioBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }), mimeType: 'audio/wav', meta: {} };
+      },
+    };
+    const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+    const server = await startServer(handler);
+    try {
+      const port = server.address().port;
+
+      const holderPromise = postTurn(port, {
+        body: makePcm16({ samples: 10 }),
+        headers: { 'X-Voice-Input-Format': 'pcm16', Authorization: `Bearer ${holderToken}` },
+      });
+      await waitUntil(() => calls.length === 1);
+
+      const refused = await postTurn(port, {
+        body: makePcm16({ samples: 10 }),
+        headers: { 'X-Voice-Input-Format': 'pcm16', Authorization: `Bearer ${refusedToken}` },
+      });
+      assert.equal(refused.statusCode, 409);
+      assert.equal(refused.headers['x-error-code'], 'TURN_BUSY');
+      assert.deepEqual(calls, ['transcribe'], 'the refused client\'s request must not have added any adapter stage calls');
+
+      gate.release();
+      const holder = await holderPromise;
+      assert.equal(holder.statusCode, 200);
+      assert.deepEqual(calls, ['transcribe', 'agent', 'speak']);
+    } finally {
+      await closeServer(server);
+    }
+  }
+
+  // Direction 1: alpha holds, beta is refused.
+  await assertCrossClientBusy({ holderToken: 'alpha-token', refusedToken: 'beta-token' });
+  // Direction 2: swapped — beta holds, alpha is refused. Proves the refusal is symmetric
+  // rather than an artifact of which client happened to send the request first.
+  await assertCrossClientBusy({ holderToken: 'beta-token', refusedToken: 'alpha-token' });
+});
+
+// =====================================================================================
 // Plan 04-01: multi-client identity end to end — two named clients, resolved name reaching
 // the injected logTurn collector, an unknown token refused before the body is read, and
 // identity- (never address-) keyed rate-limit buckets.

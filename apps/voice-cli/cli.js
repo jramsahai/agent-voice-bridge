@@ -309,10 +309,29 @@ export function postTurn({ host, port, token, pcmBuffer, timeoutMs = DEFAULT_REA
 // Splits a turn response body using only the three X-Voice-* framing headers — never a
 // body-length response header, which the success response deliberately never sets (the body
 // is chunked). audioPcm is null unless x-voice-audio-present is exactly the string '1'.
+//
+// CR-01 (05-REVIEW.md): Buffer.prototype.subarray clamps an out-of-range end index instead of
+// throwing, so a declared byte count larger than what was actually received must be refused
+// before any subarray call — never silently clamped into a mis-split. The comparison is
+// strictly greater-than: a declared total exactly equal to body.length is a legitimate
+// no-audio response and must still be accepted.
 export function splitTurnBody(headers, body) {
   const transcriptBytes = Number(headers['x-voice-transcript-bytes']);
   const replyBytes = Number(headers['x-voice-reply-bytes']);
   const audioPresent = headers['x-voice-audio-present'] === '1';
+
+  if (
+    !Number.isInteger(transcriptBytes) || transcriptBytes < 0 ||
+    !Number.isInteger(replyBytes) || replyBytes < 0 ||
+    transcriptBytes + replyBytes > body.length
+  ) {
+    const err = new Error(
+      `response framing headers declare ${transcriptBytes + replyBytes} text bytes, ` +
+        `but only ${body.length} bytes were received — refusing to guess a split`,
+    );
+    err.code = 'CONTRACT_VIOLATION';
+    throw err;
+  }
 
   const transcript = body.subarray(0, transcriptBytes).toString('utf8');
   const reply = body.subarray(transcriptBytes, transcriptBytes + replyBytes).toString('utf8');
@@ -512,7 +531,18 @@ export async function runCliTurn({
     return EXIT_CODES.HTTP_ERROR;
   }
 
-  const { transcript, reply, audioPcm } = splitTurnBody(response.headers, response.body);
+  let transcript;
+  let reply;
+  let audioPcm;
+  try {
+    ({ transcript, reply, audioPcm } = splitTurnBody(response.headers, response.body));
+  } catch (error) {
+    if (error.code === 'CONTRACT_VIOLATION') {
+      reportError(`error: ${error.message}`);
+      return EXIT_CODES.CONTRACT_VIOLATION;
+    }
+    throw error;
+  }
   console.log(`transcript: ${transcript}`);
   console.log(`reply: ${reply}`);
 

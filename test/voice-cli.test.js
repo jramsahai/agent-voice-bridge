@@ -178,6 +178,85 @@ test('splitTurnBody returns a null audioPcm when x-voice-audio-present is not th
 });
 
 // =====================================================================================
+// CR-01: splitTurnBody must refuse a self-inconsistent framing declaration rather than let
+// Buffer.prototype.subarray clamp an out-of-range end index into a silent mis-split.
+// =====================================================================================
+
+test('splitTurnBody refuses a response whose declared framing bytes exceed the received body length rather than silently clamping the split', () => {
+  const headers = {
+    'x-voice-transcript-bytes': '9999',
+    'x-voice-reply-bytes': '0',
+    'x-voice-audio-present': '0',
+  };
+  assert.throws(
+    () => splitTurnBody(headers, Buffer.alloc(100)),
+    (error) => {
+      assert.equal(error.code, 'CONTRACT_VIOLATION');
+      assert.match(error.message, /9999/);
+      assert.match(error.message, /100/);
+      return true;
+    },
+  );
+});
+
+test('splitTurnBody accepts a body whose declared text bytes exactly equal its length, and accepts an all-zero declaration over an empty body', () => {
+  const transcript = 'exact boundary';
+  const reply = 'no audio here';
+  const body = Buffer.concat([Buffer.from(transcript, 'utf8'), Buffer.from(reply, 'utf8')]);
+  const headers = {
+    'x-voice-transcript-bytes': String(Buffer.byteLength(transcript, 'utf8')),
+    'x-voice-reply-bytes': String(Buffer.byteLength(reply, 'utf8')),
+    'x-voice-audio-present': '0',
+  };
+  const result = splitTurnBody(headers, body);
+  assert.equal(result.transcript, transcript);
+  assert.equal(result.reply, reply);
+  assert.equal(result.audioPcm, null);
+
+  const zeroHeaders = {
+    'x-voice-transcript-bytes': '0',
+    'x-voice-reply-bytes': '0',
+    'x-voice-audio-present': '0',
+  };
+  const zeroResult = splitTurnBody(zeroHeaders, Buffer.alloc(0));
+  assert.equal(zeroResult.transcript, '');
+  assert.equal(zeroResult.reply, '');
+  assert.equal(zeroResult.audioPcm, null);
+});
+
+test('splitTurnBody refuses an absent, non-numeric, or negative framing byte count', () => {
+  const body = Buffer.from('hello world', 'utf8');
+  const baseHeaders = { 'x-voice-reply-bytes': '0', 'x-voice-audio-present': '0' };
+
+  assert.throws(
+    () => splitTurnBody({ ...baseHeaders }, body),
+    (error) => {
+      assert.equal(error.code, 'CONTRACT_VIOLATION');
+      return true;
+    },
+    'an absent x-voice-transcript-bytes header must be refused',
+  );
+
+  assert.throws(
+    () => splitTurnBody({ ...baseHeaders, 'x-voice-transcript-bytes': 'not-a-number' }, body),
+    (error) => {
+      assert.equal(error.code, 'CONTRACT_VIOLATION');
+      return true;
+    },
+    'a non-numeric x-voice-transcript-bytes header must be refused',
+  );
+
+  assert.throws(
+    () => splitTurnBody({ ...baseHeaders, 'x-voice-transcript-bytes': '-5' }, body),
+    (error) => {
+      assert.equal(error.code, 'CONTRACT_VIOLATION');
+      return true;
+    },
+    'a negative x-voice-transcript-bytes header must be refused',
+  );
+});
+
+// =====================================================================================
 // assertConformingWav
 // =====================================================================================
 
@@ -623,6 +702,48 @@ test('a response carrying a content-encoding header is a contract violation, not
     assert.equal(result, EXIT_CODES.CONTRACT_VIOLATION);
     assert.ok(stderr.some((line) => /gzip/i.test(line)));
     assert.equal(receivedAcceptEncoding, 'identity');
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('a truncated turn response whose framing headers over-declare exits with the contract-violation code and prints no transcript', async () => {
+  const transcript = 'this transcript never fully arrives';
+  const reply = 'nor does this reply';
+  const bodyBuf = Buffer.concat([Buffer.from(transcript, 'utf8'), Buffer.from(reply, 'utf8')]);
+  // The framing headers declare far more bytes than the server actually sends — a truncated
+  // or tampered response, the exact scenario CR-01 exists to catch.
+  const declaredTranscriptBytes = Buffer.byteLength(transcript, 'utf8') + 5000;
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, {
+        'x-voice-transcript-bytes': String(declaredTranscriptBytes),
+        'x-voice-reply-bytes': String(Buffer.byteLength(reply, 'utf8')),
+        'x-voice-audio-present': '0',
+      });
+      res.end(bodyBuf);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+
+  try {
+    const { result, stdout, stderr } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath }),
+    );
+    assert.equal(result, EXIT_CODES.CONTRACT_VIOLATION);
+    assert.ok(stderr.some((line) => /declare/i.test(line)), 'stderr must name the mismatch');
+    assert.ok(
+      !stdout.some((line) => line.startsWith('transcript:')),
+      'the silent-mis-split symptom must be provably absent: no transcript line may be printed',
+    );
   } finally {
     await closeServer(server);
     fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -137,6 +137,10 @@ function humanizeErrorCode(code, message) {
 // exactly what the extracted-source contract test injects as doubles.
 function reportTurnError(code, message, hint) {
   setTurnBusyState(false);
+  // G-05-4 (sibling path): a failed turn renders no transcript or reply, so leaving the
+  // player loaded would keep offering the PREVIOUS turn's audio next to an error message,
+  // as if it belonged to the turn that just failed.
+  resetPlayer();
   setStatus(`Error: ${humanizeErrorCode(code, message)}`);
   setHint(hint);
   console.error(code, message);

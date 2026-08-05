@@ -274,12 +274,14 @@ test('a refused framing declaration reaches the user as error text through the p
   const hintCalls = [];
   const consoleErrorCalls = [];
   const fakeConsole = { error: (...args) => consoleErrorCalls.push(args) };
+  let resetPlayerCalls = 0;
 
   const reportTurnError = loadBrowserFunction('reportTurnError', {
     setTurnBusyState: (active) => busyStateCalls.push(active),
     setStatus: (text) => statusCalls.push(text),
     setHint: (text) => hintCalls.push(text),
     humanizeErrorCode,
+    resetPlayer: () => { resetPlayerCalls++; },
     console: fakeConsole,
   });
 
@@ -296,6 +298,13 @@ test('a refused framing declaration reaches the user as error text through the p
   );
   assert.ok(hintCalls.length > 0 && hintCalls[0].length > 0, 'reportTurnError must call setHint with a non-empty string');
   assert.deepEqual(consoleErrorCalls, [['CONTRACT_VIOLATION', message]], 'the fake console must record the code and message');
+  assert.equal(
+    resetPlayerCalls,
+    1,
+    'G-05-4 (sibling path): a failed turn renders no transcript or reply, so reportTurnError must detach the ' +
+      "player — otherwise the previous turn's audio sits next to the error message as if it belonged to the " +
+      'turn that just failed. Every error path (HTTP error, framing refusal, timeout, network) routes through here.',
+  );
 });
 
 test('the splitTurnResponse call site in stopAndSend is wrapped in a catch that calls the turn-error handler', () => {

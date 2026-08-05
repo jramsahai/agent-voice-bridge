@@ -407,7 +407,16 @@ ptt.addEventListener('pointerdown', async () => {
     setHint('The token is saved in this browser after you enter it.');
     return;
   }
-  await ensureRecorder();
+  // WR-05 (05-REVIEW.md): getUserMedia() rejects on a denied/missing microphone with no
+  // handler here previously — an unhandled rejection with zero visible feedback to the
+  // user, the single most common real-world failure mode for a mic app.
+  try {
+    await ensureRecorder();
+  } catch (error) {
+    setStatus('Could not access the microphone.');
+    setHint(error.message || 'Check microphone permissions and try again.');
+    return;
+  }
   recordedChunks = [];
   mediaRecorder.start();
   isRecording = true;
@@ -438,7 +447,13 @@ window.addEventListener('keydown', async (event) => {
       setHint('The token is saved in this browser after you enter it.');
       return;
     }
-    await ensureRecorder();
+    try {
+      await ensureRecorder();
+    } catch (error) {
+      setStatus('Could not access the microphone.');
+      setHint(error.message || 'Check microphone permissions and try again.');
+      return;
+    }
     recordedChunks = [];
     mediaRecorder.start();
     isRecording = true;

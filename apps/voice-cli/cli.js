@@ -1,0 +1,308 @@
+// Reference command-line client for the Voice Bridge /v1/turn API. This file is the proof
+// that a device with no browser, no JavaScript, and no audio codecs can complete a full voice
+// turn against the published API alone — everything downstream in this phase (transport
+// hardening, playback, the browser rewrite) assumes the wire contract proven here holds.
+//
+// One path only: argv -> WAV file read -> PCM extraction -> HTTP request -> header-framed
+// response split -> printed output. Transport is node:http exclusively — never the global
+// fetch API: per CLI-02's posture, undici's fetch implementation auto-follows redirects and
+// auto-decompresses gzip, silently defeating the "microcontroller-like client" this
+// reference implementation exists to prove (05-RESEARCH.md Pitfall 3). Do not import fetch
+// here or in any later plan.
+//
+// The CLI never imports the shared configuration loader and never reads the operator's local
+// config file — it proves it needs only the published API and its own single provisioned
+// secret, exactly what a firmware image would carry (05-RESEARCH.md Anti-Patterns, A4).
+
+import fs from 'node:fs';
+import path from 'node:path';
+import http from 'node:http';
+import { pathToFileURL } from 'node:url';
+
+import { wavToPcm, readWavFormat } from '../../packages/shared/audio/wav.js';
+
+export const DEFAULT_READ_TIMEOUT_MS = 30000;
+export const TOKEN_ENV_VAR = 'VOICE_BRIDGE_CLI_TOKEN';
+export const EXIT_CODES = Object.freeze({
+  OK: 0,
+  USAGE: 2,
+  INPUT_INVALID: 3,
+  TIMEOUT: 4,
+  BUSY: 5,
+  HTTP_ERROR: 6,
+  CONTRACT_VIOLATION: 7,
+});
+
+// The shape every --input WAV file must declare, matching the pcm16 registry row's fixed
+// values (packages/shared/audio/format-registry.js). Restated here as local constants rather
+// than imported — this file's declared scope is wav.js only; the server never resamples a
+// body declared pcm16 (05-RESEARCH.md Pitfall 1), so a non-conforming file must be refused
+// client-side before a single byte is sent, not silently mistranscribed.
+const EXPECTED_SAMPLE_RATE = 16000;
+const EXPECTED_CHANNELS = 1;
+const EXPECTED_BIT_DEPTH = 16;
+
+const DEFAULT_HOST = '127.0.0.1';
+const DEFAULT_PORT = 4318;
+const DEFAULT_OUT_FILENAME = 'reply.pcm';
+
+// Placeholder a token is replaced with if it ever reaches a printed line — the redaction is
+// structural (every diagnostic line is built from a fixed set of named fields, never by
+// serialising a request/options object), this is a second line of defense (T-05-02).
+const TOKEN_REDACTION_PLACEHOLDER = '[redacted]';
+
+function redactToken(text, token) {
+  if (typeof text !== 'string' || !token) {
+    return text;
+  }
+  return text.split(token).join(TOKEN_REDACTION_PLACEHOLDER);
+}
+
+// `print` is `console.log` for --help (stdout, exit OK) and `console.error` for a usage
+// rejection (stderr) — same function, different sink, so the two paths can never drift apart.
+function printUsage(print) {
+  print(
+    [
+      'usage: node apps/voice-cli/cli.js --input <wav-file> [options]',
+      '',
+      'Reference CLI client for the Voice Bridge /v1/turn API. Sends and receives raw PCM',
+      'only — no codec is ever invoked in either direction.',
+      '',
+      `  --input <path>   WAV file to send (required; must declare ${EXPECTED_SAMPLE_RATE} Hz /`,
+      `                   ${EXPECTED_CHANNELS} channel / ${EXPECTED_BIT_DEPTH}-bit — the server never resamples pcm16 input)`,
+      `  --host <name>    Voice bridge host (default: ${DEFAULT_HOST})`,
+      `  --port <n>       Voice bridge port (default: ${DEFAULT_PORT})`,
+      '  --token <value>  Bearer token. NOT RECOMMENDED: a token passed as a command-line flag',
+      '                   is visible to any local user reading the process table.',
+      `  --out <path>     Where to write the reply PCM (default: ./${DEFAULT_OUT_FILENAME})`,
+      '  --help           Print this message and exit',
+      '',
+      `The recommended way to supply the bearer token is the ${TOKEN_ENV_VAR} environment`,
+      'variable, read automatically if no --token flag is given. It is never read from any',
+      "server configuration file — this client's only credential is its own token.",
+      '',
+    ].join('\n'),
+  );
+}
+
+// Resolve-never-throw shape (mirrors error-response.js's posture elsewhere in this codebase):
+// bad or absent input resolves to { ok: false, exitCode, message }, never a thrown exception,
+// so a caller (main(), or a test driving this function directly) always gets a value back.
+export function parseCliArgs(argv) {
+  const values = {
+    inputPath: null,
+    host: DEFAULT_HOST,
+    port: DEFAULT_PORT,
+    token: null,
+    outPath: null,
+    help: false,
+  };
+  let flagToken = null;
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    switch (arg) {
+      case '--input':
+        values.inputPath = argv[++i] ?? null;
+        break;
+      case '--host':
+        values.host = argv[++i] ?? values.host;
+        break;
+      case '--port':
+        values.port = Number(argv[++i]);
+        break;
+      case '--token':
+        flagToken = argv[++i] ?? null;
+        break;
+      case '--out':
+        values.outPath = argv[++i] ?? null;
+        break;
+      case '--help':
+        values.help = true;
+        break;
+      default:
+        return { ok: false, exitCode: EXIT_CODES.USAGE, message: `unrecognized argument '${arg}'` };
+    }
+  }
+
+  if (values.help) {
+    return { ok: true, values };
+  }
+
+  // The flag wins when both are present; the environment variable is used when no flag is
+  // given. Read from process.env[TOKEN_ENV_VAR] or the --token flag and nowhere else — this
+  // client never touches the shared configuration loader or the operator's local config file.
+  values.token = flagToken || process.env[TOKEN_ENV_VAR] || null;
+
+  if (!values.inputPath) {
+    return { ok: false, exitCode: EXIT_CODES.USAGE, message: 'missing required --input <wav-file>' };
+  }
+  if (!values.token) {
+    return {
+      ok: false,
+      exitCode: EXIT_CODES.USAGE,
+      message: `missing bearer token: set ${TOKEN_ENV_VAR} or pass --token`,
+    };
+  }
+
+  return { ok: true, values };
+}
+
+// Throws a tagged INPUT_INVALID error unless the file declares exactly the pcm16 registry
+// row's shape. The message names the shape actually read, per this plan's must_haves truth.
+export function assertConformingWav(wavBuffer) {
+  const format = readWavFormat(wavBuffer);
+  if (
+    format.sampleRate !== EXPECTED_SAMPLE_RATE ||
+    format.channels !== EXPECTED_CHANNELS ||
+    format.bitDepth !== EXPECTED_BIT_DEPTH
+  ) {
+    const err = new Error(
+      `input WAV must be ${EXPECTED_SAMPLE_RATE} Hz / ${EXPECTED_CHANNELS} channel / ${EXPECTED_BIT_DEPTH}-bit ` +
+        `— got ${format.sampleRate} Hz / ${format.channels} channel(s) / ${format.bitDepth}-bit`,
+    );
+    err.code = 'INPUT_INVALID';
+    throw err;
+  }
+  return format;
+}
+
+// Issues POST /v1/turn via node:http (never fetch — see file header). Resolves
+// { statusCode, headers, body } once the response stream's own 'end' event fires — the
+// success response never sets Content-Length (it is chunked), so nothing here ever waits on
+// or trusts that header. The 'timeout' option only emits an event on socket inactivity; it
+// does not abort anything on its own, so the handler below must call req.destroy() itself
+// (05-RESEARCH.md Pitfall 2).
+export function postTurn({ host, port, token, pcmBuffer, timeoutMs = DEFAULT_READ_TIMEOUT_MS }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host,
+        port,
+        method: 'POST',
+        path: '/v1/turn',
+        timeout: timeoutMs,
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/octet-stream',
+          'x-voice-input-format': 'pcm16',
+          // No X-Voice-Output-Format header is sent: pcm16 is the registry's single
+          // headerless row and therefore the default reply format.
+          'accept-encoding': 'identity',
+          'content-length': pcmBuffer.length,
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) });
+        });
+        res.on('error', reject);
+      },
+    );
+    req.on('timeout', () => {
+      const err = new Error(`read timeout exceeded after ${timeoutMs}ms`);
+      err.code = 'TIMEOUT';
+      req.destroy(err);
+    });
+    req.on('error', (err) => reject(err));
+    req.write(pcmBuffer);
+    req.end();
+  });
+}
+
+// Splits a turn response body using only the three X-Voice-* framing headers — never a
+// body-length response header, which the success response deliberately never sets (the body
+// is chunked). audioPcm is null unless x-voice-audio-present is exactly the string '1'.
+export function splitTurnBody(headers, body) {
+  const transcriptBytes = Number(headers['x-voice-transcript-bytes']);
+  const replyBytes = Number(headers['x-voice-reply-bytes']);
+  const audioPresent = headers['x-voice-audio-present'] === '1';
+
+  const transcript = body.subarray(0, transcriptBytes).toString('utf8');
+  const reply = body.subarray(transcriptBytes, transcriptBytes + replyBytes).toString('utf8');
+  const audioPcm = audioPresent ? body.subarray(transcriptBytes + replyBytes) : null;
+
+  return { transcript, reply, audioPcm };
+}
+
+// Composes the above into the CLI's one path: read the file, assert conformance, strip to raw
+// PCM (reusing wav.js — never re-walking RIFF chunks here), post, split, print, and write the
+// reply PCM when present. Every diagnostic line is built from a fixed set of named fields
+// (never by serialising a request/options object) and passed through redactToken() so a
+// token value can never reach stdout/stderr, even indirectly (T-05-02).
+export async function runCliTurn({ host, port, token, inputPath, outPath, timeoutMs = DEFAULT_READ_TIMEOUT_MS }) {
+  const reportError = (message) => console.error(redactToken(message, token));
+
+  let wavBuffer;
+  try {
+    wavBuffer = fs.readFileSync(inputPath);
+  } catch (error) {
+    reportError(`error: could not read input file '${inputPath}': ${error.message}`);
+    return EXIT_CODES.INPUT_INVALID;
+  }
+
+  try {
+    assertConformingWav(wavBuffer);
+  } catch (error) {
+    reportError(`error: ${error.message}`);
+    return EXIT_CODES.INPUT_INVALID;
+  }
+
+  const pcmBuffer = wavToPcm(wavBuffer);
+
+  let response;
+  try {
+    response = await postTurn({ host, port, token, pcmBuffer, timeoutMs });
+  } catch (error) {
+    if (error.code === 'TIMEOUT') {
+      reportError(`error: ${error.message}`);
+      return EXIT_CODES.TIMEOUT;
+    }
+    reportError(`error: request failed: ${error.message}`);
+    return EXIT_CODES.HTTP_ERROR;
+  }
+
+  if (response.statusCode !== 200) {
+    const errorCode = response.headers['x-error-code'] ?? 'UNKNOWN';
+    reportError(`error ${response.statusCode} ${errorCode}`);
+    return errorCode === 'TURN_BUSY' ? EXIT_CODES.BUSY : EXIT_CODES.HTTP_ERROR;
+  }
+
+  const { transcript, reply, audioPcm } = splitTurnBody(response.headers, response.body);
+  console.log(`transcript: ${transcript}`);
+  console.log(`reply: ${reply}`);
+
+  if (audioPcm) {
+    const outputPath = outPath ?? path.join(process.cwd(), DEFAULT_OUT_FILENAME);
+    fs.writeFileSync(outputPath, audioPcm);
+    console.log(outputPath);
+  }
+
+  return EXIT_CODES.OK;
+}
+
+export async function main(argv) {
+  const parsed = parseCliArgs(argv);
+  if (!parsed.ok) {
+    console.error(`error: ${parsed.message}`);
+    printUsage(console.error);
+    return parsed.exitCode;
+  }
+  if (parsed.values.help) {
+    printUsage(console.log);
+    return EXIT_CODES.OK;
+  }
+  return runCliTurn(parsed.values);
+}
+
+// Only run main() when this module is the process entry point — comparing import.meta.url
+// against pathToFileURL(process.argv[1]).href means importing this module in a test never
+// starts a turn or calls process.exit(). main() itself returns the exit code rather than
+// calling process.exit() directly, so a test can drive it in-process and observe the code.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main(process.argv.slice(2)).then((code) => {
+    process.exit(code);
+  });
+}

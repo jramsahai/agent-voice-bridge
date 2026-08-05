@@ -92,6 +92,9 @@ const HTTP_SOCKET_EXEMPT_FILES = new Set([
   path.join(TEST_DIR, 'http-turn.test.js'),
   path.join(TEST_DIR, 'http-capabilities.test.js'),
   path.join(TEST_DIR, 'http-health.test.js'),
+  // Phase 5 (05-01): test/voice-cli.test.js legitimately opens a real loopback socket to
+  // prove the reference CLI client against a live createRequestHandler server.
+  path.join(TEST_DIR, 'voice-cli.test.js'),
 ]);
 const HTTP_SOCKET_EXEMPT_PATTERNS = [
   ['node', ':', 'net'].join(''),

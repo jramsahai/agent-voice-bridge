@@ -321,6 +321,9 @@ const HTTP_SOCKET_EXEMPT_FILES = new Set([
   path.join(repoRoot, 'test', 'http-turn.test.js'),
   path.join(repoRoot, 'test', 'http-capabilities.test.js'),
   path.join(repoRoot, 'test', 'http-health.test.js'),
+  // Phase 5 (05-01): test/voice-cli.test.js legitimately opens a real loopback socket to
+  // prove the reference CLI client against a live createRequestHandler server.
+  path.join(repoRoot, 'test', 'voice-cli.test.js'),
 ]);
 
 test('no source file this phase created references a network client, a fetch call, or a models directory', () => {

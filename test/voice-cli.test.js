@@ -221,6 +221,15 @@ test('main() exits with the usage code when no token is available from either so
   });
 });
 
+test('main() redacts a --token flag value from its usage-rejection output even on an argv shape parseCliArgs rejects outright', async () => {
+  const distinctiveToken = 'DISTINCTIVE-USAGE-PATH-TOKEN-99887766';
+  const { result, stderr } = await captureConsole(() =>
+    main(['--input', 'x.wav', '--token', distinctiveToken, '--bogus-flag']),
+  );
+  assert.equal(result, EXIT_CODES.USAGE);
+  assert.ok(!stderr.join('\n').includes(distinctiveToken));
+});
+
 test('main() --help exits OK and its output names the environment variable', async () => {
   const { result, stdout } = await captureConsole(() => main(['--help']));
   assert.equal(result, EXIT_CODES.OK);

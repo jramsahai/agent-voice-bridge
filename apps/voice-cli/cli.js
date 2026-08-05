@@ -73,7 +73,8 @@ function printUsage(print) {
       `  --host <name>    Voice bridge host (default: ${DEFAULT_HOST})`,
       `  --port <n>       Voice bridge port (default: ${DEFAULT_PORT})`,
       '  --token <value>  Bearer token. NOT RECOMMENDED: a token passed as a command-line flag',
-      '                   is visible to any local user reading the process table.',
+      '                   is visible to any local user reading the process table — prefer',
+      '                   VOICE_BRIDGE_CLI_TOKEN below instead.',
       `  --out <path>     Where to write the reply PCM (default: ./${DEFAULT_OUT_FILENAME})`,
       '  --help           Print this message and exit',
       '',
@@ -83,6 +84,15 @@ function printUsage(print) {
       '',
     ].join('\n'),
   );
+}
+
+// A --token flag value, read straight off argv with no other parsing — used only to feed
+// redactToken() on a usage-rejection path in main(), so that path's own guarantee ("no token
+// value ever reaches a printed line") holds even for an argv shape parseCliArgs itself
+// rejects before assembling a full values object.
+function extractFlagToken(argv) {
+  const index = argv.indexOf('--token');
+  return index === -1 ? null : (argv[index + 1] ?? null);
 }
 
 // Resolve-never-throw shape (mirrors error-response.js's posture elsewhere in this codebase):
@@ -286,7 +296,11 @@ export async function runCliTurn({ host, port, token, inputPath, outPath, timeou
 export async function main(argv) {
   const parsed = parseCliArgs(argv);
   if (!parsed.ok) {
-    console.error(`error: ${parsed.message}`);
+    // redactToken is applied here too (not just in runCliTurn's reportError) so the
+    // usage/error printer's own guarantee holds structurally regardless of which exit path
+    // produced the message — a --token flag value present in argv, even one that never made
+    // it into parsed.values (e.g. a later parse failure), must never reach this line.
+    console.error(redactToken(`error: ${parsed.message}`, extractFlagToken(argv)));
     printUsage(console.error);
     return parsed.exitCode;
   }

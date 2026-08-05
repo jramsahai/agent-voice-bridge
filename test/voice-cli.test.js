@@ -15,7 +15,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
-import { wavToPcm } from '../packages/shared/audio/wav.js';
+import { wavToPcm, MAX_PCM_BYTES } from '../packages/shared/audio/wav.js';
 import { makePcm16, makeCanonicalWav, makeStereoWav } from './helpers/fixtures.js';
 import {
   parseCliArgs,
@@ -28,6 +28,7 @@ import {
   DEFAULT_READ_TIMEOUT_MS,
   TOKEN_ENV_VAR,
   EXIT_CODES,
+  MAX_RESPONSE_BYTES,
 } from '../apps/voice-cli/cli.js';
 
 function uniqueSessionId(label) {
@@ -1194,4 +1195,91 @@ test('main() --capabilities prints each capability pair as key: value and exits 
 test('the CLI source contains no JSON.parse call anywhere', () => {
   const source = fs.readFileSync(new URL('../apps/voice-cli/cli.js', import.meta.url), 'utf8');
   assert.ok(!/JSON\.parse/.test(source));
+});
+
+// =====================================================================================
+// CR-02: a self-imposed response ceiling on both CLI HTTP call sites — a misbehaving
+// backend or proxy sending an oversized or endlessly-streaming body must be refused, not
+// buffered without bound.
+// =====================================================================================
+
+// Streams one-mebibyte chunks at `res` in a loop until the response's own 'close' event
+// fires (the client destroyed the request once it breached the ceiling) — never runs
+// unbounded itself, and never depends on the client ever calling res.end() on its side.
+function streamPastCeiling(res) {
+  let stopped = false;
+  res.on('close', () => {
+    stopped = true;
+  });
+  const chunk = Buffer.alloc(1024 * 1024, 1);
+  const writeLoop = () => {
+    if (stopped) return;
+    res.write(chunk, () => {
+      if (!stopped) setImmediate(writeLoop);
+    });
+  };
+  writeLoop();
+}
+
+test('MAX_RESPONSE_BYTES is derived from the shared MAX_PCM_BYTES cap with headroom for the text segments', () => {
+  assert.ok(MAX_RESPONSE_BYTES > MAX_PCM_BYTES, 'MAX_RESPONSE_BYTES must be strictly greater than MAX_PCM_BYTES');
+  assert.equal(MAX_RESPONSE_BYTES, MAX_PCM_BYTES + 1024 * 1024);
+});
+
+test('postTurn refuses a response that streams past the response ceiling instead of buffering it', async () => {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, {
+        'x-voice-transcript-bytes': '0',
+        'x-voice-reply-bytes': '0',
+        'x-voice-audio-present': '0',
+      });
+      streamPastCeiling(res);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+
+  try {
+    const { result, stderr } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath }),
+    );
+    assert.equal(result, EXIT_CODES.CONTRACT_VIOLATION);
+    assert.ok(
+      stderr.some((line) => line.includes(String(MAX_RESPONSE_BYTES))),
+      'stderr must name the ceiling that was exceeded',
+    );
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('readCapabilities refuses a capabilities response that streams past the response ceiling', async () => {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, {});
+      streamPastCeiling(res);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  try {
+    await assert.rejects(
+      () => readCapabilities({ host: '127.0.0.1', port, token: 'unused' }),
+      (error) => {
+        assert.equal(error.code, 'CONTRACT_VIOLATION');
+        return true;
+      },
+    );
+  } finally {
+    await closeServer(server);
+  }
 });

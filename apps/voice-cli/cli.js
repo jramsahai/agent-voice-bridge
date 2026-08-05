@@ -21,7 +21,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 
-import { wavToPcm, readWavFormat, pcmToWav } from '../../packages/shared/audio/wav.js';
+import { wavToPcm, readWavFormat, pcmToWav, MAX_PCM_BYTES } from '../../packages/shared/audio/wav.js';
 import { withTempDir } from '../../packages/shared/lifecycle/tempfiles.js';
 
 const execFileAsync = promisify(execFile);
@@ -63,6 +63,14 @@ const DEFAULT_PLAYER_BIN = '/usr/bin/afplay';
 // only thing this timeout exists to catch, mirroring the array-form execFile + timeout shape
 // packages/shared/adapters/tts-macos-say.js already uses.
 const PLAYBACK_TIMEOUT_MS = 300000;
+
+// Sizing basis (CR-02, 05-REVIEW.md): MAX_PCM_BYTES (packages/shared/audio/wav.js) is the
+// project's own hard cap on a reply's PCM payload — 5 minutes of 16 kHz mono s16le, enforced
+// server-side by pcmToWav — so no legitimate turn response can exceed it plus its two short
+// text segments; one mebibyte of text headroom is three orders of magnitude above any real
+// transcript-plus-reply pair. Deliberately derived from the shared cap rather than written as
+// a standalone numeric literal, so the client ceiling moves if that cap ever moves.
+export const MAX_RESPONSE_BYTES = MAX_PCM_BYTES + 1024 * 1024;
 
 // Placeholder a token is replaced with if it ever reaches a printed line — the redaction is
 // structural (every diagnostic line is built from a fixed set of named fields, never by
@@ -287,9 +295,31 @@ export function postTurn({ host, port, token, pcmBuffer, timeoutMs = DEFAULT_REA
           return;
         }
 
+        // CR-02 (05-REVIEW.md): a misbehaving backend or reverse proxy sending an oversized
+        // or endlessly-streaming body has no ceiling without this — the CLI would grow its
+        // own process memory unbounded. `ceilingBreached` guards against a chunk arriving
+        // after the breach being counted, retained, or re-rejecting an already-settled
+        // promise; the stream's own 'end' handler is likewise a no-op once it fires.
         const chunks = [];
-        res.on('data', (chunk) => chunks.push(chunk));
+        let receivedBytes = 0;
+        let ceilingBreached = false;
+        res.on('data', (chunk) => {
+          if (ceilingBreached) return;
+          receivedBytes += chunk.length;
+          if (receivedBytes > MAX_RESPONSE_BYTES) {
+            ceilingBreached = true;
+            const err = new Error(
+              `response exceeded the ${MAX_RESPONSE_BYTES}-byte response ceiling — refusing to buffer further`,
+            );
+            err.code = 'CONTRACT_VIOLATION';
+            req.destroy();
+            reject(err);
+            return;
+          }
+          chunks.push(chunk);
+        });
         res.on('end', () => {
+          if (ceilingBreached) return;
           resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) });
         });
         res.on('error', reject);
@@ -439,9 +469,29 @@ export function readCapabilities({ host, port, token, timeoutMs = DEFAULT_READ_T
           return;
         }
 
+        // CR-02 (05-REVIEW.md) — same ceiling as postTurn's response handler; see that
+        // function's comment for the full rationale. Duplicated rather than shared per
+        // IN-01's own deferred note: a refactor of both response callbacks is out of scope.
         const chunks = [];
-        res.on('data', (chunk) => chunks.push(chunk));
+        let receivedBytes = 0;
+        let ceilingBreached = false;
+        res.on('data', (chunk) => {
+          if (ceilingBreached) return;
+          receivedBytes += chunk.length;
+          if (receivedBytes > MAX_RESPONSE_BYTES) {
+            ceilingBreached = true;
+            const err = new Error(
+              `response exceeded the ${MAX_RESPONSE_BYTES}-byte response ceiling — refusing to buffer further`,
+            );
+            err.code = 'CONTRACT_VIOLATION';
+            req.destroy();
+            reject(err);
+            return;
+          }
+          chunks.push(chunk);
+        });
         res.on('end', () => {
+          if (ceilingBreached) return;
           const bodyText = Buffer.concat(chunks).toString('utf8');
           if (res.statusCode !== 200) {
             const pairs = parseLinesBody(bodyText);

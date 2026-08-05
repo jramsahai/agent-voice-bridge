@@ -123,6 +123,20 @@ function humanizeErrorCode(code, message) {
   }
 }
 
+// The turn-error handler both the generic !response.ok branch and the splitTurnResponse
+// catch call: clears the busy state so a refused/failed turn never leaves the UI looking
+// as if a turn is still in progress, surfaces the error through the page's own
+// humanizeErrorCode messaging path, sets the hint, and logs the code/message. Factored out
+// so the catch path (WEB-01, must_haves truth) is mechanically testable in isolation —
+// self-contained aside from the four module-scope functions it calls by name, which is
+// exactly what the extracted-source contract test injects as doubles.
+function reportTurnError(code, message, hint) {
+  setTurnBusyState(false);
+  setStatus(`Error: ${humanizeErrorCode(code, message)}`);
+  setHint(hint);
+  console.error(code, message);
+}
+
 async function ensureRecorder() {
   if (mediaRecorder) return;
   stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -206,10 +220,36 @@ async function blobToWav(blob) {
 // transcriptBytes + replyBytes) fall out of subarray()'s own start/end semantics: a
 // zero-length reply slice decodes to '', and an audio slice with no bytes left (start
 // === bytes.length) is explicitly treated as no audio below, not an empty Uint8Array.
+//
+// CR-01 (05-REVIEW.md), mirrored from cli.js's splitTurnBody: Uint8Array.prototype.subarray
+// clamps an out-of-range end index instead of throwing, so a declared byte count that
+// exceeds what was actually received must be refused before any subarray call — never
+// silently clamped into a mis-split. Dropping the previous `|| 0` fallback is deliberate:
+// an absent or non-numeric header must be refused, not coerced to zero. Strictly
+// greater-than, so a declared total exactly equal to bytes.length is still accepted.
+//
+// Self-contained by construction: references only its own parameters, its own locals, and
+// platform globals (Number, TextDecoder, Error) — no humanizeErrorCode call, no DOM
+// element, no module-scope binding — so it can be extracted and evaluated in isolation.
 function splitTurnResponse(headers, bytes) {
-  const transcriptBytes = Number(headers.get('x-voice-transcript-bytes')) || 0;
-  const replyBytes = Number(headers.get('x-voice-reply-bytes')) || 0;
+  const transcriptBytesHeader = headers.get('x-voice-transcript-bytes');
+  const replyBytesHeader = headers.get('x-voice-reply-bytes');
+  const transcriptBytes = Number(transcriptBytesHeader);
+  const replyBytes = Number(replyBytesHeader);
   const audioPresentHeader = headers.get('x-voice-audio-present') === '1';
+
+  if (
+    !Number.isInteger(transcriptBytes) || transcriptBytes < 0 ||
+    !Number.isInteger(replyBytes) || replyBytes < 0 ||
+    transcriptBytes + replyBytes > bytes.length
+  ) {
+    const err = new Error(
+      `response framing headers declare ${transcriptBytes + replyBytes} text bytes, ` +
+        `but only ${bytes.length} bytes were received — refusing to guess a split`,
+    );
+    err.code = 'CONTRACT_VIOLATION';
+    throw err;
+  }
 
   const decoder = new TextDecoder('utf8');
   const transcript = decoder.decode(bytes.subarray(0, transcriptBytes));
@@ -311,13 +351,19 @@ async function stopAndSend() {
         return;
       }
 
-      setStatus(`Error: ${humanizeErrorCode(errorCode, errorMessage)}`);
-      setHint('Fix the issue and try again.');
-      console.error(errorCode, errorMessage);
+      reportTurnError(errorCode, errorMessage, 'Fix the issue and try again.');
       return;
     }
 
-    const { transcript, reply, audioPcm } = splitTurnResponse(response.headers, responseBytes);
+    let transcript;
+    let reply;
+    let audioPcm;
+    try {
+      ({ transcript, reply, audioPcm } = splitTurnResponse(response.headers, responseBytes));
+    } catch (error) {
+      reportTurnError(error.code, error.message, 'The response could not be trusted — nothing was rendered.');
+      return;
+    }
     transcriptEl.textContent = transcript || '—';
     replyEl.textContent = reply || '—';
 

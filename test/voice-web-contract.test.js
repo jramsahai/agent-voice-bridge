@@ -131,3 +131,190 @@ test('WEB-01: every path the page fetches is a subset of the routes the service 
     );
   }
 });
+
+// =====================================================================================
+// CR-01 (browser half): splitTurnResponse must refuse a self-inconsistent framing
+// declaration, and the catch path around its call site must actually surface that refusal
+// to the user rather than leaving a dead UI. Both proven here without opening a socket or
+// touching the DOM — the extracted function's own source text is evaluated in-process.
+// =====================================================================================
+
+// Returns a top-level function declaration's source text out of appJsSource: from the line
+// beginning `function <name>(` or `async function <name>(` through the next line that is
+// exactly a single closing brace at column zero — the codebase indents every nested block
+// by two spaces, so that line is unambiguously the function's own terminator.
+function extractFunctionSource(name) {
+  const startPattern = new RegExp(`^(?:async )?function ${name}\\(`, 'm');
+  const startMatch = startPattern.exec(appJsSource);
+  assert.ok(startMatch, `expected a top-level function declaration named '${name}' in apps/voice-web/app.js`);
+
+  const remainder = appJsSource.slice(startMatch.index);
+  const lines = remainder.split('\n');
+  let endLineIndex = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === '}') {
+      endLineIndex = i;
+      break;
+    }
+  }
+  assert.ok(endLineIndex !== -1, `expected a closing brace at column zero terminating function '${name}'`);
+
+  const source = lines.slice(0, endLineIndex + 1).join('\n');
+  assert.ok(source.trim().length > 0, `extracted source for function '${name}' must be non-empty`);
+  return source;
+}
+
+// Builds a callable out of a function's own extracted source, injecting `deps` as
+// parameter names so each shadows the module-scope binding the extracted function refers
+// to by name — no import is added; new Function needs none.
+function loadBrowserFunction(name, deps = {}) {
+  const source = extractFunctionSource(name);
+  const paramNames = Object.keys(deps);
+  const paramValues = Object.values(deps);
+  const factory = new Function(...paramNames, `'use strict';\n${source}\nreturn ${name};`);
+  return factory(...paramValues);
+}
+
+test('the browser splitter refuses a response whose declared framing bytes exceed the received body length', () => {
+  const splitTurnResponse = loadBrowserFunction('splitTurnResponse');
+  const headers = new Map([
+    ['x-voice-transcript-bytes', '9999'],
+    ['x-voice-reply-bytes', '0'],
+    ['x-voice-audio-present', '0'],
+  ]);
+  assert.throws(
+    () => splitTurnResponse(headers, new Uint8Array(10)),
+    (error) => {
+      assert.equal(error.code, 'CONTRACT_VIOLATION');
+      return true;
+    },
+  );
+});
+
+test('the browser splitter accepts the exactly-equal boundary and an all-zero declaration over an empty Uint8Array', () => {
+  const splitTurnResponse = loadBrowserFunction('splitTurnResponse');
+  const decoder = new TextDecoder('utf8');
+  const transcript = 'exact boundary';
+  const reply = 'no audio here';
+  const bytes = new Uint8Array(Buffer.concat([Buffer.from(transcript, 'utf8'), Buffer.from(reply, 'utf8')]));
+  const headers = new Map([
+    ['x-voice-transcript-bytes', String(Buffer.byteLength(transcript, 'utf8'))],
+    ['x-voice-reply-bytes', String(Buffer.byteLength(reply, 'utf8'))],
+    ['x-voice-audio-present', '0'],
+  ]);
+  const result = splitTurnResponse(headers, bytes);
+  assert.equal(result.transcript, transcript);
+  assert.equal(result.reply, reply);
+  assert.equal(result.audioPcm, null);
+
+  const zeroHeaders = new Map([
+    ['x-voice-transcript-bytes', '0'],
+    ['x-voice-reply-bytes', '0'],
+    ['x-voice-audio-present', '0'],
+  ]);
+  const zeroResult = splitTurnResponse(zeroHeaders, new Uint8Array(0));
+  assert.equal(zeroResult.transcript, '');
+  assert.equal(zeroResult.reply, '');
+  assert.equal(zeroResult.audioPcm, null);
+  assert.ok(decoder, 'sanity: decoder constructed without throwing');
+});
+
+test('the browser splitter refuses an absent, non-numeric, or negative framing byte count', () => {
+  const splitTurnResponse = loadBrowserFunction('splitTurnResponse');
+  const bytes = new Uint8Array(Buffer.from('hello world', 'utf8'));
+
+  assert.throws(
+    () => splitTurnResponse(new Map([['x-voice-reply-bytes', '0'], ['x-voice-audio-present', '0']]), bytes),
+    (error) => {
+      assert.equal(error.code, 'CONTRACT_VIOLATION');
+      return true;
+    },
+    'an absent x-voice-transcript-bytes header must be refused',
+  );
+
+  assert.throws(
+    () =>
+      splitTurnResponse(
+        new Map([
+          ['x-voice-transcript-bytes', 'not-a-number'],
+          ['x-voice-reply-bytes', '0'],
+          ['x-voice-audio-present', '0'],
+        ]),
+        bytes,
+      ),
+    (error) => {
+      assert.equal(error.code, 'CONTRACT_VIOLATION');
+      return true;
+    },
+    'a non-numeric x-voice-transcript-bytes header must be refused',
+  );
+
+  assert.throws(
+    () =>
+      splitTurnResponse(
+        new Map([
+          ['x-voice-transcript-bytes', '-5'],
+          ['x-voice-reply-bytes', '0'],
+          ['x-voice-audio-present', '0'],
+        ]),
+        bytes,
+      ),
+    (error) => {
+      assert.equal(error.code, 'CONTRACT_VIOLATION');
+      return true;
+    },
+    'a negative x-voice-transcript-bytes header must be refused',
+  );
+});
+
+test('a refused framing declaration reaches the user as error text through the page\'s own humanizeErrorCode, and clears the busy state', () => {
+  const humanizeErrorCode = loadBrowserFunction('humanizeErrorCode');
+  const busyStateCalls = [];
+  const statusCalls = [];
+  const hintCalls = [];
+  const consoleErrorCalls = [];
+  const fakeConsole = { error: (...args) => consoleErrorCalls.push(args) };
+
+  const reportTurnError = loadBrowserFunction('reportTurnError', {
+    setTurnBusyState: (active) => busyStateCalls.push(active),
+    setStatus: (text) => statusCalls.push(text),
+    setHint: (text) => hintCalls.push(text),
+    humanizeErrorCode,
+    console: fakeConsole,
+  });
+
+  const message =
+    'response framing headers declare 9999 text bytes, but only 10 bytes were received — refusing to guess a split';
+  reportTurnError('CONTRACT_VIOLATION', message, 'The response could not be trusted — nothing was rendered.');
+
+  assert.deepEqual(busyStateCalls, [false], 'reportTurnError must clear the busy state as its first action');
+  assert.ok(statusCalls.length > 0, 'reportTurnError must call setStatus');
+  assert.ok(
+    statusCalls[0].includes(message),
+    "the status text must contain the thrown error's own message verbatim — humanizeErrorCode's default: " +
+      'branch must surface it rather than swallowing it into a generic fallback',
+  );
+  assert.ok(hintCalls.length > 0 && hintCalls[0].length > 0, 'reportTurnError must call setHint with a non-empty string');
+  assert.deepEqual(consoleErrorCalls, [['CONTRACT_VIOLATION', message]], 'the fake console must record the code and message');
+});
+
+test('the splitTurnResponse call site in stopAndSend is wrapped in a catch that calls the turn-error handler', () => {
+  const stopAndSendSource = extractFunctionSource('stopAndSend');
+  const callIndex = stopAndSendSource.indexOf('splitTurnResponse(');
+  assert.ok(callIndex !== -1, "sanity: stopAndSend must call 'splitTurnResponse('");
+
+  const beforeCall = stopAndSendSource.slice(0, callIndex);
+  assert.ok(
+    /\btry\b/.test(beforeCall),
+    'a try token must occur before the splitTurnResponse( call index — a bare catch with no try cannot satisfy this',
+  );
+
+  const afterCall = stopAndSendSource.slice(callIndex);
+  assert.match(
+    afterCall,
+    /catch\s*\(\s*error\s*\)\s*\{\s*reportTurnError\(/,
+    "the remainder from the splitTurnResponse( call to the end of the function must match a catch clause whose " +
+      "body's first call is reportTurnError( — this fails on a swallowing empty catch, a catch wrapping some " +
+      "other statement, or the pre-existing player.play().catch(() => {}), which has no reportTurnError in its body",
+  );
+});

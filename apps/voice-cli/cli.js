@@ -194,6 +194,17 @@ export function parseCliArgs(argv) {
     };
   }
 
+  // WR-01 (05-REVIEW.md): --port had no equivalent validation, so a non-numeric value
+  // silently became NaN and only failed later inside http.request() with a confusing
+  // message and the wrong exit-code family.
+  if (!Number.isInteger(values.port) || values.port < 1 || values.port > 65535) {
+    return {
+      ok: false,
+      exitCode: EXIT_CODES.USAGE,
+      message: '--port must be an integer between 1 and 65535',
+    };
+  }
+
   // The flag wins when both are present; the environment variable is used when no flag is
   // given. Read from process.env[TOKEN_ENV_VAR] or the --token flag and nowhere else — this
   // client never touches the shared configuration loader or the operator's local config file.

@@ -392,9 +392,17 @@ async function stopAndSend() {
   }
 }
 
+// WR-03 (05-REVIEW.md): shared token-presence guard so the keyboard-shortcut recording
+// path refuses to start the same as the pointer path does — previously only pointerdown
+// checked this, letting a tokenless keyboard-triggered turn record, encode, and send
+// before being rejected 401 after the fact.
+function hasToken() {
+  return Boolean(tokenEl.value.trim());
+}
+
 ptt.addEventListener('pointerdown', async () => {
   if (isBusy || isRecording) return;
-  if (!tokenEl.value.trim()) {
+  if (!hasToken()) {
     setStatus('Enter the shared access token first.');
     setHint('The token is saved in this browser after you enter it.');
     return;
@@ -425,6 +433,11 @@ ptt.addEventListener('pointerleave', async (event) => {
 window.addEventListener('keydown', async (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !isBusy && !isRecording) {
     event.preventDefault();
+    if (!hasToken()) {
+      setStatus('Enter the shared access token first.');
+      setHint('The token is saved in this browser after you enter it.');
+      return;
+    }
     await ensureRecorder();
     recordedChunks = [];
     mediaRecorder.start();

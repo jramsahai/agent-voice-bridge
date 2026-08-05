@@ -244,17 +244,88 @@ export function assertConformingWav(wavBuffer) {
   return format;
 }
 
+// IN-01 (05-REVIEW.md): shared response-body reader postTurn and readCapabilities both
+// invoke from their own response callback — the 3xx redirect refusal, content-encoding
+// refusal, and CR-02 response-ceiling tracking were near-verbatim duplicated across both
+// before this extraction; only each caller's own 'end'-time interpretation of the buffered
+// body (turn framing vs capabilities status/line parsing) stays local to that caller.
+// Resolves the raw concatenated body Buffer once the response stream's own 'end' event
+// fires; rejects with a tagged CONTRACT_VIOLATION error on any of the three refusals above.
+function readTurnResponseBody(req, res) {
+  return new Promise((resolve, reject) => {
+    // Redirect refusal: node:http never follows a Location header on its own — this makes
+    // that refusal explicit rather than incidental. The Location header itself is never
+    // read; there is nothing to act on, only a violation to report.
+    if (res.statusCode >= 300 && res.statusCode <= 399) {
+      res.resume();
+      const err = new Error(
+        `received a ${res.statusCode} redirect response — the service is specified never ` +
+          `to redirect (API-08); no second request was issued`,
+      );
+      err.code = 'CONTRACT_VIOLATION';
+      req.destroy();
+      reject(err);
+      return;
+    }
+
+    // Compression refusal: accept-encoding: identity was already sent above; a response
+    // that carries content-encoding anyway means something on the hop compressed it
+    // regardless — never decompressed here, only reported.
+    const contentEncoding = res.headers['content-encoding'];
+    if (contentEncoding) {
+      res.resume();
+      const err = new Error(
+        `response carried a content-encoding header ('${contentEncoding}') — this client ` +
+          `only ever sends accept-encoding: identity and never decompresses a response`,
+      );
+      err.code = 'CONTRACT_VIOLATION';
+      req.destroy();
+      reject(err);
+      return;
+    }
+
+    // CR-02 (05-REVIEW.md): a misbehaving backend or reverse proxy sending an oversized
+    // or endlessly-streaming body has no ceiling without this — the client would grow its
+    // own process memory unbounded. `ceilingBreached` guards against a chunk arriving
+    // after the breach being counted, retained, or re-rejecting an already-settled
+    // promise; the stream's own 'end' handler is likewise a no-op once it fires.
+    const chunks = [];
+    let receivedBytes = 0;
+    let ceilingBreached = false;
+    res.on('data', (chunk) => {
+      if (ceilingBreached) return;
+      receivedBytes += chunk.length;
+      if (receivedBytes > MAX_RESPONSE_BYTES) {
+        ceilingBreached = true;
+        const err = new Error(
+          `response exceeded the ${MAX_RESPONSE_BYTES}-byte response ceiling — refusing to buffer further`,
+        );
+        err.code = 'CONTRACT_VIOLATION';
+        req.destroy();
+        reject(err);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    res.on('end', () => {
+      if (ceilingBreached) return;
+      resolve(Buffer.concat(chunks));
+    });
+    res.on('error', reject);
+  });
+}
+
 // Issues POST /v1/turn via node:http (never fetch — see file header). Resolves
 // { statusCode, headers, body } once the response stream's own 'end' event fires — the
 // success response never sets Content-Length (it is chunked), so nothing here ever waits on,
 // trusts, or sizes a buffer from that header; the body is consumed only to the stream's own
 // 'end' event (the rule Phase 6's SPEC-03 will publish for every client). The 'timeout'
 // option only emits an event on socket inactivity; it does not abort anything on its own, so
-// the handler below must call req.destroy() itself (05-RESEARCH.md Pitfall 2). A 3xx status
-// or a content-encoding response header is a hard CONTRACT_VIOLATION failure rather than a
-// followed redirect or a silent decompression — both are behaviors the service is specified
-// never to exhibit (API-08), and a client that tolerated either would mask exactly the proxy
-// misconfiguration this posture exists to catch.
+// readTurnResponseBody above must call req.destroy() itself (05-RESEARCH.md Pitfall 2). A 3xx
+// status or a content-encoding response header is a hard CONTRACT_VIOLATION failure rather
+// than a followed redirect or a silent decompression — both are behaviors the service is
+// specified never to exhibit (API-08), and a client that tolerated either would mask exactly
+// the proxy misconfiguration this posture exists to catch.
 export function postTurn({ host, port, token, pcmBuffer, timeoutMs = DEFAULT_READ_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -275,65 +346,9 @@ export function postTurn({ host, port, token, pcmBuffer, timeoutMs = DEFAULT_REA
         },
       },
       (res) => {
-        // Redirect refusal: node:http never follows a Location header on its own — this
-        // makes that refusal explicit rather than incidental. The Location header itself is
-        // never read; there is nothing to act on, only a violation to report.
-        if (res.statusCode >= 300 && res.statusCode <= 399) {
-          res.resume();
-          const err = new Error(
-            `received a ${res.statusCode} redirect response — the service is specified never ` +
-              `to redirect (API-08); no second request was issued`,
-          );
-          err.code = 'CONTRACT_VIOLATION';
-          req.destroy();
-          reject(err);
-          return;
-        }
-
-        // Compression refusal: accept-encoding: identity was already sent above; a response
-        // that carries content-encoding anyway means something on the hop compressed it
-        // regardless — never decompressed here, only reported.
-        const contentEncoding = res.headers['content-encoding'];
-        if (contentEncoding) {
-          res.resume();
-          const err = new Error(
-            `response carried a content-encoding header ('${contentEncoding}') — this client ` +
-              `only ever sends accept-encoding: identity and never decompresses a response`,
-          );
-          err.code = 'CONTRACT_VIOLATION';
-          req.destroy();
-          reject(err);
-          return;
-        }
-
-        // CR-02 (05-REVIEW.md): a misbehaving backend or reverse proxy sending an oversized
-        // or endlessly-streaming body has no ceiling without this — the CLI would grow its
-        // own process memory unbounded. `ceilingBreached` guards against a chunk arriving
-        // after the breach being counted, retained, or re-rejecting an already-settled
-        // promise; the stream's own 'end' handler is likewise a no-op once it fires.
-        const chunks = [];
-        let receivedBytes = 0;
-        let ceilingBreached = false;
-        res.on('data', (chunk) => {
-          if (ceilingBreached) return;
-          receivedBytes += chunk.length;
-          if (receivedBytes > MAX_RESPONSE_BYTES) {
-            ceilingBreached = true;
-            const err = new Error(
-              `response exceeded the ${MAX_RESPONSE_BYTES}-byte response ceiling — refusing to buffer further`,
-            );
-            err.code = 'CONTRACT_VIOLATION';
-            req.destroy();
-            reject(err);
-            return;
-          }
-          chunks.push(chunk);
-        });
-        res.on('end', () => {
-          if (ceilingBreached) return;
-          resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) });
-        });
-        res.on('error', reject);
+        readTurnResponseBody(req, res)
+          .then((body) => resolve({ statusCode: res.statusCode, headers: res.headers, body }))
+          .catch(reject);
       },
     );
     req.on('timeout', () => {
@@ -458,71 +473,27 @@ export function readCapabilities({ host, port, token, timeoutMs = DEFAULT_READ_T
         },
       },
       (res) => {
-        // Same redirect and compression refusals as postTurn — see that function's comments
-        // for the full rationale (API-08; CLI-02).
-        if (res.statusCode >= 300 && res.statusCode <= 399) {
-          res.resume();
-          const err = new Error(
-            `received a ${res.statusCode} redirect response — the service is specified never ` +
-              `to redirect (API-08); no second request was issued`,
-          );
-          err.code = 'CONTRACT_VIOLATION';
-          req.destroy();
-          reject(err);
-          return;
-        }
-
-        const contentEncoding = res.headers['content-encoding'];
-        if (contentEncoding) {
-          res.resume();
-          const err = new Error(
-            `response carried a content-encoding header ('${contentEncoding}') — this client ` +
-              `only ever sends accept-encoding: identity and never decompresses a response`,
-          );
-          err.code = 'CONTRACT_VIOLATION';
-          req.destroy();
-          reject(err);
-          return;
-        }
-
-        // CR-02 (05-REVIEW.md) — same ceiling as postTurn's response handler; see that
-        // function's comment for the full rationale. Duplicated rather than shared per
-        // IN-01's own deferred note: a refactor of both response callbacks is out of scope.
-        const chunks = [];
-        let receivedBytes = 0;
-        let ceilingBreached = false;
-        res.on('data', (chunk) => {
-          if (ceilingBreached) return;
-          receivedBytes += chunk.length;
-          if (receivedBytes > MAX_RESPONSE_BYTES) {
-            ceilingBreached = true;
-            const err = new Error(
-              `response exceeded the ${MAX_RESPONSE_BYTES}-byte response ceiling — refusing to buffer further`,
-            );
-            err.code = 'CONTRACT_VIOLATION';
-            req.destroy();
-            reject(err);
-            return;
-          }
-          chunks.push(chunk);
-        });
-        res.on('end', () => {
-          if (ceilingBreached) return;
-          const bodyText = Buffer.concat(chunks).toString('utf8');
-          if (res.statusCode !== 200) {
-            const pairs = parseLinesBody(bodyText);
-            const err = new Error(
-              pairs.get('error-message') ?? `capabilities request failed with status ${res.statusCode}`,
-            );
-            err.code = 'HTTP_ERROR';
-            err.statusCode = res.statusCode;
-            err.errorCode = pairs.get('error-code') ?? res.headers['x-error-code'] ?? 'UNKNOWN';
-            reject(err);
-            return;
-          }
-          resolve(parseLinesBody(bodyText));
-        });
-        res.on('error', reject);
+        // Same redirect refusal, content-encoding refusal, and CR-02 response-ceiling
+        // tracking as postTurn — both call sites share readTurnResponseBody (IN-01,
+        // 05-REVIEW.md). Only the status/line-body interpretation below is specific to the
+        // capabilities route.
+        readTurnResponseBody(req, res)
+          .then((body) => {
+            const bodyText = body.toString('utf8');
+            if (res.statusCode !== 200) {
+              const pairs = parseLinesBody(bodyText);
+              const err = new Error(
+                pairs.get('error-message') ?? `capabilities request failed with status ${res.statusCode}`,
+              );
+              err.code = 'HTTP_ERROR';
+              err.statusCode = res.statusCode;
+              err.errorCode = pairs.get('error-code') ?? res.headers['x-error-code'] ?? 'UNKNOWN';
+              reject(err);
+              return;
+            }
+            resolve(parseLinesBody(bodyText));
+          })
+          .catch(reject);
       },
     );
     req.on('timeout', () => {

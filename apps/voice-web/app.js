@@ -380,6 +380,12 @@ async function stopAndSend() {
     setTurnBusyState(false);
     setStatus('Done.');
     setHint('Press and hold to send another turn.');
+  } catch (error) {
+    // WR-04 (05-REVIEW.md): blobToWav()'s decodeAudioData and the fetch() call above have
+    // no catch of their own — without this, a network failure or malformed-audio decode
+    // error becomes an unhandled rejection that clears the busy state via `finally` below
+    // but never tells the user why the turn silently failed.
+    reportTurnError('NETWORK_ERROR', error.message, 'Check the connection to the bridge and try again.');
   } finally {
     isRecording = false;
     setBusy(false);

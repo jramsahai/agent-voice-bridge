@@ -22,6 +22,7 @@ import {
   assertConformingWav,
   splitTurnBody,
   runCliTurn,
+  playReplyPcm,
   main,
   DEFAULT_READ_TIMEOUT_MS,
   TOKEN_ENV_VAR,
@@ -445,6 +446,27 @@ function makeConformingInput(tmpDir) {
   return inputPath;
 }
 
+// A controllable stand-in for a real player binary — array-form execFile invokes it as
+// `playerBin <wavPath>`, so a `/bin/sh` script that records or copies its own `$1` is enough
+// to observe exactly what playReplyPcm handed it, without ever producing sound and without the
+// racy shared-os.tmpdir()-listing-diff pattern test/turn-suite-hygiene.test.js's own regression
+// guard forbids (05-02's own precedent: capture a deterministic handle on the thing under test
+// instead of diffing a shared resource every concurrently-running test file also touches).
+function makeFakePlayerScript(dir, { recordInvokedPathTo, copyReceivedFileTo, exitCode = 0 } = {}) {
+  const scriptPath = path.join(dir, 'fake-player.sh');
+  const lines = ['#!/bin/sh'];
+  if (recordInvokedPathTo) {
+    lines.push(`echo "$1" > "${recordInvokedPathTo}"`);
+  }
+  if (copyReceivedFileTo) {
+    lines.push(`cp "$1" "${copyReceivedFileTo}"`);
+  }
+  lines.push(`exit ${exitCode}`);
+  fs.writeFileSync(scriptPath, lines.join('\n') + '\n');
+  fs.chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
 test('a server that accepts the connection and never responds causes the CLI to fail with a timeout, not hang until a server-side ceiling', async () => {
   let serverSocket = null;
   const server = http.createServer(() => {
@@ -765,4 +787,175 @@ test('two CLI turns started in parallel against one service yield exactly one su
     await closeServer(server);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+// =====================================================================================
+// playReplyPcm — local WAV wrapping and degradable playback (05-03, Task 1). Every test here
+// drives an injectable player binary; none spawns a real audio player or produces sound.
+// =====================================================================================
+
+test('playReplyPcm wraps the raw PCM in a WAV file it built itself, hands it to the player, and removes the temp dir once playback resolves', async () => {
+  const tmpDir = makeTmpDir();
+  const recordInvokedPathTo = path.join(tmpDir, 'invoked-with.txt');
+  const copyReceivedFileTo = path.join(tmpDir, 'received.wav');
+  const playerBin = makeFakePlayerScript(tmpDir, { recordInvokedPathTo, copyReceivedFileTo });
+  const pcm = makePcm16({ samples: 1600 });
+
+  try {
+    const result = await playReplyPcm(pcm, { playerBin });
+    assert.equal(result.played, true);
+
+    const invokedWith = fs.readFileSync(recordInvokedPathTo, 'utf8').trim();
+    assert.ok(
+      invokedWith.includes('voice-cli-playback-'),
+      'the player must receive a path inside the withTempDir-created playback directory',
+    );
+    assert.equal(
+      fs.existsSync(path.dirname(invokedWith)),
+      false,
+      'the temporary playback directory must be removed once playback resolves',
+    );
+
+    const receivedWav = fs.readFileSync(copyReceivedFileTo);
+    assert.deepEqual(
+      wavToPcm(receivedWav),
+      pcm,
+      'the WAV handed to the player must round-trip back to the exact same raw PCM bytes',
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('playReplyPcm degrades rather than throws when the player binary does not exist', async () => {
+  const tmpDir = makeTmpDir();
+  const missingPlayerBin = path.join(tmpDir, 'does-not-exist-binary');
+  const pcm = makePcm16({ samples: 1600 });
+
+  try {
+    const result = await playReplyPcm(pcm, { playerBin: missingPlayerBin });
+    assert.equal(result.played, false);
+    assert.ok(result.error, 'a failed playback must report the failure as data, not throw');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('playReplyPcm with enabled: false spawns nothing and touches no temporary directory', async () => {
+  const tmpDir = makeTmpDir();
+  const recordInvokedPathTo = path.join(tmpDir, 'invoked-with.txt');
+  const playerBin = makeFakePlayerScript(tmpDir, { recordInvokedPathTo });
+  const pcm = makePcm16({ samples: 1600 });
+
+  try {
+    const result = await playReplyPcm(pcm, { playerBin, enabled: false });
+    assert.equal(result.played, false);
+    assert.equal(result.skipped, true);
+    assert.equal(fs.existsSync(recordInvokedPathTo), false, 'a disabled playback must never invoke the player binary');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// =====================================================================================
+// runCliTurn wired to playback — a real fake-adapter server, real HTTP round trip, playback
+// only ever exercised through the injectable playerBin, never a real player.
+// =====================================================================================
+
+test('a full CLI turn with audio plays through an injectable player binary and writes --out bytes identical to wavToPcm(fakeSpeakWavBuffer)', async () => {
+  const clientToken = 'cli-test-token-playback-success';
+  const replyWav = makeCanonicalWav({ pcm: makePcm16({ samples: 4000 }) });
+  const config = buildTestConfig({ clients: { cliClient: clientToken } });
+  const adapters = makeFakeAdapters({ transcript: 'what is the weather', reply: 'sunny and warm', wavBuffer: replyWav });
+  const handler = createRequestHandler({ config, adapters, webDir: process.cwd() });
+  const server = await startServer(handler);
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+  const recordInvokedPathTo = path.join(tmpDir, 'invoked-with.txt');
+  const playerBin = makeFakePlayerScript(tmpDir, { recordInvokedPathTo });
+
+  try {
+    const { result } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: clientToken, inputPath, outPath, playerBin }),
+    );
+    assert.equal(result, EXIT_CODES.OK);
+    assert.deepEqual(fs.readFileSync(outPath), wavToPcm(replyWav));
+    assert.ok(fs.existsSync(recordInvokedPathTo), 'the injectable player binary must have been invoked');
+
+    const invokedWith = fs.readFileSync(recordInvokedPathTo, 'utf8').trim();
+    assert.equal(
+      fs.existsSync(path.dirname(invokedWith)),
+      false,
+      'the playback temp dir must be gone once the turn completes',
+    );
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('a turn whose player binary does not exist still exits 0, prints the saved reply-audio path, and warns about the failed playback', async () => {
+  const clientToken = 'cli-test-token-playback-missing-binary';
+  const replyWav = makeCanonicalWav({ pcm: makePcm16({ samples: 4000 }) });
+  const config = buildTestConfig({ clients: { cliClient: clientToken } });
+  const adapters = makeFakeAdapters({ transcript: 'what is the weather', reply: 'sunny and warm', wavBuffer: replyWav });
+  const handler = createRequestHandler({ config, adapters, webDir: process.cwd() });
+  const server = await startServer(handler);
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+  const missingPlayerBin = path.join(tmpDir, 'does-not-exist-binary');
+
+  try {
+    const { result, stdout, stderr } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: clientToken, inputPath, outPath, playerBin: missingPlayerBin }),
+    );
+    assert.equal(result, EXIT_CODES.OK);
+    assert.ok(stdout.some((line) => line.includes(outPath)), 'stdout must contain the saved reply-audio path');
+    assert.ok(stderr.some((line) => /playback failed/i.test(line)), 'a warning line naming the failed playback must be printed');
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('--no-play spawns no player process at all and only writes the reply audio to disk', async () => {
+  const clientToken = 'cli-test-token-no-play';
+  const replyWav = makeCanonicalWav({ pcm: makePcm16({ samples: 4000 }) });
+  const config = buildTestConfig({ clients: { cliClient: clientToken } });
+  const adapters = makeFakeAdapters({ transcript: 'what is the weather', reply: 'sunny and warm', wavBuffer: replyWav });
+  const handler = createRequestHandler({ config, adapters, webDir: process.cwd() });
+  const server = await startServer(handler);
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+  const recordInvokedPathTo = path.join(tmpDir, 'invoked-with.txt');
+  const playerBin = makeFakePlayerScript(tmpDir, { recordInvokedPathTo });
+
+  try {
+    const { result } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: clientToken, inputPath, outPath, playerBin, noPlay: true }),
+    );
+    assert.equal(result, EXIT_CODES.OK);
+    assert.deepEqual(fs.readFileSync(outPath), wavToPcm(replyWav));
+    assert.equal(fs.existsSync(recordInvokedPathTo), false, '--no-play must never invoke the player binary');
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('parseCliArgs sets noPlay true when --no-play is given', async () => {
+  await withEnvToken('some-token', () => {
+    const parsed = parseCliArgs(['--input', 'x.wav', '--no-play']);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.values.noPlay, true);
+  });
 });

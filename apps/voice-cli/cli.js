@@ -17,9 +17,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 
-import { wavToPcm, readWavFormat } from '../../packages/shared/audio/wav.js';
+import { wavToPcm, readWavFormat, pcmToWav } from '../../packages/shared/audio/wav.js';
+import { withTempDir } from '../../packages/shared/lifecycle/tempfiles.js';
+
+const execFileAsync = promisify(execFile);
 
 // Sizing basis (A3/D-03, 05-RESEARCH.md): real measured time-to-first-byte against live
 // backends ranges 5.4s-10.3s (03-UAT.md); the server-side adapter ceiling sum is 420,000ms
@@ -49,6 +54,15 @@ const EXPECTED_BIT_DEPTH = 16;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 4318;
 const DEFAULT_OUT_FILENAME = 'reply.pcm';
+const DEFAULT_PLAYER_BIN = '/usr/bin/afplay';
+
+// Sizing basis (mirrors DEFAULT_READ_TIMEOUT_MS's own comment above): MAX_PCM_BYTES
+// (packages/shared/audio/wav.js) caps a reply at 5 minutes of 16kHz mono s16le, so playback of
+// even the largest possible reply never legitimately exceeds that duration by much — 300000ms
+// gives it exactly that ceiling with no extra margin needed, since a hung player process is the
+// only thing this timeout exists to catch, mirroring the array-form execFile + timeout shape
+// packages/shared/adapters/tts-macos-say.js already uses.
+const PLAYBACK_TIMEOUT_MS = 300000;
 
 // Placeholder a token is replaced with if it ever reaches a printed line — the redaction is
 // structural (every diagnostic line is built from a fixed set of named fields, never by
@@ -83,6 +97,7 @@ function printUsage(print) {
       `  --timeout-ms <n> Inactivity read timeout in milliseconds (default: ${DEFAULT_READ_TIMEOUT_MS}).`,
       '                   Resets on every received byte — a slow but steadily-arriving',
       '                   response is never killed by this.',
+      '  --no-play        Write the reply PCM to --out but never invoke a player binary',
       '  --help           Print this message and exit',
       '',
       `The recommended way to supply the bearer token is the ${TOKEN_ENV_VAR} environment`,
@@ -113,6 +128,7 @@ export function parseCliArgs(argv) {
     token: null,
     outPath: null,
     timeoutMs: DEFAULT_READ_TIMEOUT_MS,
+    noPlay: false,
     help: false,
   };
   let flagToken = null;
@@ -137,6 +153,9 @@ export function parseCliArgs(argv) {
         break;
       case '--timeout-ms':
         values.timeoutMs = Number(argv[++i]);
+        break;
+      case '--no-play':
+        values.noPlay = true;
         break;
       case '--help':
         values.help = true;
@@ -295,12 +314,55 @@ export function splitTurnBody(headers, body) {
   return { transcript, reply, audioPcm };
 }
 
+// Turns the raw-PCM reply into sound using a header this client wrote itself — never a
+// container delivered by the service (FMT-02/CLI-03). `pcmToWav` is the only place a WAV
+// header is ever constructed here, matching the pcm16 registry row's fixed shape. Written
+// inside withTempDir so the temporary playback file is guaranteed removed on every outcome,
+// and invoked with execFile in array form (never a shell string), mirroring
+// packages/shared/adapters/tts-macos-say.js's own call shape. `playerBin` is injectable
+// precisely so tests can exercise both branches (success, missing/failing binary) without
+// producing sound. Degrades rather than fails: a missing or non-zero-exit player never
+// changes the return value's success shape into a thrown exception — 05-RESEARCH.md flags
+// /usr/bin/afplay as unverified on this host, and CLI-01/CLI-03 are about the wire contract,
+// not the speaker. The caller (runCliTurn) decides what, if anything, to print about a
+// degraded outcome — this function reports the failure back as data, never to stdout/stderr
+// itself.
+export async function playReplyPcm(audioPcm, { playerBin = DEFAULT_PLAYER_BIN, enabled = true } = {}) {
+  if (!enabled) {
+    return { played: false, skipped: true };
+  }
+  return withTempDir('voice-cli-playback-', async (tmpDir) => {
+    const wavBuffer = pcmToWav(audioPcm, {
+      sampleRate: EXPECTED_SAMPLE_RATE,
+      channels: EXPECTED_CHANNELS,
+      bitDepth: EXPECTED_BIT_DEPTH,
+    });
+    const wavPath = path.join(tmpDir, 'reply.wav');
+    fs.writeFileSync(wavPath, wavBuffer);
+    try {
+      await execFileAsync(playerBin, [wavPath], { timeout: PLAYBACK_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 });
+      return { played: true };
+    } catch (error) {
+      return { played: false, error };
+    }
+  });
+}
+
 // Composes the above into the CLI's one path: read the file, assert conformance, strip to raw
 // PCM (reusing wav.js — never re-walking RIFF chunks here), post, split, print, and write the
 // reply PCM when present. Every diagnostic line is built from a fixed set of named fields
 // (never by serialising a request/options object) and passed through redactToken() so a
 // token value can never reach stdout/stderr, even indirectly (T-05-02).
-export async function runCliTurn({ host, port, token, inputPath, outPath, timeoutMs = DEFAULT_READ_TIMEOUT_MS }) {
+export async function runCliTurn({
+  host,
+  port,
+  token,
+  inputPath,
+  outPath,
+  timeoutMs = DEFAULT_READ_TIMEOUT_MS,
+  noPlay = false,
+  playerBin = DEFAULT_PLAYER_BIN,
+}) {
   const reportError = (message) => console.error(redactToken(message, token));
 
   let wavBuffer;
@@ -353,9 +415,16 @@ export async function runCliTurn({ host, port, token, inputPath, outPath, timeou
   console.log(`reply: ${reply}`);
 
   if (audioPcm) {
+    // Written first, unconditionally — the bytes survive regardless of whether playback ever
+    // starts or how it ends (must_haves truth: playback degrades, the turn does not).
     const outputPath = outPath ?? path.join(process.cwd(), DEFAULT_OUT_FILENAME);
     fs.writeFileSync(outputPath, audioPcm);
     console.log(outputPath);
+
+    const playback = await playReplyPcm(audioPcm, { playerBin, enabled: !noPlay });
+    if (!playback.played && !playback.skipped) {
+      reportError(`warning: playback failed (${playback.error?.message ?? 'unknown error'}); reply audio saved to ${outputPath}`);
+    }
   }
 
   return EXIT_CODES.OK;

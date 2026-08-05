@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
+import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
@@ -24,6 +25,11 @@ import { makePcm16, makeCanonicalWav, makeStereoWav } from './helpers/fixtures.j
 // test below can never drift from what actually ships — same convention as
 // test/turn-lock.test.js and test/wav.test.js.
 const REQUEST_HANDLER_SOURCE_URL = new URL('../apps/voice-bridge/request-handler.js', import.meta.url);
+
+// Plan 05-05 Task 1: resolved from this test file's own location, never from process.cwd(),
+// so the byte-identity assertion below points at the real served directory regardless of
+// where `node --test` is invoked from.
+const REAL_WEB_DIR = new URL('../apps/voice-web/', import.meta.url);
 
 function uniqueSessionId(label) {
   return `http-turn-test-${label}-${randomUUID()}`;
@@ -1078,6 +1084,84 @@ test('CR-02 regression: GET / against a webDir missing index.html returns 404 in
       headers: { 'X-Voice-Input-Format': 'pcm16', 'X-Voice-Want-Audio': '0' },
     });
     assert.equal(followUp.statusCode, 200);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// =====================================================================================
+// Plan 05-05 Task 1 (WEB-01/WEB-02): the served page is proven byte-identical to the file on
+// disk — not merely "some 200 response" — so any future templating, token interpolation, or
+// host substitution step fails this test rather than shipping. Both static routes are also
+// proven reachable with no Authorization header, recording that the page itself carries no
+// operator state and needs none. A separate browser-shaped turn proves WEB-01's endpoint-
+// parity claim on the same route the CLI uses.
+// =====================================================================================
+
+test('WEB-02: GET / and GET /app.js return the on-disk apps/voice-web bytes unchanged, with no Authorization header present', async () => {
+  const webDir = REAL_WEB_DIR;
+  const indexPath = path.join(webDir.pathname, 'index.html');
+  const appJsPath = path.join(webDir.pathname, 'app.js');
+  const config = buildTestConfig();
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: webDir.pathname });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+
+    const getRoute = (route) =>
+      new Promise((resolve, reject) => {
+        // Deliberately no Authorization header on either request — the property under test
+        // is that the page is reachable without one.
+        const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: route }, (res) => {
+          const chunks = [];
+          res.on('data', (chunk) => chunks.push(chunk));
+          res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+
+    const indexResponse = await getRoute('/');
+    assert.equal(indexResponse.statusCode, 200);
+    assert.deepEqual(indexResponse.body, fs.readFileSync(indexPath));
+    assert.equal(indexResponse.headers['content-type'], 'text/html; charset=utf-8');
+
+    const appJsResponse = await getRoute('/app.js');
+    assert.equal(appJsResponse.statusCode, 200);
+    assert.deepEqual(appJsResponse.body, fs.readFileSync(appJsPath));
+    assert.equal(appJsResponse.headers['content-type'], 'application/javascript; charset=utf-8');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('WEB-01: a browser-shaped turn — canonical WAV body, X-Voice-Input-Format: wav, a bearer token, no output-format header — completes 200 on the same /v1/turn route the CLI uses', async () => {
+  const config = buildTestConfig({ clients: { browser: 'browser-token' } });
+  const adapters = makeFakeAdapters({
+    transcript: 'what is the weather',
+    reply: 'sunny today',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 20 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const wavBody = makeCanonicalWav({ pcm: makePcm16({ samples: 30 }) });
+
+    const response = await postTurn(port, {
+      body: wavBody,
+      headers: { 'X-Voice-Input-Format': 'wav', Authorization: 'Bearer browser-token' },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.ok('x-voice-transcript-bytes' in response.headers);
+    assert.ok('x-voice-reply-bytes' in response.headers);
+    assert.equal(response.headers['x-voice-audio-present'], '1');
   } finally {
     await closeServer(server);
   }

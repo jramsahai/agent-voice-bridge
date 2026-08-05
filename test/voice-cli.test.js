@@ -81,6 +81,27 @@ function makeTmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'voice-cli-test-'));
 }
 
+// Same gate + waitUntil concurrency pattern test/http-turn.test.js uses to force two
+// overlapping turns — forces the fake transcribe adapter's promise open until released, so a
+// second turn can be driven while the first is provably still in flight.
+function makeGate() {
+  let release;
+  const promise = new Promise((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 5 } = {}) {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error('waitUntil: timed out waiting for predicate');
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 // Mirrors test/turn-log.test.js's own console-capture convention: monkeypatch console.log
 // and console.error for the duration of fn(), then restore, so a test can assert on exactly
 // what the CLI printed without spawning a child process.
@@ -399,4 +420,349 @@ test('no CLI output path ever prints the bearer token value, on a successful tur
 // itself, i.e. the exported constant is the same value Pattern 1 in 05-RESEARCH.md locks in.
 test('DEFAULT_READ_TIMEOUT_MS is the locked 30 second default', () => {
   assert.equal(DEFAULT_READ_TIMEOUT_MS, 30000);
+});
+
+// =====================================================================================
+// CLI-02: embedded-client transport posture, proven against a bare http.createServer stub
+// deliberately violating each constraint — a permissive client passes against a broken
+// contract, so every assertion below is on the client's refusal, never its tolerance.
+// =====================================================================================
+
+function waitForSocketClose(socket, { timeoutMs = 2000 } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!socket || socket.destroyed) return resolve();
+    const timer = setTimeout(() => reject(new Error('waitForSocketClose: timed out')), timeoutMs);
+    socket.once('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+function makeConformingInput(tmpDir) {
+  const inputPath = path.join(tmpDir, 'input.wav');
+  fs.writeFileSync(inputPath, makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }));
+  return inputPath;
+}
+
+test('a server that accepts the connection and never responds causes the CLI to fail with a timeout, not hang until a server-side ceiling', async () => {
+  let serverSocket = null;
+  const server = http.createServer(() => {
+    // Deliberately writes nothing and never ends the response — a hung backend.
+  });
+  server.on('connection', (socket) => {
+    serverSocket = socket;
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+  const timeoutMs = 200;
+
+  try {
+    const start = Date.now();
+    const { result, stderr } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath, timeoutMs }),
+    );
+    const elapsed = Date.now() - start;
+
+    assert.equal(result, EXIT_CODES.TIMEOUT);
+    assert.ok(stderr.some((line) => /timeout/i.test(line)));
+    // Well under the server-side adapter ceiling sum (420,000ms) — proves the client aborted
+    // on its own inactivity window rather than waiting out the pipeline.
+    assert.ok(elapsed < 5000, `expected a client-side abort well under the adapter ceilings, took ${elapsed}ms`);
+    await waitForSocketClose(serverSocket);
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('the inactivity timeout resets on every received byte — a slow but steadily-arriving response is not killed', async () => {
+  const transcript = 'hello there friend';
+  const reply = 'this reply arrives in several slow chunks spread out over the whole window';
+  const transcriptBuf = Buffer.from(transcript, 'utf8');
+  const replyBuf = Buffer.from(reply, 'utf8');
+  const bodyBuf = Buffer.concat([transcriptBuf, replyBuf]);
+  const timeoutMs = 300;
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', async () => {
+      res.writeHead(200, {
+        'x-voice-transcript-bytes': String(transcriptBuf.length),
+        'x-voice-reply-bytes': String(replyBuf.length),
+        'x-voice-audio-present': '0',
+      });
+      const sliceCount = 4;
+      const sliceSize = Math.ceil(bodyBuf.length / sliceCount);
+      for (let offset = 0; offset < bodyBuf.length; offset += sliceSize) {
+        // Each gap is well under the inactivity window; the sum of gaps is well over it —
+        // only a total-duration cap (which this must not be) would kill this turn.
+        await new Promise((resolve) => setTimeout(resolve, timeoutMs / 2));
+        res.write(bodyBuf.subarray(offset, offset + sliceSize));
+      }
+      res.end();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+
+  try {
+    const { result, stdout } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath, timeoutMs }),
+    );
+    assert.equal(result, EXIT_CODES.OK);
+    assert.ok(stdout.some((line) => line.includes(transcript)));
+    assert.ok(stdout.some((line) => line.includes(reply)));
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('a 3xx response carrying a Location header is a contract violation, and the CLI issues no second request to the redirect target', async () => {
+  let redirectTargetRequestCount = 0;
+  const targetServer = http.createServer((req, res) => {
+    redirectTargetRequestCount += 1;
+    res.writeHead(200, {});
+    res.end();
+  });
+  await new Promise((resolve) => targetServer.listen(0, '127.0.0.1', resolve));
+  const targetPort = targetServer.address().port;
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(302, { location: `http://127.0.0.1:${targetPort}/` });
+      res.end();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+
+  try {
+    const { result, stderr } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath }),
+    );
+    assert.equal(result, EXIT_CODES.CONTRACT_VIOLATION);
+    assert.ok(stderr.some((line) => /redirect/i.test(line)));
+    // Give any errant follow-up request a moment to land before asserting none did.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(redirectTargetRequestCount, 0, 'the CLI must never issue a second request to the redirect target');
+  } finally {
+    await closeServer(server);
+    await closeServer(targetServer);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('a response carrying a content-encoding header is a contract violation, not a silent decompression, and the request sent accept-encoding: identity', async () => {
+  let receivedAcceptEncoding = null;
+  const transcript = 'hi';
+  const reply = 'ok';
+  const bodyBuf = Buffer.concat([Buffer.from(transcript, 'utf8'), Buffer.from(reply, 'utf8')]);
+
+  const server = http.createServer((req, res) => {
+    receivedAcceptEncoding = req.headers['accept-encoding'];
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, {
+        'content-encoding': 'gzip',
+        'x-voice-transcript-bytes': String(Buffer.byteLength(transcript, 'utf8')),
+        'x-voice-reply-bytes': String(Buffer.byteLength(reply, 'utf8')),
+        'x-voice-audio-present': '0',
+      });
+      res.end(bodyBuf);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+
+  try {
+    const { result, stderr } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath }),
+    );
+    assert.equal(result, EXIT_CODES.CONTRACT_VIOLATION);
+    assert.ok(stderr.some((line) => /gzip/i.test(line)));
+    assert.equal(receivedAcceptEncoding, 'identity');
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('a set-cookie response header is never stored and never echoed on a subsequent request', async () => {
+  let firstRequestServed = false;
+  let secondRequestHeaders = null;
+  const transcript = 'hi';
+  const reply = 'ok';
+  const bodyBuf = Buffer.concat([Buffer.from(transcript, 'utf8'), Buffer.from(reply, 'utf8')]);
+  const framingHeaders = {
+    'x-voice-transcript-bytes': String(Buffer.byteLength(transcript, 'utf8')),
+    'x-voice-reply-bytes': String(Buffer.byteLength(reply, 'utf8')),
+    'x-voice-audio-present': '0',
+  };
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      if (!firstRequestServed) {
+        firstRequestServed = true;
+        res.writeHead(200, { ...framingHeaders, 'set-cookie': 'sessionid=abc123; Path=/' });
+        res.end(bodyBuf);
+      } else {
+        secondRequestHeaders = req.headers;
+        res.writeHead(200, framingHeaders);
+        res.end(bodyBuf);
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+
+  try {
+    const first = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath }),
+    );
+    assert.equal(first.result, EXIT_CODES.OK);
+
+    const second = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath }),
+    );
+    assert.equal(second.result, EXIT_CODES.OK);
+    assert.ok(secondRequestHeaders, 'sanity: the second request must have reached the server');
+    const hasCookieHeader = Object.keys(secondRequestHeaders).some((key) => key.toLowerCase().includes('cookie'));
+    assert.equal(hasCookieHeader, false, 'the second request must carry no cookie header of any kind');
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('a chunked success response with no declared body-length header is consumed to the stream end and split correctly by the X-Voice-* byte counts', async () => {
+  const transcript = 'what time is it';
+  const reply = 'it is three in the afternoon and sunny';
+  const audio = Buffer.from([9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+  const transcriptBuf = Buffer.from(transcript, 'utf8');
+  const replyBuf = Buffer.from(reply, 'utf8');
+  const bodyBuf = Buffer.concat([transcriptBuf, replyBuf, audio]);
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, {
+        'x-voice-transcript-bytes': String(transcriptBuf.length),
+        'x-voice-reply-bytes': String(replyBuf.length),
+        'x-voice-audio-present': '1',
+      });
+      const third = Math.ceil(bodyBuf.length / 3);
+      res.write(bodyBuf.subarray(0, third));
+      res.write(bodyBuf.subarray(third, third * 2));
+      res.write(bodyBuf.subarray(third * 2));
+      res.end();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+
+  try {
+    const { result, stdout } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath }),
+    );
+    assert.equal(result, EXIT_CODES.OK);
+    assert.ok(stdout.some((line) => line.includes(transcript)));
+    assert.ok(stdout.some((line) => line.includes(reply)));
+    assert.deepEqual(fs.readFileSync(outPath), audio);
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// Deliberately does not diff the shared, process-wide os.tmpdir() listing — that pattern is
+// racy the moment more than one test file drives real runTurn() calls concurrently under
+// `node --test`'s parallel file execution (test/turn-suite-hygiene.test.js's own regression
+// guard forbids reintroducing it). Instead this test captures the in-flight turn's own
+// pipeline temp directory straight from the transcribe adapter's recorded audioPath — a
+// deterministic, non-racy handle on exactly this turn's own directory, not the shared
+// resource every other concurrently-running test file also touches.
+test('two CLI turns started in parallel against one service yield exactly one success and one busy exit, with no leaked pipeline temp directory', async () => {
+  const gate = makeGate();
+  const clientToken = 'cli-test-token-parallel';
+  const config = buildTestConfig({ clients: { cliClient: clientToken } });
+  const replyWav = makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) });
+  let transcribeCallCount = 0;
+  const capturedTempDirs = [];
+  const adapters = {
+    transcribe: async (audioPath) => {
+      transcribeCallCount += 1;
+      capturedTempDirs.push(path.dirname(audioPath));
+      if (transcribeCallCount === 1) {
+        await gate.promise;
+      }
+      return { text: 'hi', meta: {} };
+    },
+    agent: async () => ({ text: 'ok', rawText: 'ok', meta: {} }),
+    speak: async () => ({ audioBuffer: replyWav, mimeType: 'audio/wav', meta: {} }),
+  };
+  const handler = createRequestHandler({ config, adapters, webDir: process.cwd() });
+  const server = await startServer(handler);
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath1 = path.join(tmpDir, 'reply1.pcm');
+  const outPath2 = path.join(tmpDir, 'reply2.pcm');
+
+  try {
+    const firstPromise = captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: clientToken, inputPath, outPath: outPath1 }),
+    );
+    await waitUntil(() => transcribeCallCount === 1);
+
+    const firstTurnTempDir = capturedTempDirs[0];
+    assert.ok(fs.existsSync(firstTurnTempDir), "sanity: the in-flight turn's own temp dir must exist while it is gated open");
+
+    const second = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: clientToken, inputPath, outPath: outPath2 }),
+    );
+    assert.equal(second.result, EXIT_CODES.BUSY, 'the second, concurrent turn must be refused with the busy exit code');
+    // runTurn() acquires the lock before its first await (a locked Phase 2 ordering guarantee
+    // this repo's own regression tests enforce) — the busy-refused turn is rejected before the
+    // pipeline ever creates a temp dir for it, so the transcribe adapter above is never
+    // invoked a second time and no second directory is ever created to leak.
+    assert.equal(transcribeCallCount, 1, 'the busy-refused turn must never reach the transcribe adapter');
+
+    gate.release();
+    const first = await firstPromise;
+    assert.equal(first.result, EXIT_CODES.OK, 'the first turn must still succeed once the gate releases');
+
+    assert.equal(fs.existsSync(firstTurnTempDir), false, "the first turn's own pipeline temp dir must be removed once it completes");
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

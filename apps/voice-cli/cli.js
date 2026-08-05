@@ -376,7 +376,12 @@ export function splitTurnBody(headers, body) {
 
   const transcript = body.subarray(0, transcriptBytes).toString('utf8');
   const reply = body.subarray(transcriptBytes, transcriptBytes + replyBytes).toString('utf8');
-  const audioPcm = audioPresent ? body.subarray(transcriptBytes + replyBytes) : null;
+  // WR-02 (05-REVIEW.md): a truthy x-voice-audio-present with zero bytes actually remaining
+  // must still be treated as "no audio" — Buffer#subarray at an index equal to body.length
+  // returns a zero-length but still-truthy Buffer, which app.js's splitTurnResponse already
+  // guards against.
+  const audioStart = transcriptBytes + replyBytes;
+  const audioPcm = audioPresent && audioStart < body.length ? body.subarray(audioStart) : null;
 
   return { transcript, reply, audioPcm };
 }

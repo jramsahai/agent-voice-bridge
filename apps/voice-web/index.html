@@ -15,6 +15,7 @@
       #ptt { background: #22c55e; color: #06210f; font-weight: 700; width: 100%; cursor: pointer; margin-top: 16px; min-height: 120px; font-size: 28px; border-radius: 20px; touch-action: manipulation; }
       #ptt.recording { background: #ef4444; color: white; }
       #ptt.processing { background: #f59e0b; color: #111827; }
+      #ptt.locked { background: #7c2d12; color: white; }
       #ptt:disabled { opacity: 0.7; cursor: wait; }
       .card { background: #1f2937; padding: 16px; border-radius: 16px; margin-top: 16px; }
       .label { font-size: 12px; text-transform: uppercase; opacity: 0.7; margin-bottom: 8px; }
@@ -22,6 +23,8 @@
       #status { margin-top: 12px; opacity: 0.9; min-height: 1.4em; }
       #hint { margin-top: 8px; font-size: 14px; opacity: 0.7; }
       .pill { display: inline-block; font-size: 12px; padding: 4px 8px; border-radius: 999px; background: #374151; margin-left: 8px; }
+      .pill.busy { background: #7c2d12; }
+      .pill[hidden] { display: none; }
       audio { width: 100%; margin-top: 12px; }
     </style>
   </head>
@@ -31,6 +34,7 @@
       <p>STT-Agent-TTS pipeline with all models running locally. Hold the button to speak.</p>
       <button id="ptt">Hold to talk</button>
       <div id="status">Idle.</div>
+      <span id="busy-pill" class="pill busy" hidden>busy — turn refused</span>
       <div id="hint">Press and hold to record, then release to send.</div>
       <div class="card">
         <div class="label">Transcript</div>

@@ -21,6 +21,10 @@ import { pathToFileURL } from 'node:url';
 
 import { wavToPcm, readWavFormat } from '../../packages/shared/audio/wav.js';
 
+// Sizing basis (A3/D-03, 05-RESEARCH.md): real measured time-to-first-byte against live
+// backends ranges 5.4s-10.3s (03-UAT.md); the server-side adapter ceiling sum is 420,000ms
+// (transcribe 120s + agent 180s + speech 120s). 30s clears the measured TTFB with margin
+// while staying far short of that ceiling — a working value, overridable via --timeout-ms.
 export const DEFAULT_READ_TIMEOUT_MS = 30000;
 export const TOKEN_ENV_VAR = 'VOICE_BRIDGE_CLI_TOKEN';
 export const EXIT_CODES = Object.freeze({
@@ -76,6 +80,9 @@ function printUsage(print) {
       '                   is visible to any local user reading the process table — prefer',
       '                   VOICE_BRIDGE_CLI_TOKEN below instead.',
       `  --out <path>     Where to write the reply PCM (default: ./${DEFAULT_OUT_FILENAME})`,
+      `  --timeout-ms <n> Inactivity read timeout in milliseconds (default: ${DEFAULT_READ_TIMEOUT_MS}).`,
+      '                   Resets on every received byte — a slow but steadily-arriving',
+      '                   response is never killed by this.',
       '  --help           Print this message and exit',
       '',
       `The recommended way to supply the bearer token is the ${TOKEN_ENV_VAR} environment`,
@@ -105,6 +112,7 @@ export function parseCliArgs(argv) {
     port: DEFAULT_PORT,
     token: null,
     outPath: null,
+    timeoutMs: DEFAULT_READ_TIMEOUT_MS,
     help: false,
   };
   let flagToken = null;
@@ -127,6 +135,9 @@ export function parseCliArgs(argv) {
       case '--out':
         values.outPath = argv[++i] ?? null;
         break;
+      case '--timeout-ms':
+        values.timeoutMs = Number(argv[++i]);
+        break;
       case '--help':
         values.help = true;
         break;
@@ -137,6 +148,17 @@ export function parseCliArgs(argv) {
 
   if (values.help) {
     return { ok: true, values };
+  }
+
+  // An inactivity window, not a total-duration cap (D-03) — but it must still be a real,
+  // positive number of milliseconds; a non-numeric or non-positive value can never mean
+  // anything sane to http.request()'s own timeout option.
+  if (!Number.isFinite(values.timeoutMs) || values.timeoutMs <= 0) {
+    return {
+      ok: false,
+      exitCode: EXIT_CODES.USAGE,
+      message: `--timeout-ms must be a positive number of milliseconds`,
+    };
   }
 
   // The flag wins when both are present; the environment variable is used when no flag is
@@ -179,10 +201,15 @@ export function assertConformingWav(wavBuffer) {
 
 // Issues POST /v1/turn via node:http (never fetch — see file header). Resolves
 // { statusCode, headers, body } once the response stream's own 'end' event fires — the
-// success response never sets Content-Length (it is chunked), so nothing here ever waits on
-// or trusts that header. The 'timeout' option only emits an event on socket inactivity; it
-// does not abort anything on its own, so the handler below must call req.destroy() itself
-// (05-RESEARCH.md Pitfall 2).
+// success response never sets Content-Length (it is chunked), so nothing here ever waits on,
+// trusts, or sizes a buffer from that header; the body is consumed only to the stream's own
+// 'end' event (the rule Phase 6's SPEC-03 will publish for every client). The 'timeout'
+// option only emits an event on socket inactivity; it does not abort anything on its own, so
+// the handler below must call req.destroy() itself (05-RESEARCH.md Pitfall 2). A 3xx status
+// or a content-encoding response header is a hard CONTRACT_VIOLATION failure rather than a
+// followed redirect or a silent decompression — both are behaviors the service is specified
+// never to exhibit (API-08), and a client that tolerated either would mask exactly the proxy
+// misconfiguration this posture exists to catch.
 export function postTurn({ host, port, token, pcmBuffer, timeoutMs = DEFAULT_READ_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -203,6 +230,37 @@ export function postTurn({ host, port, token, pcmBuffer, timeoutMs = DEFAULT_REA
         },
       },
       (res) => {
+        // Redirect refusal: node:http never follows a Location header on its own — this
+        // makes that refusal explicit rather than incidental. The Location header itself is
+        // never read; there is nothing to act on, only a violation to report.
+        if (res.statusCode >= 300 && res.statusCode <= 399) {
+          res.resume();
+          const err = new Error(
+            `received a ${res.statusCode} redirect response — the service is specified never ` +
+              `to redirect (API-08); no second request was issued`,
+          );
+          err.code = 'CONTRACT_VIOLATION';
+          req.destroy();
+          reject(err);
+          return;
+        }
+
+        // Compression refusal: accept-encoding: identity was already sent above; a response
+        // that carries content-encoding anyway means something on the hop compressed it
+        // regardless — never decompressed here, only reported.
+        const contentEncoding = res.headers['content-encoding'];
+        if (contentEncoding) {
+          res.resume();
+          const err = new Error(
+            `response carried a content-encoding header ('${contentEncoding}') — this client ` +
+              `only ever sends accept-encoding: identity and never decompresses a response`,
+          );
+          err.code = 'CONTRACT_VIOLATION';
+          req.destroy();
+          reject(err);
+          return;
+        }
+
         const chunks = [];
         res.on('data', (chunk) => chunks.push(chunk));
         res.on('end', () => {
@@ -270,14 +328,24 @@ export async function runCliTurn({ host, port, token, inputPath, outPath, timeou
       reportError(`error: ${error.message}`);
       return EXIT_CODES.TIMEOUT;
     }
+    if (error.code === 'CONTRACT_VIOLATION') {
+      reportError(`error: ${error.message}`);
+      return EXIT_CODES.CONTRACT_VIOLATION;
+    }
     reportError(`error: request failed: ${error.message}`);
     return EXIT_CODES.HTTP_ERROR;
   }
 
   if (response.statusCode !== 200) {
     const errorCode = response.headers['x-error-code'] ?? 'UNKNOWN';
+    // Distinguished from a generic failure (05-02-PLAN.md must_haves): the lock is held by
+    // another client and this turn was refused immediately, not queued behind it.
+    if (errorCode === 'TURN_BUSY') {
+      reportError('busy: another client holds the turn lock; refused immediately, not queued — try again shortly');
+      return EXIT_CODES.BUSY;
+    }
     reportError(`error ${response.statusCode} ${errorCode}`);
-    return errorCode === 'TURN_BUSY' ? EXIT_CODES.BUSY : EXIT_CODES.HTTP_ERROR;
+    return EXIT_CODES.HTTP_ERROR;
   }
 
   const { transcript, reply, audioPcm } = splitTurnBody(response.headers, response.body);

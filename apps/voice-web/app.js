@@ -18,6 +18,11 @@ let isBusy = false;
 let isRecording = false;
 let lastPlayerObjectUrl = null;
 
+// WR-06 (05-REVIEW.md): mirrors apps/voice-cli/cli.js's DEFAULT_READ_TIMEOUT_MS — without
+// this, a hung backend leaves the fetch promise never settling and the "Working..." button
+// stuck with no way to recover short of reloading the page.
+const REQUEST_TIMEOUT_MS = 30000;
+
 const TOKEN_STORAGE_KEY = 'voice-bridge-token';
 const savedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
 if (savedToken) tokenEl.value = savedToken;
@@ -322,14 +327,22 @@ async function stopAndSend() {
     // (WEB-01, D-02). The browser stays on the wav input format: the service never
     // resamples a body declared pcm16, and a browser AudioContext runs at 44100 or
     // 48000 Hz by default, which would be silently mis-transcribed rather than rejected.
-    const response = await fetch('/v1/turn', {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${tokenEl.value.trim()}`,
-        'x-voice-input-format': 'wav'
-      },
-      body: requestBody
-    });
+    const requestController = new AbortController();
+    const requestTimeoutId = setTimeout(() => requestController.abort(), REQUEST_TIMEOUT_MS);
+    let response;
+    try {
+      response = await fetch('/v1/turn', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${tokenEl.value.trim()}`,
+          'x-voice-input-format': 'wav'
+        },
+        body: requestBody,
+        signal: requestController.signal
+      });
+    } finally {
+      clearTimeout(requestTimeoutId);
+    }
 
     const responseBytes = new Uint8Array(await response.arrayBuffer());
 
@@ -385,7 +398,13 @@ async function stopAndSend() {
     // no catch of their own — without this, a network failure or malformed-audio decode
     // error becomes an unhandled rejection that clears the busy state via `finally` below
     // but never tells the user why the turn silently failed.
-    reportTurnError('NETWORK_ERROR', error.message, 'Check the connection to the bridge and try again.');
+    // WR-06: the AbortController above turns a hung backend into this same catch as an
+    // AbortError — surfaced as a distinct timeout state rather than a generic network error.
+    if (error.name === 'AbortError') {
+      reportTurnError('TIMEOUT', `No response from the bridge after ${REQUEST_TIMEOUT_MS}ms.`, 'The bridge may be stuck on a long turn. Try again.');
+    } else {
+      reportTurnError('NETWORK_ERROR', error.message, 'Check the connection to the bridge and try again.');
+    }
   } finally {
     isRecording = false;
     setBusy(false);

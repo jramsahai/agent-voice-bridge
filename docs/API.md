@@ -116,6 +116,36 @@ X-Voice-Audio-Present: 1
 <body: bytes 0-1 are the transcript, bytes 2-3 are the reply, bytes 4 onward are the audio segment>
 ```
 
+## Consuming the response body
+
+`POST /v1/turn` success responses carry **no body-length header at all** — no `Content-Length`, no other header stating the body's total size. The response head is written to the wire as soon as the transcript and reply are known, before speech synthesis starts, so the total body length is genuinely unknown at that moment: the audio byte count depends on TTS output that has not run yet. Node applies chunked `Transfer-Encoding` framing automatically in the absence of a body-length header, and the handler deliberately never sets one — setting either `Content-Length` or `Transfer-Encoding` by hand would defeat that automatic chunking.
+
+A client must implement three consequences of this:
+
+- Do not wait for a body-length header before starting to read the response — none is ever sent.
+- Do not compute remaining bytes from a body-length header — there is nothing to subtract from.
+- Read until the connection ends. The response is complete when the stream closes, not when some declared byte count is reached.
+
+### Consumption algorithm
+
+Read the response body incrementally, keyed to the two byte-count headers already on the wire (`X-Voice-Transcript-Bytes`, `X-Voice-Reply-Bytes`):
+
+1. Accumulate bytes until the transcript byte count is satisfied, then decode that span as the transcript.
+2. Continue accumulating until the reply byte count is satisfied, then decode that span as the reply. Both spans are small and bounded by text length — accumulating them fully before use is fine.
+3. If `X-Voice-Audio-Present` carries `1`, stream every subsequent byte straight into a playback or ring buffer as it arrives, rather than accumulating the whole reply in memory first.
+
+The two byte-count headers are **UTF-8 byte counts, not character or code-point counts**. A client must slice the response body by byte offset, never with a character-based string API — a multi-byte character in the transcript or reply would otherwise misalign every byte that follows it, in both the current segment and every segment after it.
+
+### The no-audio case
+
+When `X-Voice-Audio-Present` carries `0`, no audio segment follows the two text segments, and the body's total length equals `X-Voice-Transcript-Bytes` plus `X-Voice-Reply-Bytes` **exactly**. This exactly-equal case is a valid, complete response, not a truncated one — a client must not treat "no bytes after the text segments" as an error or a sign the connection dropped early.
+
+### Recommended read buffer size
+
+A read buffer of **4096 bytes** is recommended, though not required — a client may choose a different size without breaking the wire contract. The figure is grounded in the shipped audio shape: 16000 Hz, mono, 2 bytes per sample is **32000** bytes per second of audio, so a 4096-byte buffer is roughly 128 ms of audio per read. That is large enough to amortise per-read overhead, small enough that RAM footprint stays trivial on an embedded client, and small enough that playback can start after the first buffer rather than waiting for the whole reply.
+
+The maximum total reply a client must be prepared to stream through is the same 5-minute audio ceiling, in bytes, that bounds a request (`9600000` bytes — see the request byte-count ceiling above). A client must stream through that ceiling, never buffer the whole reply in memory to reach it.
+
 ## Client read timeout
 
 A client's HTTP read (inactivity) timeout — the maximum gap it tolerates between received bytes, never a total request-duration budget — must be configured to at least **300000 milliseconds** (5 minutes) to receive a `POST /v1/turn` response correctly. Applying this number as a total-duration cap instead of an inactivity gap produces different, wrong behavior: it must only ever be measured against the time since the last received byte, never against elapsed time since the request was sent.

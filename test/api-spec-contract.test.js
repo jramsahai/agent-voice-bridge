@@ -139,7 +139,12 @@ function postTurn(port, { body, headers = {} }) {
         const chunks = [];
         res.on('data', (chunk) => chunks.push(chunk));
         res.on('end', () => {
-          resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) });
+          resolve({
+            statusCode: res.statusCode,
+            headers: res.headers,
+            rawHeaders: res.rawHeaders,
+            body: Buffer.concat(chunks),
+          });
         });
       },
     );
@@ -552,3 +557,87 @@ test('docs/API.md states the published read-timeout floor and both stage ceiling
     `AGENT_TIMEOUT_MS (${AGENT_TIMEOUT_MS}) is missing from docs/API.md`,
   );
 });
+
+// =====================================================================================
+// Task 1 (06-05-PLAN.md): streaming consumption guidance — a POST /v1/turn success
+// response carries no body-length header of any kind, and docs/API.md must both say so and
+// prove it live. Reads res.rawHeaders (the flat, un-deduplicated wire array), not
+// res.headers (an object Node already flattens/overwrites duplicates into), so a duplicated
+// or later-overwritten header is visible to this assertion instead of silently collapsed —
+// same rationale as test/http-turn.test.js's assertWireHygiene.
+// =====================================================================================
+
+function assertNoBodyLengthHeader(response) {
+  const names = [];
+  for (let i = 0; i < response.rawHeaders.length; i += 2) {
+    names.push(response.rawHeaders[i].toLowerCase());
+  }
+  assert.ok(
+    !names.includes('content-length'),
+    'a /v1/turn success response must rely on chunked framing only — no body-length header of any kind may be present',
+  );
+}
+
+test('docs/API.md states in prose that no body-length header is sent on a /v1/turn response, and names chunked framing', () => {
+  assert.ok(
+    specText.toLowerCase().includes('no body-length header'),
+    'docs/API.md must state plainly that no body-length header is sent on a turn response',
+  );
+  assert.ok(specText.includes('chunked'), 'docs/API.md must name chunked framing as the mechanism this relies on');
+});
+
+test('docs/API.md documents the recommended read buffer size and the audio byte rate it is justified against', () => {
+  assert.ok(specText.includes('4096'), 'docs/API.md must state the recommended 4096-byte read buffer size');
+  assert.ok(
+    specText.includes('32000'),
+    'docs/API.md must state the 32000-bytes-per-second audio rate the buffer size is justified against',
+  );
+});
+
+test('docs/API.md states a body length exactly equal to transcript bytes plus reply bytes is a valid no-audio response, not truncated', () => {
+  assert.ok(
+    specText.toLowerCase().includes('not a truncated one'),
+    'docs/API.md must state the exactly-equal-length no-audio case is valid, not truncated',
+  );
+});
+
+test('a live audio-bearing 200 turn response carries no body-length header of any kind, proving the chunked-framing claim docs/API.md makes', async () => {
+  const config = buildTestConfig();
+  const adapters = buildTestAdapters();
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { Authorization: `Bearer ${TEST_CLIENT_TOKEN}`, [INPUT_FORMAT_HEADER]: 'pcm16' },
+    });
+    assert.equal(response.statusCode, 200);
+    assertNoBodyLengthHeader(response);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a live audio-disabled 200 turn response carries no body-length header of any kind either', async () => {
+  const config = buildTestConfig();
+  const adapters = buildTestAdapters();
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: {
+        Authorization: `Bearer ${TEST_CLIENT_TOKEN}`,
+        [INPUT_FORMAT_HEADER]: 'pcm16',
+        [WANT_AUDIO_HEADER]: WANT_AUDIO_DISABLED_TOKEN,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assertNoBodyLengthHeader(response);
+  } finally {
+    await closeServer(server);
+  }
+});
+

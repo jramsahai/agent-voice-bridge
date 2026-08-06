@@ -42,6 +42,8 @@ import {
 } from '../packages/shared/transport/negotiate.js';
 import { listSupportedFormats } from '../packages/shared/audio/format-registry.js';
 import { BACKEND_UP, BACKEND_DOWN } from '../packages/shared/health/backend-health-cache.js';
+import { MIN_CLIENT_READ_TIMEOUT_MS } from '../packages/shared/transport/read-timeout.js';
+import { TRANSCRIBE_TIMEOUT_MS, AGENT_TIMEOUT_MS } from '../packages/shared/adapters/stage-timeouts.js';
 import { makePcm16, makeCanonicalWav } from './helpers/fixtures.js';
 
 const specText = fs.readFileSync(new URL('../docs/API.md', import.meta.url), 'utf8');
@@ -527,4 +529,26 @@ test('a live GET /v1/health returns exactly three named backend lines whose valu
   } finally {
     await closeServer(server);
   }
+});
+
+// =====================================================================================
+// Task 2 (06-04-PLAN.md): the published minimum client read timeout (D-01/SPEC-02). Every
+// number is asserted by its string form derived from an imported constant, never a typed
+// literal — raising either stage ceiling in stage-timeouts.js fails this test until
+// docs/API.md's stated floor and its derivation both follow.
+// =====================================================================================
+
+test('docs/API.md states the published read-timeout floor and both stage ceilings it is derived from', () => {
+  assert.ok(
+    specText.includes(String(MIN_CLIENT_READ_TIMEOUT_MS)),
+    `MIN_CLIENT_READ_TIMEOUT_MS (${MIN_CLIENT_READ_TIMEOUT_MS}) is missing from docs/API.md`,
+  );
+  assert.ok(
+    specText.includes(String(TRANSCRIBE_TIMEOUT_MS)),
+    `TRANSCRIBE_TIMEOUT_MS (${TRANSCRIBE_TIMEOUT_MS}) is missing from docs/API.md`,
+  );
+  assert.ok(
+    specText.includes(String(AGENT_TIMEOUT_MS)),
+    `AGENT_TIMEOUT_MS (${AGENT_TIMEOUT_MS}) is missing from docs/API.md`,
+  );
 });

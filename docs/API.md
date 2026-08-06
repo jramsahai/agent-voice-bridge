@@ -116,6 +116,18 @@ X-Voice-Audio-Present: 1
 <body: bytes 0-1 are the transcript, bytes 2-3 are the reply, bytes 4 onward are the audio segment>
 ```
 
+## Client read timeout
+
+A client's HTTP read (inactivity) timeout — the maximum gap it tolerates between received bytes, never a total request-duration budget — must be configured to at least **300000 milliseconds** (5 minutes) to receive a `POST /v1/turn` response correctly. Applying this number as a total-duration cap instead of an inactivity gap produces different, wrong behavior: it must only ever be measured against the time since the last received byte, never against elapsed time since the request was sent.
+
+This 300000 ms floor is derived, not chosen. The response head and its first byte are written only after both the transcribe stage (ceiling 120000 ms) and the agent stage (ceiling 180000 ms) resolve — 120000 + 180000 = 300000. The speech (TTS) stage runs only after that first byte is already on the wire, so it is deliberately outside this floor.
+
+A client configured at or above 300000 ms waits out any turn the server is still legally allowed to be working on. A client configured below it can abort a turn the server is still legitimately processing — and because the server never learns the client gave up, there is no server-side error to correlate the failure against. The symptom is an intermittent client-side timeout on long audio or a long reply, against a clean server log.
+
+Real turns measured against live backends took 5,438 ms and 10,274 ms to first byte (a short reply and a 55-second reply, respectively). Cite these as the **typical** case, not the floor: a tighter timeout works almost always, which is exactly what makes a too-tight configuration rare, confusing, and worth over-provisioning against.
+
+The reference command-line client (`apps/voice-cli/cli.js`) ships with its default read timeout set to this same published floor, so it is compliant with the specification it ships alongside. A client may deliberately tighten its timeout below the floor when a human is present to retry — the browser client does exactly this, trading strict compliance for a snappier UI under human supervision.
+
 ## GET /v1/capabilities
 
 `GET /v1/capabilities` is the pre-first-turn discovery route: a client calls it before attempting its first turn to learn what the service supports. It requires the same bearer token, `Host`, and `Origin` gate as `POST /v1/turn`, but draws from a separate, more generous discovery rate-limit bucket, so polling it never competes with the turn endpoint's tighter budget. It is **not** covered by the turn lock — it stays answerable while a turn is in flight.

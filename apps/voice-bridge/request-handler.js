@@ -112,6 +112,25 @@ function normalizeHostHeader(value) {
   return value.toLowerCase().replace(/:(80|443)$/, '');
 }
 
+// WINDOWS.md id 5: one hostname string could not serve both deployment shapes at once. A
+// Tailscale-Serve-fronted browser arrives on port 443, so its Host carries no port suffix; a
+// TLS-less client (the reference CLI, and the ESP32 handheld next) addresses the bridge
+// directly on its own port and sends that port in the Host header verbatim. security.expectedHost
+// is therefore a list, and an entry MAY carry an explicit non-default port suffix — that is the
+// entire point. Because normalizeHostHeader strips only `:80`/`:443`, such an entry normalizes
+// to itself and matches the device's literal Host with no change to the function above; an entry
+// without a suffix keeps matching a Serve-fronted request exactly as before. Matching stays exact
+// normalized equality, one entry at a time — no wildcard, no pattern, no prefix/suffix matching —
+// so widening the key can never admit a host the operator did not literally type.
+function buildExpectedHosts(value) {
+  // An absent/empty value yields an empty Set, i.e. host checking disabled — the same posture
+  // the previous `?? null` gave. validateConfig refuses the empty-array shape at startup and
+  // server.js exits 1 on any error, so this is not a newly reachable fail-open surface.
+  if (value === null || value === undefined) return new Set();
+  const entries = Array.isArray(value) ? value : [value];
+  return new Set(entries.map(normalizeHostHeader));
+}
+
 // Returns a routed, injectable HTTP handler suitable for http.createServer. Everything the
 // legacy server.js held at module scope (config-derived constants, the rate-limit bucket
 // Map) moves into this factory's closure, so two handler instances in one test process
@@ -129,8 +148,8 @@ export function createRequestHandler({
   const RATE_LIMIT_WINDOW_MS = config.security?.rateLimitWindowMs ?? 15_000;
   const RATE_LIMIT_MAX_REQUESTS = config.security?.rateLimitMaxRequests ?? 6;
   const allowedOrigins = new Set(config.security?.allowedOrigins ?? []);
-  const expectedHost = config.security?.expectedHost ?? null;
-  // Built once at factory-init time, alongside allowedOrigins/expectedHost above — never
+  const expectedHosts = buildExpectedHosts(config.security?.expectedHost);
+  // Built once at factory-init time, alongside allowedOrigins/expectedHosts above — never
   // recomputed per request, since config is static for the process lifetime. authEnabled
   // false is the generalized auth-disabled escape hatch (D-04, locked): every request
   // resolves to the single fixed ANONYMOUS_CLIENT_NAME identity, exactly as an empty
@@ -197,7 +216,9 @@ export function createRequestHandler({
     // that same fixed-key bucket here closes the gap where a mismatched Host/Origin could be
     // sent an unbounded number of times without ever being rate-limited, mirroring the bad-
     // bearer-token path below.
-    if (expectedHost && normalizeHostHeader(host) !== normalizeHostHeader(expectedHost)) {
+    // An absent or non-string Host normalizes to a non-string, which equals no Set entry, so
+    // it is still rejected — unchanged from the single-string compare this replaced.
+    if (expectedHosts.size && !expectedHosts.has(normalizeHostHeader(host))) {
       rejectWithFailedAuthThrottle(res, sendError, 'FORBIDDEN');
       return { ok: false };
     }

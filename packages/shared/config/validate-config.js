@@ -118,8 +118,21 @@ export function validateConfig(config) {
   }
 
   // 7. expectedHost / allowedOrigins / rate-limit numbers
-  if (config.security.expectedHost !== undefined && config.security.expectedHost !== null) {
-    if (typeof config.security.expectedHost !== 'string' || config.security.expectedHost.length === 0) {
+  // expectedHost accepts one hostname (the original shape, still valid and unchanged) or a
+  // list of them, so a single config can admit both a Serve-fronted request (no port suffix)
+  // and a TLS-less client addressing the bridge directly on a non-default port. Every invalid
+  // shape is a data error, never a throw — this module's recorded convention.
+  const expectedHost = config.security.expectedHost;
+  if (expectedHost !== undefined && expectedHost !== null) {
+    if (Array.isArray(expectedHost)) {
+      if (expectedHost.length === 0) {
+        errors.push('security.expectedHost must not be an empty array — omit the key to disable host checking');
+      } else if (expectedHost.some((entry) => typeof entry !== 'string')) {
+        errors.push('security.expectedHost array entries must all be strings');
+      } else if (expectedHost.some((entry) => entry.length === 0)) {
+        errors.push('security.expectedHost array entries must all be non-empty strings');
+      }
+    } else if (typeof expectedHost !== 'string' || expectedHost.length === 0) {
       errors.push('security.expectedHost must be a non-empty string when present');
     }
   }

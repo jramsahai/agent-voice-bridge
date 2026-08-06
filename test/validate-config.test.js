@@ -201,7 +201,48 @@ test('a config carrying the pre-Phase-4 singular security.token key yields an er
   assert.ok(errors.some((e) => e.includes('security.clients')));
 });
 
-// --- 7. allowedOrigins / rate-limit numbers ---
+// --- 7. expectedHost / allowedOrigins / rate-limit numbers ---
+
+test('an expectedHost array of two non-empty hostnames is accepted with no errors', () => {
+  const config = withMutation((c) => {
+    c.security.expectedHost = ['device.example.ts.net', 'device.example.ts.net:4318'];
+  });
+  assert.deepEqual(validateConfig(config), []);
+});
+
+test('an empty expectedHost array produces an error naming security.expectedHost', () => {
+  const config = withMutation((c) => {
+    c.security.expectedHost = [];
+  });
+  const errors = validateConfig(config);
+  assert.ok(errors.some((e) => e.includes('security.expectedHost')));
+});
+
+test('an expectedHost array carrying a non-string entry produces an error naming security.expectedHost', () => {
+  const config = withMutation((c) => {
+    c.security.expectedHost = ['device.example.ts.net', 42];
+  });
+  const errors = validateConfig(config);
+  assert.ok(errors.some((e) => e.includes('security.expectedHost')));
+});
+
+test('an expectedHost array carrying an empty-string entry produces an error naming security.expectedHost', () => {
+  const config = withMutation((c) => {
+    c.security.expectedHost = ['device.example.ts.net', ''];
+  });
+  const errors = validateConfig(config);
+  assert.ok(errors.some((e) => e.includes('security.expectedHost')));
+});
+
+test('a non-empty-string expectedHost is still rejected the same way — the single-host shape is unchanged', () => {
+  for (const bad of ['', 42, {}]) {
+    const config = withMutation((c) => {
+      c.security.expectedHost = bad;
+    });
+    const errors = validateConfig(config);
+    assert.ok(errors.some((e) => e.includes('security.expectedHost')));
+  }
+});
 
 test('a non-array or non-string-array allowedOrigins produces an error', () => {
   for (const bad of ['not-an-array', ['ok', 42], {}]) {

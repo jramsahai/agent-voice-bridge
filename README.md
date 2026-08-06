@@ -164,7 +164,10 @@ Example shape:
       "browser": "replace-with-the-browser-secret",
       "handheld": "replace-with-the-handheld-secret"
     },
-    "expectedHost": "your-device.your-tailnet.ts.net",
+    "expectedHost": [
+      "your-device.your-tailnet.ts.net",
+      "your-device.your-tailnet.ts.net:4318"
+    ],
     "allowedOrigins": [
       "https://your-device.your-tailnet.ts.net"
     ],
@@ -173,6 +176,12 @@ Example shape:
   }
 }
 ```
+
+`security.expectedHost` also still accepts a plain string (one host) — that shape is unchanged.
+The list form exists so one configuration can serve both a Tailscale-Serve-fronted browser
+(port 443, so the `Host` header carries no port suffix) and a TLS-less client reaching the
+bridge directly on its own port, which sends that port in `Host` verbatim and therefore needs
+its own entry carrying the suffix.
 
 ## Tailscale deployment model
 

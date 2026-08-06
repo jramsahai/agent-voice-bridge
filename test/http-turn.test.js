@@ -273,6 +273,41 @@ test('a disallowed host and a disallowed origin both return 403 with x-error-cod
   }
 });
 
+// WINDOWS.md id 5: one expectedHost value must admit both deployment shapes at once — a
+// Serve-fronted browser (port 443, so no port suffix on the wire) and a TLS-less client
+// addressing the bridge directly on its own port (which sends that port in Host verbatim) —
+// with no config edit between them. Same server instance, same config, three requests.
+test('one array-valued expectedHost admits both a bare hostname and a hostname:port Host, and still refuses an unrelated one', async () => {
+  const config = buildTestConfig({ expectedHost: ['expected.example', 'expected.example:4318'] });
+  const adapters = makeFakeAdapters({
+    transcript: 'hi',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+
+  try {
+    const port = server.address().port;
+    const send = (hostHeader) =>
+      postTurn(port, {
+        body: makePcm16({ samples: 10 }),
+        headers: { 'X-Voice-Input-Format': 'pcm16', Host: hostHeader },
+      });
+
+    const serveFronted = await send('expected.example');
+    const directTlsLess = await send('expected.example:4318');
+    const unrelated = await send('wrong-host.example');
+
+    assert.equal(serveFronted.statusCode, 200, 'the Serve-fronted Host (no port suffix) must be admitted');
+    assert.equal(directTlsLess.statusCode, 200, 'the direct TLS-less Host (explicit port) must be admitted by the same config');
+    assert.equal(unrelated.statusCode, 403, 'a host matching no allowlist entry must still be refused');
+    assert.equal(unrelated.headers['x-error-code'], 'FORBIDDEN');
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test('exceeding the rate limit returns 429 with x-error-code RATE_LIMITED', async () => {
   const config = buildTestConfig({ rateLimitMaxRequests: 1 });
   const adapters = makeFakeAdapters({ transcript: 'hi', reply: 'ok', wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }) });

@@ -41,8 +41,8 @@ Then edit:
 
 - `openclaw.sessionId`
 - `openclaw.command` if the CLI is not on the server process's `PATH` (e.g. `/opt/homebrew/bin/openclaw`)
-- `security.token`
-- `security.expectedHost`
+- `security.clients` — a map of client name to token, one entry per device; the shipped placeholder tokens are rejected at startup
+- `security.expectedHost` — one hostname (a plain string, still accepted) or a list of hostnames. A client reaching the bridge directly on a non-default port needs its own entry carrying that port, because the `Host` header it sends carries the port.
 - `security.allowedOrigins`
 - `tts.voice` if you want a different Kokoro voice
 

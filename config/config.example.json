@@ -24,7 +24,10 @@
       "browser": "replace-with-the-browser-secret",
       "handheld": "replace-with-the-handheld-secret"
     },
-    "expectedHost": "your-device.your-tailnet.ts.net",
+    "expectedHost": [
+      "your-device.your-tailnet.ts.net",
+      "your-device.your-tailnet.ts.net:4318"
+    ],
     "allowedOrigins": [
       "https://your-device.your-tailnet.ts.net"
     ],

@@ -1045,3 +1045,116 @@ test('the README config extractor throws when handed README-shaped text with no 
     'extractConfigExampleFromReadmeText must throw when no fenced json block follows the heading',
   );
 });
+
+// =====================================================================================
+// 06-04 T3/T5 gap closure (/gsd-validate-phase): two prose facts the phase carried as
+// human_judgment with no persisted assertion. Both are region-scoped for the reason spelled
+// out above consumingResponseBodySection — every string below occurs elsewhere in the
+// document for a different reason, so a whole-document includes() would pass even with the
+// fact deleted from the section that must carry it.
+// =====================================================================================
+
+// Slices from a heading to the next top-level heading. An h3 heading is a valid start (its
+// region simply runs to the following h2), but only an h2 ever terminates a region.
+function sectionUnderHeading(docText, headingText) {
+  const headingIndex = docText.indexOf(headingText);
+  assert.ok(headingIndex !== -1, `docs/API.md is missing its '${headingText}' heading`);
+  const afterHeading = docText.slice(headingIndex + headingText.length);
+  const nextHeadingOffset = afterHeading.search(/\n## /);
+  assert.ok(nextHeadingOffset !== -1, `expected a top-level heading after '${headingText}'`);
+  return afterHeading.slice(0, nextHeadingOffset);
+}
+
+const SEGMENT_ORDER_CLAIM = 'The segment order is fixed and never varies';
+
+function assertFramingSectionFixesSegmentOrder(section) {
+  assert.ok(
+    section.includes(SEGMENT_ORDER_CLAIM),
+    'the Response body framing section must state that the segment order is fixed and never varies — a client that cannot rely on the order cannot slice the body at all',
+  );
+}
+
+test('the Response body framing section states the segment order is fixed and never varies', () => {
+  const section = sectionUnderHeading(specText, '### Response body framing');
+  assertFramingSectionFixesSegmentOrder(section);
+
+  // Negative-case proof through the identical assertion path.
+  const mutated = section.replace(SEGMENT_ORDER_CLAIM, '');
+  assert.notEqual(mutated, section, 'sanity: the mutation must have actually removed the claim');
+  assert.throws(
+    () => assertFramingSectionFixesSegmentOrder(mutated),
+    'the check must throw once the fixed-segment-order claim is removed from the section',
+  );
+});
+
+// The two line-based discovery bodies are the only routes whose parse rule is order-independent.
+// Each must carry that rule in its own section — a reader implementing one route never reads the
+// other's prose.
+for (const { heading, phrase } of [
+  { heading: '## GET /v1/capabilities', phrase: 'must not depend on line order' },
+  { heading: '## GET /v1/health', phrase: 'read by key, never by line position' },
+]) {
+  test(`${heading} instructs parse-by-key rather than by line position`, () => {
+    const section = sectionUnderHeading(specText, heading);
+    assert.ok(
+      /by key/.test(section),
+      `${heading} must instruct a client to parse its body by key`,
+    );
+    assert.ok(
+      section.includes(phrase),
+      `${heading} must state that line order is not a promise ('${phrase}')`,
+    );
+  });
+}
+
+const BOUNDARY_FAILURE_CLAIM =
+  'there is no server-side error to correlate the failure against';
+
+function assertTimeoutSectionStatesBoundaryFailure(section) {
+  assert.ok(
+    section.includes('can abort a turn the server is still legitimately processing'),
+    'the Client read timeout section must state that a too-tight client aborts a turn the server is still working on',
+  );
+  assert.ok(
+    section.includes(BOUNDARY_FAILURE_CLAIM),
+    'the Client read timeout section must state that the failure leaves no server-side error to correlate against — the detail that makes a too-tight timeout hard to diagnose',
+  );
+}
+
+test('the Client read timeout section states the boundary failure mode', () => {
+  const section = sectionUnderHeading(specText, '## Client read timeout');
+  assertTimeoutSectionStatesBoundaryFailure(section);
+
+  const mutated = section.replace(BOUNDARY_FAILURE_CLAIM, '');
+  assert.notEqual(mutated, section, 'sanity: the mutation must have actually removed the claim');
+  assert.throws(
+    () => assertTimeoutSectionStatesBoundaryFailure(mutated),
+    'the check must throw once the no-correlating-error consequence is removed from the section',
+  );
+});
+
+test('the Client read timeout section cites its measured time-to-first-byte figures as typical, not as the floor', () => {
+  const section = sectionUnderHeading(specText, '## Client read timeout');
+  for (const measurement of ['5,438 ms', '10,274 ms']) {
+    assert.ok(
+      section.includes(measurement),
+      `the Client read timeout section must cite the measured ${measurement} time to first byte`,
+    );
+  }
+  // The framing matters more than the figures: presented as a floor rather than a typical
+  // case, these numbers would argue a client for a ~10s timeout — 30x under the real floor.
+  assert.ok(
+    section.includes('the **typical** case, not the floor'),
+    'the measured figures must be framed as the typical case, explicitly not as the floor',
+  );
+});
+
+// 06-01 D5 was verified once by hand (`grep -c 'docs/API.md' README.md`) and never persisted.
+// The published contract is only discoverable if the repo root still points at it.
+test('README.md links to the published API specification', () => {
+  const readmeText = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  assert.ok(
+    readmeText.includes('docs/API.md'),
+    'README.md must link to docs/API.md so a reader arriving at the repo root finds the published contract',
+  );
+});

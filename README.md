@@ -147,15 +147,18 @@ Example shape:
     "provider": "kokoro-onnx",
     "command": "tts-kokoro",
     "serviceUrl": "http://127.0.0.1:4319",
-    "voice": "af_heart"
+    "voice": "af_heart",
+    "voices": ["af_heart"]
   },
   "security": {
-    "token": "replace-with-a-shared-secret",
+    "clients": {
+      "browser": "replace-with-the-browser-secret",
+      "handheld": "replace-with-the-handheld-secret"
+    },
     "expectedHost": "your-device.your-tailnet.ts.net",
     "allowedOrigins": [
       "https://your-device.your-tailnet.ts.net"
     ],
-    "maxJsonBytes": 2000000,
     "rateLimitWindowMs": 15000,
     "rateLimitMaxRequests": 6
   }

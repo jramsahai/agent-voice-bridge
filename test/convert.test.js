@@ -324,6 +324,11 @@ const HTTP_SOCKET_EXEMPT_FILES = new Set([
   // Phase 5 (05-01): test/voice-cli.test.js legitimately opens a real loopback socket to
   // prove the reference CLI client against a live createRequestHandler server.
   path.join(repoRoot, 'test', 'voice-cli.test.js'),
+  // Phase 6 (06-01): test/api-spec-contract.test.js legitimately opens a real loopback
+  // socket to prove docs/API.md's published envelope against a live createRequestHandler
+  // server — same hermetic in-process pattern as the three files above, no whisper/OpenClaw/
+  // Kokoro binary and no network beyond this file's own loopback socket.
+  path.join(repoRoot, 'test', 'api-spec-contract.test.js'),
 ]);
 
 test('no source file this phase created references a network client, a fetch call, or a models directory', () => {

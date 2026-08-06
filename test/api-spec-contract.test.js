@@ -861,20 +861,48 @@ test('test/http-turn.test.js still contains the five wire-hygiene test names thi
 // copied, or restated as a literal anywhere below. Closes 06-VERIFICATION.md Anti-Patterns
 // README.md:152-161 / 06-REVIEW.md CR-03.
 //
-// RED-phase stubs (06-06-PLAN.md Task 3, tdd="true"): both throw until the GREEN commit
-// implements them, so the tests below fail for the right reason before implementation exists.
 // =====================================================================================
 
-function extractConfigExampleFromReadmeText() {
-  throw new Error('extractConfigExampleFromReadmeText: not implemented');
+// Extracts and parses the first fenced json block that follows README.md's '## Configuration'
+// heading. Takes the doc text as a parameter — not a disk read — so a fixture with no fenced
+// block can be driven through the identical extraction path (the extractor-throws test below).
+// Asserts both that the heading exists and that a fenced json block follows it, so a future
+// README restructure that removes the example fails this guard instead of silently skipping it.
+function extractConfigExampleFromReadmeText(readmeText) {
+  const configSectionIndex = readmeText.indexOf('## Configuration');
+  assert.ok(configSectionIndex !== -1, "README.md is missing its '## Configuration' heading");
+  const afterHeading = readmeText.slice(configSectionIndex);
+  const match = afterHeading.match(/```json\n([\s\S]*?)```/);
+  assert.ok(match, "README.md's '## Configuration' section has no fenced json block");
+  return JSON.parse(match[1]);
 }
 
 function readmeConfigExample() {
-  throw new Error('readmeConfigExample: not implemented');
+  const readmeText = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  return extractConfigExampleFromReadmeText(readmeText);
 }
 
-function collectKeyPaths() {
-  throw new Error('collectKeyPaths: not implemented');
+// Flattens a parsed config object into a sorted array of dotted key paths, for the
+// README-subset-of-template comparison. Arrays are treated as leaves — their contents are
+// values, not schema. security.clients is also treated as a leaf: its own keys are
+// operator-chosen client names ('browser', 'handheld', ...), not schema keys, so descending
+// into them would wrongly compare client names as if they were config paths.
+function isPlainObjectForKeyPaths(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function collectKeyPaths(value, prefix = '') {
+  const paths = [];
+  for (const key of Object.keys(value).sort()) {
+    const fullPath = prefix ? `${prefix}.${key}` : key;
+    const child = value[key];
+    if (fullPath === 'security.clients' || !isPlainObjectForKeyPaths(child)) {
+      paths.push(fullPath);
+    } else {
+      paths.push(...collectKeyPaths(child, fullPath));
+    }
+  }
+  return paths;
 }
 
 test("README.md's configuration example produces the same validateConfig error set as config/config.example.json", () => {

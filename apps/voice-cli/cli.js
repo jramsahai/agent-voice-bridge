@@ -838,14 +838,14 @@ export async function runCliTurn({
     return EXIT_CODES.INPUT_INVALID;
   }
 
+  let pcmBuffer;
   try {
     assertConformingWav(wavBuffer);
+    pcmBuffer = wavToPcm(wavBuffer);
   } catch (error) {
     reportError(`error: ${error.message}`);
     return EXIT_CODES.INPUT_INVALID;
   }
-
-  const pcmBuffer = wavToPcm(wavBuffer);
 
   // Resolved before the request is issued, not after (the buffering implementation resolved
   // this only once a full body was already in hand) — the sink needs a target path the moment
@@ -972,7 +972,15 @@ export async function main(argv) {
 // starts a turn or calls process.exit(). main() itself returns the exit code rather than
 // calling process.exit() directly, so a test can drive it in-process and observe the code.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main(process.argv.slice(2)).then((code) => {
+  const cliArgv = process.argv.slice(2);
+  main(cliArgv).then((code) => {
     process.exit(code);
+  }).catch((error) => {
+    // Defense-in-depth: every known failure path inside main()/runCliTurn() already resolves
+    // to an EXIT_CODES.* value rather than a rejection. This catch exists only so an
+    // unanticipated rejection (a future code path that forgets its own try/catch) still exits
+    // cleanly with a token-redacted message instead of an unhandled-rejection crash.
+    console.error(redactToken(`error: unexpected failure: ${error.message}`, extractFlagToken(cliArgv)));
+    process.exit(EXIT_CODES.HTTP_ERROR);
   });
 }

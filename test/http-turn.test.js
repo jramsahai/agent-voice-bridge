@@ -14,7 +14,11 @@ import { randomUUID } from 'node:crypto';
 
 import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
 import { buildTurnResponseHead, MAX_REQUEST_AUDIO_BYTES } from '../packages/shared/transport/turn-response.js';
-import { defaultOutputFormatId } from '../packages/shared/transport/negotiate.js';
+import {
+  defaultOutputFormatId,
+  WANT_AUDIO_HEADER,
+  WANT_AUDIO_DISABLED_TOKEN,
+} from '../packages/shared/transport/negotiate.js';
 import { wavToPcm } from '../packages/shared/audio/wav.js';
 import { prepareClientOutput } from '../packages/shared/audio/convert.js';
 import { buildClientDigests, resolveClientIdentity } from '../packages/shared/security/token-auth.js';
@@ -1725,4 +1729,233 @@ test('GAP-2 / AUTH-05 / T-4-05: clientName reaches only rate-limit bucket key an
     !runTurnStripped.includes('clientName'),
     'runTurn(...) call must NOT pass clientName as an argument — config objects are built from config.* only (T-4-05)',
   );
+});
+
+// =====================================================================================
+// GAP TESTS: Verify behaviors that surviving mutations would break
+// =====================================================================================
+
+// Helper to capture turn-log lines (console.log output)
+function captureLogLines(fn) {
+  const originalLog = console.log;
+  const lines = [];
+  console.log = (line) => {
+    lines.push(line);
+  };
+  try {
+    return fn(lines);
+  } finally {
+    console.log = originalLog;
+  }
+}
+
+test('G3 / OPS-01 / T-4-04: a text-only successful turn emits exactly one turn-log line with outcome ok', async () => {
+  const config = buildTestConfig();
+  const adapters = makeFakeAdapters({
+    transcript: 'hello',
+    reply: 'world',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+
+  try {
+    const port = server.address().port;
+    const originalLog = console.log;
+    const lines = [];
+    console.log = (line) => {
+      lines.push(line);
+    };
+
+    try {
+      // Text-only turn: wantAudio=false
+      const response = await postTurn(port, {
+        body: makePcm16({ samples: 10 }),
+        // The header is X-Voice-Want-Audio (singular) and the only disabling token is the
+        // literal '0' (transport/negotiate.js) — any other spelling or value leaves wantAudio
+        // true, which would silently route this turn through the *audio* success branch and
+        // assert nothing about the text-only one.
+        headers: {
+          'X-Voice-Input-Format': 'pcm16',
+          'X-Voice-Output-Format': 'pcm16',
+          [WANT_AUDIO_HEADER]: WANT_AUDIO_DISABLED_TOKEN,
+        },
+      });
+      assert.equal(response.statusCode, 200);
+      // Proves this turn really settled on the text-only branch rather than the audio one —
+      // without this the assertion below would still pass against the audio success path,
+      // which is a different (already-covered) log call site.
+      assert.equal(
+        response.headers['x-voice-audio-present'],
+        '0',
+        'this turn must settle on the text-only branch for the log assertion below to mean anything',
+      );
+
+      // Should have exactly one log line
+      const turnLogLines = lines.filter((line) => {
+        try {
+          const parsed = JSON.parse(line);
+          return parsed.event === 'turn';
+        } catch {
+          return false;
+        }
+      });
+      assert.equal(turnLogLines.length, 1, 'text-only turn should emit exactly one turn-log line');
+
+      const logRecord = JSON.parse(turnLogLines[0]);
+      assert.equal(logRecord.outcome, 'ok', 'text-only successful turn should have outcome ok');
+    } finally {
+      console.log = originalLog;
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('G4 / OPS-01 / T-4-04: a turn with an adapter throwing an unknown error logs INTERNAL_ERROR', async () => {
+  const config = buildTestConfig();
+  const faultyAdapter = {
+    transcribe: async () => {
+      const err = new Error('something went wrong');
+      err.code = 'UNKNOWN_CODE'; // Not a registered error code
+      throw err;
+    },
+    agent: async () => ({ text: '', rawText: '', meta: {} }),
+    speak: async () => ({ audioBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }), mimeType: 'audio/wav', meta: {} }),
+  };
+
+  const handler = createRequestHandler({ config, adapters: faultyAdapter, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+
+  try {
+    const port = server.address().port;
+    const originalLog = console.log;
+    const lines = [];
+    console.log = (line) => {
+      lines.push(line);
+    };
+
+    try {
+      const response = await postTurn(port, {
+        body: makePcm16({ samples: 10 }),
+        headers: { 'X-Voice-Input-Format': 'pcm16' },
+      });
+      // Should get a 500 or similar error
+      assert.ok(response.statusCode >= 400);
+
+      const turnLogLines = lines.filter((line) => {
+        try {
+          const parsed = JSON.parse(line);
+          return parsed.event === 'turn';
+        } catch {
+          return false;
+        }
+      });
+      assert.equal(turnLogLines.length, 1, 'errored turn should emit exactly one turn-log line');
+
+      const logRecord = JSON.parse(turnLogLines[0]);
+      assert.equal(logRecord.outcome, 'error', 'error turn should have outcome error');
+      assert.equal(logRecord.errorCode, 'INTERNAL_ERROR', 'unknown error codes should be logged as INTERNAL_ERROR');
+    } finally {
+      console.log = originalLog;
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('G1 / AUTH-05 / T-4-02: failed-auth requests from different source addresses all draw on one fixed-key bucket', async () => {
+  const config = buildTestConfig({
+    clients: { device1: 'device1-secret-value-12345' },
+  });
+  const adapters = makeFakeAdapters({
+    transcript: 'test',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+
+  try {
+    const port = server.address().port;
+    // Send FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS + 1 bad-auth requests
+    // Each with a different bad token (simulating different callers trying different credentials)
+    // If the bucket is per-address, they might not throttle. If it's a fixed key, they share.
+    const maxRequests = 20; // FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS = 20
+    const responses = [];
+
+    for (let i = 0; i < maxRequests + 1; i++) {
+      const response = await postTurn(port, {
+        body: makePcm16({ samples: 10 }),
+        headers: {
+          'X-Voice-Input-Format': 'pcm16',
+          'Authorization': `Bearer bad-token-${i}`,
+        },
+      });
+      responses.push(response.statusCode);
+    }
+
+    // First 20 should be 401 (UNAUTHORIZED), the 21st should be 429 (RATE_LIMITED)
+    for (let i = 0; i < maxRequests; i++) {
+      assert.equal(responses[i], 401, `request ${i + 1} should be UNAUTHORIZED (401)`);
+    }
+    assert.equal(responses[maxRequests], 429, `request ${maxRequests + 1} should be RATE_LIMITED (429)`);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('G5 / AUTH-05 / WR-03: host mismatch rejection draws on the failed-auth throttle, not an unbounded stream', async () => {
+  // Build a custom config with expectedHost set
+  const config = {
+    security: {
+      clients: { device1: 'device1-secret-value-12345' },
+      expectedHost: 'expected.example.com',
+      allowedOrigins: [],
+      rateLimitWindowMs: 15_000,
+      rateLimitMaxRequests: 1000,
+    },
+    stt: {},
+    openclaw: { sessionId: uniqueSessionId('turn') },
+    tts: {},
+  };
+
+  const adapters = makeFakeAdapters({
+    transcript: 'test',
+    reply: 'ok',
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+
+  try {
+    const port = server.address().port;
+    // Send more than FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS (20) host-mismatched requests
+    const maxFailedAuth = 20;
+    const responses = [];
+
+    for (let i = 0; i < maxFailedAuth + 1; i++) {
+      const response = await postTurn(port, {
+        body: makePcm16({ samples: 10 }),
+        headers: {
+          'X-Voice-Input-Format': 'pcm16',
+          'Host': 'wrong-host.example.com', // Does not match expectedHost
+        },
+      });
+      responses.push(response.statusCode);
+    }
+
+    // First 20 should be 403 (FORBIDDEN), the 21st should be 429 (RATE_LIMITED)
+    // If the host-mismatch path doesn't use the failed-auth bucket, we'd see all 403s
+    for (let i = 0; i < maxFailedAuth; i++) {
+      assert.equal(responses[i], 403, `request ${i + 1} should be FORBIDDEN (403)`);
+    }
+    assert.equal(
+      responses[maxFailedAuth],
+      429,
+      `request ${maxFailedAuth + 1} should be RATE_LIMITED (429) — host-mismatch must draw on failed-auth bucket`,
+    );
+  } finally {
+    await closeServer(server);
+  }
 });

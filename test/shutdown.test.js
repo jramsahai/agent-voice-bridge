@@ -280,3 +280,56 @@ test('WR-02: a controller added to the in-flight set after the first abort pass 
   assert.equal(server.closeAllConnectionsCallCount, 1);
   assert.deepEqual(exitFn.calls, [1]);
 });
+
+test('G7 / OPS-04: the timeout established inside shutdown() is explicitly cleared, leaving no pending timers', async () => {
+  // This test injects wrapped setTimeout/clearTimeout to track calls and verify the timer is cleared.
+  // We must restore the originals in a finally so we don't leave stray globals.
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+
+  const timeoutCalls = [];
+  const clearTimeoutCalls = [];
+
+  global.setTimeout = function wrappedSetTimeout(fn, ms) {
+    const id = originalSetTimeout(fn, ms);
+    timeoutCalls.push({ id, ms });
+    return id;
+  };
+
+  global.clearTimeout = function wrappedClearTimeout(id) {
+    clearTimeoutCalls.push(id);
+    return originalClearTimeout(id);
+  };
+
+  try {
+    const server = makeFakeServer({ cooperative: true });
+    const processRef = makeFakeProcess();
+    const exitFn = makeFakeExit();
+    const inFlightControllers = new Set();
+
+    const { shutdown } = installShutdownHandlers({
+      server,
+      inFlightControllers,
+      processRef,
+      exitFn,
+      timeoutMs: 100,
+    });
+
+    await shutdown('SIGTERM');
+
+    // At least one setTimeout should have been called with the timeoutMs value
+    assert.ok(timeoutCalls.length > 0, 'shutdown() should call setTimeout for the timeout');
+    assert.ok(timeoutCalls.some((call) => call.ms === 100), 'one setTimeout call should use the supplied timeoutMs (100)');
+
+    // clearTimeout should have been called with at least one of those timer IDs
+    assert.ok(clearTimeoutCalls.length > 0, 'shutdown() must call clearTimeout to avoid leaving a pending timer');
+
+    // At least one of the setTimeout calls should be cleared
+    const setTimeoutIds = timeoutCalls.map((call) => call.id);
+    const anyTimerCleared = clearTimeoutCalls.some((id) => setTimeoutIds.includes(id));
+    assert.ok(anyTimerCleared, 'at least one setTimeout ID should be passed to clearTimeout');
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+  }
+});

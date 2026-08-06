@@ -130,3 +130,14 @@ test('two calls in the same tick emit two separate lines', () => {
     assert.notEqual(lines[0], lines[1]);
   });
 });
+
+test('G6 / OPS-01 / WR-05: logTurnCompletion with durationsMs: null does not throw and emits all null durations', () => {
+  captureLog((lines) => {
+    assert.doesNotThrow(() => {
+      logTurnCompletion({ client: 'alpha', outcome: TURN_OUTCOMES.OK, durationsMs: null });
+    });
+    assert.equal(lines.length, 1);
+    const parsed = JSON.parse(lines[0]);
+    assert.deepEqual(parsed.durationsMs, { transcribe: null, agent: null, speak: null });
+  });
+});

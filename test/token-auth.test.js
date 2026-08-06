@@ -114,3 +114,26 @@ test('GAP-1 / AUTH-03 / T-4-01: resolveClientIdentity loop compares every candid
   assert.ok(!surviving.includes('return'), 'loop body must NOT contain return statement (timing side-channel)');
   assert.ok(!surviving.includes('break'), 'loop body must NOT contain break statement (timing side-channel)');
 });
+
+test('G2 / AUTH-03 / T-4-01: resolveClientIdentity loop uses timingSafeEqual (not plain equality) and imports node:crypto', () => {
+  const TOKEN_AUTH_SOURCE_URL = new URL('../packages/shared/security/token-auth.js', import.meta.url);
+  const source = fs.readFileSync(TOKEN_AUTH_SOURCE_URL, 'utf8');
+
+  // The import of timingSafeEqual must exist in the module
+  const loopStartMarker = 'for (const [name, candidateDigest] of clientDigests) {';
+  const loopEndMarker = '  }';
+  const contextMarker = '  }\n  return matched;';
+
+  const loopStartIndex = source.indexOf(loopStartMarker);
+  const contextIndex = source.indexOf(contextMarker);
+  const loopBodyStart = loopStartIndex + loopStartMarker.length;
+  const loopBodyEnd = contextIndex + loopEndMarker.length;
+  const loopBody = source.slice(loopBodyStart, loopBodyEnd);
+
+  // Check that timingSafeEqual is used in the loop
+  assert.ok(loopBody.includes('timingSafeEqual('), 'loop body must use timingSafeEqual() to compare digests');
+
+  // Check that the module imports timingSafeEqual from node:crypto
+  assert.ok(source.includes("import { createHash, timingSafeEqual } from 'node:crypto'"),
+    "module must import timingSafeEqual from 'node:crypto'");
+});

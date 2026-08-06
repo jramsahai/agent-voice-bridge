@@ -12,6 +12,7 @@ import {
   MIN_CLIENT_TOKEN_LENGTH,
   PLACEHOLDER_TOKEN_PREFIX,
 } from '../packages/shared/config/validate-config.js';
+import { ANONYMOUS_CLIENT_NAME } from '../packages/shared/security/token-auth.js';
 
 const EXAMPLE_CONFIG_PATH = new URL('../config/config.example.json', import.meta.url);
 
@@ -173,6 +174,21 @@ test('two clients whose tokens differ by exactly one character produce no error'
     };
   });
   assert.deepEqual(validateConfig(config), []);
+});
+
+// --- 5b. Reserved client name ANONYMOUS_CLIENT_NAME (OPS-03 / IN-02) ---
+
+test('G9 / OPS-03: a client literally named ANONYMOUS_CLIENT_NAME produces an error naming that reserved name', () => {
+  const config = withMutation((c) => {
+    c.security.clients = {
+      [ANONYMOUS_CLIENT_NAME]: 'a-genuinely-long-secret-value-for-anonymous',
+    };
+  });
+  const errors = validateConfig(config);
+  assert.ok(errors.length > 0, 'should produce at least one error');
+  const joined = errors.join(' ');
+  assert.ok(joined.includes(ANONYMOUS_CLIENT_NAME), `error should mention the reserved name "${ANONYMOUS_CLIENT_NAME}"`);
+  assert.ok(joined.includes('reserved'), 'error should mention the name is reserved');
 });
 
 // --- 6. leftover pre-Phase-4 security.token key ---

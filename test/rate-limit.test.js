@@ -89,3 +89,39 @@ test('checkRateLimitBucket defaults now to the real clock when omitted (no expli
   assert.equal(checkRateLimitBucket(buckets, 2, 60_000, 'k'), true);
   assert.equal(checkRateLimitBucket(buckets, 2, 60_000, 'k'), false);
 });
+
+test('G8 / AUTH-05: FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS is locked at 20', () => {
+  assert.equal(FAILED_AUTH_RATE_LIMIT_MAX_REQUESTS, 20);
+});
+
+test('G8 / AUTH-05: FAILED_AUTH_RATE_LIMIT_WINDOW_MS is locked at 60_000', () => {
+  assert.equal(FAILED_AUTH_RATE_LIMIT_WINDOW_MS, 60_000);
+});
+
+test('G8 / AUTH-05: FAILED_AUTH_BUCKET_KEY is the literal string __unauthenticated__', () => {
+  assert.equal(FAILED_AUTH_BUCKET_KEY, '__unauthenticated__');
+});
+
+// G10 / AUTH-05: the reject branch writes the *filtered* array back, so a bucket that is
+// over its ceiling still sheds its out-of-window timestamps instead of retaining them for as
+// long as the caller keeps being refused. Reaching this state needs a pre-seeded bucket: a
+// sequence driven purely through admits can never produce one, because every admit already
+// stores the pruned array, so a later reject (which requires maxRequests still-fresh entries)
+// would find nothing left to prune. Pre-seeding is the realistic shape anyway — the Map is a
+// caller-owned parameter, not module-private state.
+test('G10 / AUTH-05: a rejected call still prunes out-of-window timestamps from the stored bucket', () => {
+  const windowMs = 10_000;
+  const now = 1_010_000;
+  const buckets = new Map();
+
+  // One stale timestamp (exactly windowMs old — evicted by the strict `<` comparison) sitting
+  // behind two still-fresh ones, with maxRequests 2 so this call is refused.
+  const stale = now - windowMs;
+  buckets.set('k', [stale, now - 1_000, now - 500]);
+
+  assert.equal(checkRateLimitBucket(buckets, 2, windowMs, 'k', now), false, 'call must be refused at the ceiling');
+
+  const stored = buckets.get('k');
+  assert.deepEqual(stored, [now - 1_000, now - 500], 'the refused call must store the pruned array');
+  assert.ok(!stored.includes(stale), 'the out-of-window timestamp must not survive a refusal');
+});

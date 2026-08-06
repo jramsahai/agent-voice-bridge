@@ -2,6 +2,8 @@
 
 A modular, portable voice companion for OpenClaw focused on private, remote, push-to-talk conversations over Tailscale.
 
+See [`docs/API.md`](./docs/API.md) for the versioned HTTP API contract a client can implement against without reading server source.
+
 ## What it is
 
 This project provides a small browser-based voice client and a local bridge service that lets you talk to an OpenClaw agent from other devices on your tailnet.

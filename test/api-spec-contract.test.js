@@ -24,6 +24,7 @@ import { randomUUID } from 'node:crypto';
 import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
 import { ERROR_CODES } from '../packages/shared/errors/error-codes.js';
 import { buildError } from '../packages/shared/errors/error-response.js';
+import { API_VERSION } from '../packages/shared/transport/turn-response.js';
 import { makePcm16, makeCanonicalWav } from './helpers/fixtures.js';
 
 const specText = fs.readFileSync(new URL('../docs/API.md', import.meta.url), 'utf8');
@@ -116,6 +117,33 @@ test('docs/API.md documents the X-Error-Code header name buildError() actually r
   const envelope = buildError('NOT_FOUND');
   const [headerName] = Object.keys(envelope.headers);
   assert.ok(specText.includes(headerName), `${headerName} is missing from docs/API.md`);
+});
+
+// Task 2: a future bump to API_VERSION must fail the build until docs/API.md follows —
+// checked against the imported constant, never a typed '1'.
+test('docs/API.md states the API_VERSION constant in an api-version context', () => {
+  const versionPattern = new RegExp(`api-version[^\\n]*${API_VERSION}|X-API-Version[^\\n]*${API_VERSION}`, 'i');
+  assert.ok(
+    versionPattern.test(specText),
+    `API_VERSION (${API_VERSION}) not found in an api-version/X-API-Version context in docs/API.md`,
+  );
+});
+
+// Task 2: deleted-surface guard. Both literals are hand-typed deliberately — they are
+// values that must never appear in docs/API.md, not a catalogue being duplicated, so there
+// is nothing to import. The pre-Phase-3 turn endpoint and the singular shared-secret
+// security config key were both removed with no compatibility shim, and validateConfig()
+// now rejects the latter at startup — a document naming either would send a firmware team
+// down a dead path.
+test('docs/API.md does not resurrect the removed pre-Phase-3 turn endpoint or the removed singular security.token config key', () => {
+  assert.ok(
+    !specText.includes('/api/turn'),
+    'docs/API.md must not document /api/turn — it was deleted with no compatibility shim and the running code no longer routes to it',
+  );
+  assert.ok(
+    !specText.includes('security.token'),
+    'docs/API.md must not document security.token — validateConfig rejects it at startup; clients authenticate via security.clients',
+  );
 });
 
 // =====================================================================================

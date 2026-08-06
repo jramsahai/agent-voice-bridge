@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
+import { AGENT_TIMEOUT_MS } from './stage-timeouts.js';
+
 const execFileAsync = promisify(execFile);
 const voiceSessionStateDir = path.join(os.tmpdir(), 'openclaw-voice-bridge-session-state');
 
@@ -114,7 +116,7 @@ async function runOpenClawAgent(message, openclawConfig, { signal } = {}) {
     // controller terminates this child directly. A shell-spawned child's own children would
     // not be killed by the same signal — no call in this codebase uses shell: true today.
     ({ stdout, stderr } = await execFileAsync(command, args, {
-      timeout: 180000,
+      timeout: AGENT_TIMEOUT_MS,
       maxBuffer: 10 * 1024 * 1024,
       signal,
     }));

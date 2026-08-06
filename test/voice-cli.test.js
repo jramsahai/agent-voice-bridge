@@ -1082,6 +1082,54 @@ test('--no-play spawns no player process at all and only writes the reply audio 
   }
 });
 
+// Phase 7 SC1+SC5: createAudioSink's stream.on('error', ...) listener shipped with no test at
+// all, so it could be deleted silently. fs.WriteStream emits 'error' asynchronously (never from
+// createWriteStream() itself), and an EventEmitter with no 'error' listener throws that error as
+// an uncaught exception, taking the whole process down. Remove the listener and this test stops
+// observing exit code 8 — either the process dies or finish()'s end callback rejects out of
+// runCliTurn — which is exactly the revert detection this test exists to provide.
+test('a --out path inside a directory that does not exist exits with the output-write-failed code, prints a readable line, and leaves no file behind', async () => {
+  const clientToken = 'cli-test-token-out-write-failed';
+  const replyWav = makeCanonicalWav({ pcm: makePcm16({ samples: 4000 }) });
+  const config = buildTestConfig({ clients: { cliClient: clientToken } });
+  const adapters = makeFakeAdapters({ transcript: 'what is the weather', reply: 'sunny and warm', wavBuffer: replyWav });
+  const handler = createRequestHandler({ config, adapters, webDir: process.cwd() });
+  const server = await startServer(handler);
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  // The subdirectory is deliberately never created, so the lazy fs.createWriteStream() on the
+  // first audio chunk fails to open and emits 'error'.
+  const missingDir = path.join(tmpDir, 'never-created');
+  const outPath = path.join(missingDir, 'reply.pcm');
+
+  try {
+    const { result, stderr } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: clientToken, inputPath, outPath, noPlay: true }),
+    );
+
+    assert.equal(
+      result,
+      EXIT_CODES.OUTPUT_WRITE_FAILED,
+      'an unwritable --out path must resolve to the output-write-failed code, not OK and not a generic HTTP failure',
+    );
+
+    const failureLines = stderr.filter((line) => line.includes(outPath));
+    assert.equal(failureLines.length, 1, 'exactly one error line must name the output path that could not be written');
+    assert.ok(
+      !/\n\s+at\s/.test(failureLines[0]),
+      'the error line must be a readable message, never a raw stack trace dumped at the operator',
+    );
+
+    assert.equal(fs.existsSync(outPath), false, 'no partial output file may survive a failed write');
+    assert.equal(fs.existsSync(missingDir), false, 'the CLI must not create the missing --out directory on its way to failing');
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('parseCliArgs sets noPlay true when --no-play is given', async () => {
   await withEnvToken('some-token', () => {
     const parsed = parseCliArgs(['--input', 'x.wav', '--no-play']);

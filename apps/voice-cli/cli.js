@@ -801,12 +801,23 @@ function createAudioSink(outputPath) {
     // already errored, skip calling .end() on it (it may already be auto-destroyed) — the
     // caller is expected to check .writeError and call discard() instead.
     finish() {
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve) => {
         if (!stream || writeError) {
           resolve();
           return;
         }
-        stream.end((err) => (err ? reject(err) : resolve()));
+        // The stream's 'error' can land *after* this call, not only before it: the write stream
+        // opens lazily and reports an open failure (missing --out directory, permission denied,
+        // full disk) on its own schedule, which for a short reply is later than the moment the
+        // body finishes arriving. end()'s callback then receives that error. Recording it as
+        // writeError and resolving — rather than rejecting — keeps runCliTurn's single
+        // `if (sink.writeError)` branch the one authority on write failure, so the exit is
+        // OUTPUT_WRITE_FAILED either way instead of a raw rejection escaping runCliTurn and
+        // dumping a stack trace at the operator.
+        stream.end((err) => {
+          if (err && !writeError) writeError = err;
+          resolve();
+        });
       });
     },
     // T-06-12: removes a partially-written output file on any failure exit, and never lets a

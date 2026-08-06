@@ -91,7 +91,7 @@ A successful turn returns `200` with the following response headers:
 
 ### Response body framing
 
-The body is the transcript segment, then the reply segment, then — when `X-Voice-Audio-Present` is `1` — the audio segment. The three segments are concatenated with **no delimiter of any kind**. A client slices them by byte offset using the two byte-count headers; scanning the body for a separator is wrong and will corrupt the reply. The segment order is fixed and never varies.
+The body is the transcript segment, then the reply segment, then — when `X-Voice-Audio-Present` is `1` — the audio segment. The three segments are concatenated with **no delimiter of any kind**. A client slices them by byte offset using the two byte-count headers; scanning the body for a separator is wrong and will corrupt the reply. The segment order is fixed and never varies — this pairs with the parse-by-key rule the two discovery routes below use, where line order is explicitly not a promise.
 
 The two byte-count headers are UTF-8 **byte** lengths, not character or code-point counts. A client must slice by byte offset, never with a character-based string API — a multi-byte character in the transcript or reply would otherwise misalign every following byte.
 
@@ -115,6 +115,64 @@ X-Voice-Audio-Present: 1
 
 <body: bytes 0-1 are the transcript, bytes 2-3 are the reply, bytes 4 onward are the audio segment>
 ```
+
+## GET /v1/capabilities
+
+`GET /v1/capabilities` is the pre-first-turn discovery route: a client calls it before attempting its first turn to learn what the service supports. It requires the same bearer token, `Host`, and `Origin` gate as `POST /v1/turn`, but draws from a separate, more generous discovery rate-limit bucket, so polling it never competes with the turn endpoint's tighter budget. It is **not** covered by the turn lock — it stays answerable while a turn is in flight.
+
+The response is `Content-Type: text/plain; charset=utf-8`. The body is one `key: value` pair per line, deliberately not JSON, so a client with no JSON parser can read it with a single line split. Unlike `POST /v1/turn`, this response carries a real `Content-Length` header, because unlike the turn response this body is fully known before it is ever written — nothing on this route needs chunked framing.
+
+```
+api-version: 1
+input-formats: pcm16,wav
+reply-formats: pcm16
+default-reply-format: pcm16
+voices: af_heart
+max-audio-bytes: 9600000
+input-format-header: X-Voice-Input-Format
+output-format-header: X-Voice-Output-Format
+want-audio-header: X-Voice-Want-Audio
+transcript-bytes-header: X-Voice-Transcript-Bytes
+reply-bytes-header: X-Voice-Reply-Bytes
+```
+
+`voices` is config-dependent — the example above is `config/config.example.json`'s value; an operator's real deployment may list more.
+
+| Key | Meaning |
+|-----|---------|
+| `api-version` | Same value as the `X-API-Version` response header carried on every route. |
+| `input-formats` | Every registered input-direction format id, comma-separated. |
+| `reply-formats` | Every registered reply-direction format id, comma-separated — deliberately a different (and possibly shorter) list than `input-formats`; see Audio formats above. |
+| `default-reply-format` | The format id used for `X-Voice-Output-Format` when a turn request omits it. |
+| `voices` | The operator-configured voice list, comma-separated. Config-dependent. |
+| `max-audio-bytes` | The request body size ceiling in bytes — the same threshold that triggers `POST /v1/turn`'s `413 AUDIO_TOO_LARGE`. |
+| `input-format-header` | The exact request header name a client uses to declare the input format. |
+| `output-format-header` | The exact request header name a client uses to declare the wanted reply format. |
+| `want-audio-header` | The exact request header name a client uses to suppress reply audio. |
+| `transcript-bytes-header` | The exact response header name carrying the transcript segment's byte length. |
+| `reply-bytes-header` | The exact response header name carrying the reply segment's byte length. |
+
+The `input-formats` and `reply-formats` lists are intentionally different — see Audio formats above. A client must query each list independently rather than assume one applies to both directions; a client that reused `input-formats` for the reply direction would offer `wav` as a reply format and be rejected.
+
+A client must parse this body **by key** — splitting each line on the first `: ` — and must not depend on line order. New keys may be appended in a future version without disturbing existing ones.
+
+## GET /v1/health
+
+`GET /v1/health` reports the reachability of the three backends the service depends on. It carries the same bearer/Host/Origin gate and draws from the same discovery rate-limit bucket as `GET /v1/capabilities`, and it is likewise not covered by the turn lock — it stays answerable while a turn is in flight.
+
+The body is exactly three lines, naming the transcribe, agent, and speech backends in that order. Each value is exactly one of two tokens — `up` or `down` — and never anything else. The response status is `200` when all three backends are up, and `503` otherwise.
+
+No URL, command path, probe error text, or any other diagnostic detail ever appears in this body. A client must not expect one and must not parse for one — the three up/down lines are the entire contract.
+
+Backend status is served from a short-TTL cache shared with the live turn path, so polling this route repeatedly does not add a fixed probe penalty per call. The cache interval itself is an internal tuning detail and is not published here.
+
+```
+transcribe: up
+agent: up
+speech: down
+```
+
+The same parse-by-key rule applies here as for `GET /v1/capabilities`: split each line on the first `: ` and read by key, never by line position.
 
 ## Errors
 

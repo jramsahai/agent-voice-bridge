@@ -41,6 +41,7 @@ import {
   WANT_AUDIO_DISABLED_TOKEN,
 } from '../packages/shared/transport/negotiate.js';
 import { listSupportedFormats } from '../packages/shared/audio/format-registry.js';
+import { BACKEND_UP, BACKEND_DOWN } from '../packages/shared/health/backend-health-cache.js';
 import { makePcm16, makeCanonicalWav } from './helpers/fixtures.js';
 
 const specText = fs.readFileSync(new URL('../docs/API.md', import.meta.url), 'utf8');
@@ -48,14 +49,20 @@ const specText = fs.readFileSync(new URL('../docs/API.md', import.meta.url), 'ut
 const TEST_CLIENT_NAME = 'contract-test-client';
 const TEST_CLIENT_TOKEN = randomUUID();
 
+// Matches config/config.example.json's tts.voices — the value docs/API.md's capabilities
+// example body cites, so the live 'voices' line and the doc's worked example agree.
+const EXAMPLE_VOICES = ['af_heart'];
+
 function uniqueSessionId(label) {
   return `api-spec-contract-${label}-${randomUUID()}`;
 }
 
 // Adapted from test/http-turn.test.js's buildTestConfig: seeds one real security.clients
 // entry with a per-run randomUUID() token, so this harness always exercises the
-// authenticated path — auth is never disabled here (T-06-03).
-function buildTestConfig(securityOverrides = {}) {
+// authenticated path — auth is never disabled here (T-06-03). tts.voices defaults to the
+// example config's list (06-04-PLAN.md Task 1) so a capabilities response built from this
+// config matches docs/API.md's worked example.
+function buildTestConfig({ security = {}, tts = { voices: EXAMPLE_VOICES } } = {}) {
   return {
     security: {
       clients: { [TEST_CLIENT_NAME]: TEST_CLIENT_TOKEN },
@@ -63,11 +70,11 @@ function buildTestConfig(securityOverrides = {}) {
       allowedOrigins: [],
       rateLimitWindowMs: 15_000,
       rateLimitMaxRequests: 1000,
-      ...securityOverrides,
+      ...security,
     },
     stt: {},
     openclaw: { sessionId: uniqueSessionId('turn') },
-    tts: {},
+    tts,
   };
 }
 
@@ -402,6 +409,121 @@ test('a live GET to an unmatched path with a valid bearer token returns 404, x-e
     const body = JSON.parse(response.body.toString('utf8'));
     assert.equal(body.error.code, 'NOT_FOUND');
     assert.ok(typeof body.error.message === 'string' && body.error.message.length > 0);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// =====================================================================================
+// Task 1 (06-04-PLAN.md): the two pre-first-turn discovery routes. Every advertised value
+// is compared against an imported constant, never a typed string, and the doc text is
+// checked in both directions — a live response must match the imported source of truth,
+// and docs/API.md must carry that same live value (06-RESEARCH.md Pattern 2).
+// =====================================================================================
+
+// Splits a line-based discovery body into an ordered key -> value Map, asserting the
+// ': '-split shape holds for every non-empty line — mirrors test/http-capabilities.test.js's
+// and test/http-health.test.js's own parseLineBody helpers.
+function parseLineBody(bodyText) {
+  const map = new Map();
+  for (const line of bodyText.split('\n').filter((line) => line.length > 0)) {
+    const idx = line.indexOf(': ');
+    assert.ok(idx > 0, `line '${line}' does not split into a non-empty key and a defined value on ': '`);
+    map.set(line.slice(0, idx), line.slice(idx + 2));
+  }
+  return map;
+}
+
+test('a live GET /v1/capabilities returns text/plain and every advertised value equals its imported source of truth, pinned against docs/API.md in both directions', async () => {
+  const config = buildTestConfig();
+  const adapters = buildTestAdapters();
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await request(port, {
+      method: 'GET',
+      path: '/v1/capabilities',
+      headers: { Authorization: `Bearer ${TEST_CLIENT_TOKEN}` },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers['content-type'], 'text/plain; charset=utf-8');
+
+    const pairs = parseLineBody(response.body.toString('utf8'));
+
+    // Every advertised value the plan enumerates, keyed by the imported constant/derived
+    // value it must equal — never a typed literal (06-04-PLAN.md Task 1, RESEARCH.md
+    // Pattern 2). 'voices' is deliberately excluded: it is config-dependent, not a
+    // catalogue constant to import.
+    const expected = new Map([
+      ['api-version', API_VERSION],
+      ['input-formats', listSupportedFormats().join(',')],
+      ['reply-formats', listReplyFormats().join(',')],
+      ['default-reply-format', defaultOutputFormatId()],
+      ['max-audio-bytes', String(MAX_REQUEST_AUDIO_BYTES)],
+      ['input-format-header', INPUT_FORMAT_HEADER],
+      ['output-format-header', OUTPUT_FORMAT_HEADER],
+      ['want-audio-header', WANT_AUDIO_HEADER],
+      ['transcript-bytes-header', TRANSCRIPT_BYTES_HEADER],
+      ['reply-bytes-header', REPLY_BYTES_HEADER],
+    ]);
+
+    for (const [key, value] of expected) {
+      assert.equal(pairs.get(key), value, `live capabilities body key '${key}' did not equal its imported source of truth`);
+      assert.ok(specText.includes(value), `docs/API.md is missing the live capabilities value '${value}' (key '${key}')`);
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a live GET /v1/health returns exactly three named backend lines whose values are drawn only from the two permitted status tokens', async () => {
+  const config = {
+    security: {
+      clients: { [TEST_CLIENT_NAME]: TEST_CLIENT_TOKEN },
+      expectedHost: null,
+      allowedOrigins: [],
+      rateLimitWindowMs: 15_000,
+      rateLimitMaxRequests: 1000,
+    },
+    // Deterministic-down inputs (test/http-health.test.js's own pattern): an unresolvable
+    // command and an unreachable service URL, so this check never depends on whether a real
+    // whisper/openclaw binary happens to be on this host's PATH.
+    stt: { command: 'this-command-does-not-exist-anywhere-xyz' },
+    openclaw: { sessionId: uniqueSessionId('health'), command: 'this-command-does-not-exist-anywhere-xyz' },
+    tts: { serviceUrl: 'http://127.0.0.1:1' },
+  };
+  const adapters = buildTestAdapters();
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await request(port, {
+      method: 'GET',
+      path: '/v1/health',
+      headers: { Authorization: `Bearer ${TEST_CLIENT_TOKEN}` },
+    });
+    assert.ok([200, 503].includes(response.statusCode));
+
+    const bodyText = response.body.toString('utf8');
+    const nonEmptyLines = bodyText.split('\n').filter((line) => line.length > 0);
+    assert.equal(nonEmptyLines.length, 3, 'health body must be exactly three non-empty lines');
+
+    const pairs = parseLineBody(bodyText);
+    assert.deepEqual([...pairs.keys()], ['transcribe', 'agent', 'speech']);
+
+    for (const [name, value] of pairs) {
+      assert.ok(
+        value === BACKEND_UP || value === BACKEND_DOWN,
+        `health value '${value}' for backend '${name}' must be exactly the up or down status token`,
+      );
+    }
+
+    assert.ok(specText.includes(BACKEND_UP), `docs/API.md is missing the up status token '${BACKEND_UP}'`);
+    assert.ok(specText.includes(BACKEND_DOWN), `docs/API.md is missing the down status token '${BACKEND_DOWN}'`);
+    for (const name of ['transcribe', 'agent', 'speech']) {
+      assert.ok(specText.includes(name), `docs/API.md is missing the backend name '${name}'`);
+    }
   } finally {
     await closeServer(server);
   }

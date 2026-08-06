@@ -10,6 +10,7 @@ This project provides a small browser-based voice client and a local bridge serv
 
 Current shape:
 - browser push-to-talk UI
+- a versioned HTTP API (`docs/API.md`) any client can implement against, plus a non-browser reference CLI client (`apps/voice-cli`) proving it
 - local bridge service on the OpenClaw host
 - local STT via `whisper-cpp` wrapper
 - OpenClaw turn handoff via `openclaw agent`
@@ -23,6 +24,8 @@ Current shape:
 This repo now contains a working MVP that has been exercised across multiple devices.
 
 Working today:
+- a published, versioned HTTP API (`docs/API.md`) covering `POST /v1/turn`, `GET /v1/capabilities`, and `GET /v1/health`, implementable with raw HTTP and PCM buffers
+- a reference CLI client (`apps/voice-cli`) that completes a full voice turn against that API with no browser, no JavaScript, and no audio codecs — proving the contract before hardware exists
 - remote voice access from laptop and phone over Tailscale
 - browser mic capture in a secure context
 - local transcription on the host machine
@@ -89,6 +92,12 @@ Audio + text back to browser
 - calls OpenClaw
 - runs TTS adapter
 - returns text + audio payloads
+- exposes the versioned HTTP API documented in `docs/API.md` (`POST /v1/turn`, `GET /v1/capabilities`, `GET /v1/health`)
+
+### `apps/voice-cli`
+- non-browser reference client for the published API
+- proves a device with no browser, no JavaScript, and no audio codecs can complete a full voice turn using only raw HTTP and PCM buffers
+- see `docs/API.md` for the wire contract it implements
 
 ### `apps/kokoro-tts`
 - optional persistent FastAPI service for Kokoro ONNX
@@ -205,12 +214,15 @@ voice-bridge/
   ROADMAP.md
   SETUP.md
   TAILSCALE.md
+  docs/
+    API.md
   config/
     config.example.json
     PORTABILITY.md
   apps/
     voice-web/
     voice-bridge/
+    voice-cli/
     kokoro-tts/
   packages/
     shared/

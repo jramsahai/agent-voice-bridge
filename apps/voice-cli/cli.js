@@ -42,6 +42,7 @@ export const EXIT_CODES = Object.freeze({
   BUSY: 5,
   HTTP_ERROR: 6,
   CONTRACT_VIOLATION: 7,
+  OUTPUT_WRITE_FAILED: 8,
 });
 
 // The shape every --input WAV file must declare, matching the pcm16 registry row's fixed
@@ -729,10 +730,28 @@ function createAudioSink(outputPath) {
   let stream = null;
   let bytesWritten = 0;
   let drainWaiters = [];
+  // Set from the stream's 'error' listener below. fs.WriteStream emits 'error' asynchronously
+  // (never synchronously from createWriteStream()/write()) for conditions like a missing --out
+  // directory, a permission failure, or a full disk. Without a listener attached, an unhandled
+  // 'error' event throws and crashes the whole process; recording it here lets runCliTurn map
+  // the failure to a clean exit code instead.
+  let writeError = null;
+  let closed = false;
 
   const write = (chunk) => {
+    // Once the stream has errored, stop feeding it further data — it may already be
+    // destroyed/closing, and there's nothing useful to write to a broken sink.
+    if (writeError) {
+      return true;
+    }
     if (!stream) {
       stream = fs.createWriteStream(outputPath);
+      stream.on('error', (err) => {
+        writeError = err;
+      });
+      stream.on('close', () => {
+        closed = true;
+      });
       stream.on('drain', () => {
         const waiters = drainWaiters;
         drainWaiters = [];
@@ -751,11 +770,16 @@ function createAudioSink(outputPath) {
     get bytesWritten() {
       return bytesWritten;
     },
+    get writeError() {
+      return writeError;
+    },
     // Ends the stream and waits for the underlying file descriptor to actually close before
-    // resolving — a no-audio turn (stream never opened) resolves immediately.
+    // resolving — a no-audio turn (stream never opened) resolves immediately. If the stream
+    // already errored, skip calling .end() on it (it may already be auto-destroyed) — the
+    // caller is expected to check .writeError and call discard() instead.
     finish() {
       return new Promise((resolve, reject) => {
-        if (!stream) {
+        if (!stream || writeError) {
           resolve();
           return;
         }
@@ -765,17 +789,24 @@ function createAudioSink(outputPath) {
     // T-06-12: removes a partially-written output file on any failure exit, and never lets a
     // truncated stream be mistaken for a complete reply — called before any error line is
     // printed and before the output path is ever logged, so a discarded sink's path can never
-    // reach stdout.
+    // reach stdout. Guards against the stream having already auto-destroyed itself (emitting
+    // 'close') before discard() is called — e.g. after a write error — in which case waiting
+    // on a fresh 'close' listener would never resolve.
     discard() {
       return new Promise((resolve) => {
         if (!stream) {
           resolve();
           return;
         }
-        stream.destroy();
-        stream.once('close', () => {
+        const cleanup = () => {
           fs.rm(outputPath, { force: true }, () => resolve());
-        });
+        };
+        if (closed) {
+          cleanup();
+          return;
+        }
+        stream.once('close', cleanup);
+        stream.destroy();
       });
     },
   };
@@ -860,6 +891,12 @@ export async function runCliTurn({
   console.log(`reply: ${reply}`);
 
   await sink.finish();
+
+  if (sink.writeError) {
+    await sink.discard();
+    reportError(`error: failed to write reply audio to ${outputPath}: ${sink.writeError.message}`);
+    return EXIT_CODES.OUTPUT_WRITE_FAILED;
+  }
 
   if (sink.bytesWritten > 0) {
     console.log(outputPath);

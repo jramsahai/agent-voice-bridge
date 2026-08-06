@@ -35,6 +35,27 @@ Tokens are per-client: each client is named and issued its own token in the oper
 
 The `Host` and `Origin` headers are also validated against the operator's configuration. A rejection of either check returns `403 FORBIDDEN` — the same code for both failure modes, deliberately indistinguishable. A client must not attempt to determine which of the two checks failed from the response alone.
 
+### The `Host` header
+
+`Host` must exactly match one of the operator's configured `security.expectedHost` entries. Both sides are normalized before comparison — lowercased, with an explicit `:80` or `:443` suffix stripped — and then compared for exact equality, one entry at a time. There is no wildcard, prefix, or pattern matching: a host the operator did not literally configure is never admitted. An absent `Host` is rejected.
+
+A client sends the hostname it dialed. When the service sits behind a reverse proxy — the deployment shape this project ships, with Tailscale Serve fronting the origin — that is the **proxy's** hostname, not the origin's address, because the proxy forwards the client's `Host` through unchanged. A client reaching the proxy over HTTPS on 443 and a client reaching it over plain HTTP on 80 therefore send the *same* `Host` value, since both standard ports are stripped:
+
+```http
+POST /v1/turn HTTP/1.1
+Host: your-device.your-tailnet.ts.net
+```
+
+A client that addresses the origin directly on its own non-standard port sends that port verbatim (`your-device.your-tailnet.ts.net:4318`), and the operator must have configured that exact string as its own `expectedHost` entry — `security.expectedHost` accepts a list precisely so one configuration can admit both shapes at once.
+
+A `Host` mismatch is a configuration error, not something a client can recover from by retrying or by trying another value. Treat a `403` as terminal and surface it to the operator.
+
+### The `Origin` header
+
+A non-browser client should **omit `Origin` entirely**. The check applies only when the header is present: an absent `Origin` always passes, whatever the operator has configured. The reference command-line client (`apps/voice-cli/cli.js`) sends no `Origin` at all, and an embedded client should do the same.
+
+Do not synthesize a plausible-looking `Origin` value. When the header is present it is matched exactly — no normalization, unlike `Host` — against the operator's `security.allowedOrigins` list, so an invented value is more likely to be rejected than an absent one. `Origin` exists for the browser client, which the browser sets automatically and cannot suppress.
+
 `GET /` and `GET /app.js` are ungated by design — no bearer token, no Host/Origin check — as already stated in the Routes table above.
 
 This section describes the authentication scheme only, not how the server compares a submitted token against its configured candidates.

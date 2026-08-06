@@ -273,6 +273,42 @@ test('a disallowed host and a disallowed origin both return 403 with x-error-cod
   }
 });
 
+// docs/API.md tells every non-browser client to omit Origin entirely, on the strength of the
+// `origin &&` guard in validateRequest — an absent Origin passes whatever allowedOrigins holds.
+// The test above only proves a *disallowed* Origin is refused, which a guard-less implementation
+// satisfies just as well, so nothing pinned the absent case. Dropping that guard would 403 every
+// embedded client while leaving the published instruction silently wrong — exactly the class of
+// documented-but-ungated claim the milestone retrospective flags. Both configured and absent
+// allowedOrigins are asserted, so the claim holds in the deployment that has an origin list
+// (where the guard is load-bearing) and not only in the vacuous empty-list case.
+test('an absent Origin passes the origin check even when allowedOrigins is configured, as docs/API.md instructs non-browser clients to rely on', async () => {
+  const pcm = makePcm16({ samples: 10 });
+  const wavBuffer = makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) });
+
+  for (const allowedOrigins of [['https://allowed.example'], []]) {
+    const config = buildTestConfig({ allowedOrigins });
+    const adapters = makeFakeAdapters({ transcript: 'hi', reply: 'ok', wavBuffer });
+    const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+    const server = await startServer(handler);
+
+    try {
+      const response = await postTurn(server.address().port, {
+        body: pcm,
+        headers: { 'X-Voice-Input-Format': 'pcm16' },
+      });
+
+      assert.equal(
+        response.statusCode,
+        200,
+        `a request carrying no Origin must complete with allowedOrigins=${JSON.stringify(allowedOrigins)} — docs/API.md instructs embedded clients to send none`,
+      );
+      assert.equal(response.headers['x-error-code'], undefined);
+    } finally {
+      await closeServer(server);
+    }
+  }
+});
+
 // WINDOWS.md id 5: one expectedHost value must admit both deployment shapes at once — a
 // Serve-fronted browser (port 443, so no port suffix on the wire) and a TLS-less client
 // addressing the bridge directly on its own port (which sends that port in Host verbatim) —

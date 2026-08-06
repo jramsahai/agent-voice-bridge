@@ -264,3 +264,27 @@ A `POST /v1/turn` that arrives while another turn is in progress is rejected imm
 `GET /v1/capabilities` and `GET /v1/health` are not covered by the turn lock. Both stay answerable while a turn is in flight.
 
 `TURN_ABORTED` (499) is recorded server-side when a client disconnects mid-turn; it is a log-reading code only. By definition no client ever receives it over the wire — the connection that would have carried it is already gone.
+
+## Deployment requirements
+
+The service binds plain HTTP and never terminates TLS, by design. A reverse proxy owns encryption — this project's own deployment fronts the origin with Tailscale Serve (see `TAILSCALE.md`), terminating HTTPS at the tailnet edge and forwarding plain HTTP to the origin on loopback. Exposing the origin outside a trusted network without proxy-terminated TLS exposes both the bearer token and the audio in the clear. This is a constraint the operator must resolve with a proxy — it is never presented here as an acceptable way to expose this service on its own.
+
+### What the origin guarantees
+
+Verified automatically by this repository's own test suite (`test/http-turn.test.js`'s wire-hygiene tests), across every status code a turn can return, not just the success path:
+
+- The origin never issues a redirect.
+- The origin never sets a cookie.
+- The origin never compresses a response.
+- The origin always sends the `no-transform` cache directive exactly once.
+
+### What the operator's reverse-proxy configuration must honour
+
+No test in this repository can reach this half — there is no proxy inside `node --test`, and standing one up is out of scope. The operator's reverse proxy must:
+
+- Not enable compression on the turn endpoint.
+- Not issue redirects in front of it.
+- Not rewrite, re-buffer, or otherwise transform the response body — re-buffering destroys the streaming property this specification documents, and any transformation invalidates the byte offsets a client slices on.
+- Pass through every `X-Voice-*` header and the `X-API-Version` header unmodified — a client that loses the byte-count headers cannot frame the body at all.
+
+**Verification (manual, end-of-phase):** request a real turn through the proxy URL with response headers shown and the raw body preserved, then confirm three things: no `content-encoding` header is present, the status is `200` rather than a `3xx`, and the response body bytes are identical to the origin's own.

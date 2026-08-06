@@ -641,3 +641,38 @@ test('a live audio-disabled 200 turn response carries no body-length header of a
   }
 });
 
+// =====================================================================================
+// Task 2 (06-05-PLAN.md): reverse-proxy deployment requirements. The origin half is
+// verified live by test/http-turn.test.js's existing wire-hygiene tests; this file adds a
+// structural guard so that delegated coverage cannot silently disappear, plus a check that
+// docs/API.md carries the no-transform directive it claims the origin always sends.
+// =====================================================================================
+
+test('docs/API.md contains the no-transform cache directive string', () => {
+  assert.ok(specText.includes('no-transform'), 'docs/API.md must state the no-transform cache directive');
+});
+
+test('docs/API.md contains a Deployment requirements section covering TLS posture and the origin/proxy split', () => {
+  assert.ok(specText.includes('## Deployment requirements'), 'docs/API.md is missing the Deployment requirements heading');
+  assert.ok(
+    specText.toLowerCase().includes('never terminate'),
+    'docs/API.md must state in prose that the service never terminates TLS',
+  );
+});
+
+test('test/http-turn.test.js still contains the five wire-hygiene test names this file delegates origin-side no-cookie, no-redirect, no-compression coverage to — deleting one removes coverage docs/API.md claims', () => {
+  const httpTurnSource = fs.readFileSync(new URL('../test/http-turn.test.js', import.meta.url), 'utf8');
+  const wireHygieneTestNames = [
+    'wire hygiene: a 200 response with audio carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control',
+    'wire hygiene: a 200 text-only response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control',
+    'wire hygiene: a 401 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control',
+    'wire hygiene: a 413 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control',
+    'wire hygiene: a 415 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control',
+  ];
+  for (const name of wireHygieneTestNames) {
+    assert.ok(
+      httpTurnSource.includes(name),
+      `test/http-turn.test.js is missing the wire-hygiene test '${name}' — this file delegates origin-side coverage to it`,
+    );
+  }
+});

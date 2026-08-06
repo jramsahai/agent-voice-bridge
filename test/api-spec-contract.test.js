@@ -7,13 +7,17 @@
 // CLI, no Kokoro service, no network beyond the loopback socket this file itself opens
 // (same hermetic pattern as test/http-turn.test.js).
 //
-// DIRECTIONALITY NOTE (flagged assumption, 06-01-PLAN.md): this gate only proves one
-// direction — that every value the code's own catalogues declare is present in docs/API.md
-// and in a live response. It does NOT prove the reverse: a stale doc claim that names an
-// error code, header, or format the code has since removed would stay green here, because
-// nothing iterates docs/API.md to find claims the running code can no longer honour.
-// Narrowed by the append-only error-catalogue rule the doc itself publishes and by 06-03's
-// live negotiation checks — do not read a green run here as a fully symmetric guarantee.
+// DIRECTIONALITY NOTE (flagged assumption, 06-01-PLAN.md; narrowed 06-06-PLAN.md): this gate
+// mostly proves one direction — that every value the code's own catalogues declare is present
+// in docs/API.md and in a live response. For header names, format ids, and the discovery-route
+// values, it does NOT prove the reverse: a stale doc claim naming a header, format, or value the
+// code has since removed would stay green here, because nothing iterates docs/API.md to find
+// claims the running code can no longer honour. The error catalogue is the one exception:
+// assertErrorCatalogueMatchesCode() below checks it in both directions — a published row naming
+// a code ERROR_CODES no longer carries now fails the build too, closing that direction for the
+// catalogue specifically. Narrowed by the append-only error-catalogue rule the doc itself
+// publishes and by 06-03's live negotiation checks — do not read a green run on the remaining
+// one-directional surfaces as a fully symmetric guarantee.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -163,16 +167,187 @@ function buildTestAdapters() {
 }
 
 // =====================================================================================
-// Pattern 2 (06-RESEARCH.md): import the catalogue, check the doc text, never regex-parse
-// docs/API.md to derive truth.
+// Pattern 2 (06-RESEARCH.md), error catalogue: import the catalogue, check the doc text,
+// never regex-parse docs/API.md to derive truth.
+//
+// The catalogue gets a stronger check than plain Pattern 2 substring presence (06-06-PLAN.md,
+// closing 06-VERIFICATION.md SC5 / 06-REVIEW.md CR-01). Two independent substring checks — "the
+// code appears somewhere" and "the status appears somewhere" — cannot detect a transposed row,
+// because every status value in this table already appears elsewhere in the document for a
+// different code. `parseErrorCatalogueRows` and `assertErrorCatalogueMatchesCode` below instead
+// pair each code with the status on its own catalogue row. `ERROR_CODES` stays the only source
+// of truth throughout: docs/API.md is parsed solely to locate the row being compared, never to
+// derive what a code's status should be — that boundary is the whole point of Pattern 2 and
+// this stronger check keeps it.
 // =====================================================================================
 
+// Finds the `### Error catalogue` heading and extracts `{ code -> status }` for every data row
+// in the table that follows it. The header row (`| Code | HTTP status | Meaning |`) and the
+// dash-separator row never match the backticked-code-cell pattern below, so they are skipped
+// without any special-cased row-counting. Returns an empty Map (never throws) when the heading
+// is absent or the table has no rows matching the pattern — the caller decides what an empty
+// result means, so a negative fixture can drive this same code path.
+function parseErrorCatalogueRows(docText) {
+  const headingIndex = docText.indexOf('### Error catalogue');
+  const rows = new Map();
+  if (headingIndex === -1) {
+    return rows;
+  }
+  const rowPattern = /^\|\s*`([A-Z][A-Z0-9_]*)`\s*\|\s*(\d+)\s*\|/;
+  for (const line of docText.slice(headingIndex).split('\n')) {
+    if (line.startsWith('#') && line.trim() !== '### Error catalogue') {
+      // Left the Error catalogue section for the next heading — stop scanning.
+      break;
+    }
+    const match = rowPattern.exec(line);
+    if (match) {
+      const [, code, status] = match;
+      rows.set(code, Number(status));
+    }
+  }
+  return rows;
+}
+
+// Compares parsed catalogue rows against ERROR_CODES in both directions. Takes docText as a
+// parameter rather than closing over the module-level specText, so the negative-case tests
+// below can drive an in-memory fixture through the identical assertion path. Throws (via the
+// assert library) on the first mismatch found; callers wrap this in assert.throws() for the
+// negative-case proofs.
+function assertErrorCatalogueMatchesCode(docText) {
+  const parsed = parseErrorCatalogueRows(docText);
+  assert.ok(
+    parsed.size > 0,
+    'the error catalogue table parsed to zero rows — an absent heading, a renamed heading, or a reformatted table must fail loudly, never match nothing and pass',
+  );
+
+  const parsedKeys = [...parsed.keys()].sort();
+  const declaredKeys = Object.keys(ERROR_CODES).sort();
+  assert.deepEqual(
+    parsedKeys,
+    declaredKeys,
+    'the catalogue table must publish exactly the codes ERROR_CODES declares, in both directions — a code with no published row, or a published row naming a code ERROR_CODES no longer carries, both fail',
+  );
+
+  for (const [code, { status }] of Object.entries(ERROR_CODES)) {
+    assert.equal(
+      parsed.get(code),
+      status,
+      `docs/API.md's error catalogue pairs ${code} with status ${parsed.get(code)}, but ERROR_CODES declares ${status}`,
+    );
+  }
+}
+
 for (const [code, { status }] of Object.entries(ERROR_CODES)) {
-  test(`docs/API.md documents error code ${code} with its HTTP status ${status}`, () => {
-    assert.ok(specText.includes(code), `${code} is missing from docs/API.md`);
-    assert.ok(specText.includes(String(status)), `status ${status} for ${code} is missing from docs/API.md`);
+  test(`docs/API.md pairs error code ${code} with its HTTP status ${status} on the same catalogue table row`, () => {
+    const parsed = parseErrorCatalogueRows(specText);
+    assert.equal(
+      parsed.get(code),
+      status,
+      `docs/API.md's error catalogue does not pair ${code} with status ${status} on the same row`,
+    );
   });
 }
+
+test("docs/API.md's error catalogue publishes exactly the codes ERROR_CODES declares — no missing row, no orphaned row", () => {
+  const parsed = parseErrorCatalogueRows(specText);
+  assert.ok(parsed.size > 0, 'the error catalogue table parsed to zero rows');
+  assert.deepEqual(
+    [...parsed.keys()].sort(),
+    Object.keys(ERROR_CODES).sort(),
+    'parsed catalogue keys must equal ERROR_CODES keys exactly, in both directions',
+  );
+});
+
+test('the catalogue check rejects a transposed row that the superseded independent-substring check accepted', () => {
+  // Derive the fixture structurally: pick the first two ERROR_CODES entries whose statuses
+  // differ. No error-code name and no HTTP status is typed as a literal anywhere below.
+  const entries = Object.entries(ERROR_CODES);
+  let first;
+  let second;
+  outer: for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      if (entries[i][1].status !== entries[j][1].status) {
+        first = entries[i];
+        second = entries[j];
+        break outer;
+      }
+    }
+  }
+  assert.ok(first && second, 'expected at least two ERROR_CODES entries with differing statuses');
+
+  const [codeA, { status: statusA }] = first;
+  const [codeB, { status: statusB }] = second;
+
+  const rowPatternA = new RegExp(`(\`${codeA}\`\\s*\\|\\s*)${statusA}(\\s*\\|)`);
+  const rowPatternB = new RegExp(`(\`${codeB}\`\\s*\\|\\s*)${statusB}(\\s*\\|)`);
+  assert.ok(rowPatternA.test(specText), `expected to find ${codeA}'s catalogue row in docs/API.md`);
+  assert.ok(rowPatternB.test(specText), `expected to find ${codeB}'s catalogue row in docs/API.md`);
+
+  // Two-phase substitution through a unique placeholder token, so the second replacement
+  // cannot undo or collide with the first (a direct A-status -> B-status swap risks the second
+  // replacement matching the row the first replacement just wrote).
+  const placeholderA = `__TRANSPOSE_PLACEHOLDER_${codeA}__`;
+  const placeholderB = `__TRANSPOSE_PLACEHOLDER_${codeB}__`;
+
+  let transposedText = specText.replace(rowPatternA, `$1${placeholderA}$2`);
+  transposedText = transposedText.replace(rowPatternB, `$1${placeholderB}$2`);
+  transposedText = transposedText.replace(placeholderA, String(statusB));
+  transposedText = transposedText.replace(placeholderB, String(statusA));
+
+  // This is the criterion that proves the vacuity is gone: the structural check throws on the
+  // transposed fixture.
+  assert.throws(
+    () => assertErrorCatalogueMatchesCode(transposedText),
+    'assertErrorCatalogueMatchesCode must throw on a transposed catalogue row',
+  );
+
+  // Demonstration only — not reinstated as a live gate anywhere. The superseded independent
+  // substring predicate ("code appears somewhere" AND "status appears somewhere") still accepts
+  // this exact transposed text, because the transposition only ever moves a status value that
+  // was already present elsewhere in the document onto a different code's row. This is why that
+  // predicate could never have caught this class of drift.
+  assert.ok(transposedText.includes(codeA), `${codeA} must still independently appear in the transposed text`);
+  assert.ok(transposedText.includes(String(statusA)), `${statusA} must still independently appear in the transposed text`);
+  assert.ok(transposedText.includes(codeB), `${codeB} must still independently appear in the transposed text`);
+  assert.ok(transposedText.includes(String(statusB)), `${statusB} must still independently appear in the transposed text`);
+});
+
+test('the catalogue check fails loudly when the catalogue table parses to zero rows', () => {
+  const headingIndex = specText.indexOf('### Error catalogue');
+  assert.ok(headingIndex !== -1, 'expected to find the Error catalogue heading in docs/API.md');
+  const firstDataRowIndex = specText.indexOf('| `', headingIndex);
+  assert.ok(firstDataRowIndex !== -1, 'expected to find at least one catalogue data row in docs/API.md');
+  // Keeps the heading and the header/separator rows, drops every data row — a heading-present,
+  // zero-data-rows fixture, distinct from an absent-heading fixture.
+  const zeroRowFixture = specText.slice(0, firstDataRowIndex);
+  assert.throws(
+    () => assertErrorCatalogueMatchesCode(zeroRowFixture),
+    'assertErrorCatalogueMatchesCode must throw when the catalogue table has a heading but zero data rows',
+  );
+});
+
+test('catalogue matching is keyed by error code, not by table row order', () => {
+  const entries = Object.entries(ERROR_CODES);
+  assert.ok(entries.length >= 2, 'expected at least two catalogue entries to swap');
+  const [codeA, { status: statusA }] = entries[0];
+  const [codeB, { status: statusB }] = entries[1];
+
+  const rowPatternA = new RegExp(`\\|\\s*\`${codeA}\`\\s*\\|\\s*${statusA}\\s*\\|[^\\n]*`);
+  const rowPatternB = new RegExp(`\\|\\s*\`${codeB}\`\\s*\\|\\s*${statusB}\\s*\\|[^\\n]*`);
+  const matchA = rowPatternA.exec(specText);
+  const matchB = rowPatternB.exec(specText);
+  assert.ok(matchA && matchB, 'expected to find both rows to swap in docs/API.md');
+
+  // Swap the two full row lines by position — every code-to-status pair stays intact, only
+  // their order in the table changes.
+  const placeholder = '__ROWSWAP_PLACEHOLDER__';
+  let swappedText = specText.replace(matchA[0], placeholder);
+  swappedText = swappedText.replace(matchB[0], matchA[0]);
+  swappedText = swappedText.replace(placeholder, matchB[0]);
+
+  // Must not throw: matching is keyed by code, never by row index.
+  assertErrorCatalogueMatchesCode(swappedText);
+});
 
 test('docs/API.md documents the X-Error-Code header name buildError() actually returns', () => {
   const envelope = buildError('NOT_FOUND');

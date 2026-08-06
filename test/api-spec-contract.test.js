@@ -45,7 +45,7 @@ import {
   WANT_AUDIO_HEADER,
   WANT_AUDIO_DISABLED_TOKEN,
 } from '../packages/shared/transport/negotiate.js';
-import { listSupportedFormats } from '../packages/shared/audio/format-registry.js';
+import { listSupportedFormats, AUDIO_FORMATS } from '../packages/shared/audio/format-registry.js';
 import { BACKEND_UP, BACKEND_DOWN } from '../packages/shared/health/backend-health-cache.js';
 import { MIN_CLIENT_READ_TIMEOUT_MS } from '../packages/shared/transport/read-timeout.js';
 import { TRANSCRIBE_TIMEOUT_MS, AGENT_TIMEOUT_MS } from '../packages/shared/adapters/stage-timeouts.js';
@@ -55,6 +55,12 @@ const specText = fs.readFileSync(new URL('../docs/API.md', import.meta.url), 'ut
 
 const TEST_CLIENT_NAME = 'contract-test-client';
 const TEST_CLIENT_TOKEN = randomUUID();
+
+// Derived from the registry, not hardcoded, so this file's negotiation fixtures never have
+// to know the exact wire id of "the codec-free format" (same pattern as
+// test/convert.test.js:28's CODEC_FREE_FORMAT_ID).
+const CODEC_FREE_FORMAT_ID = Object.keys(AUDIO_FORMATS).find((id) => AUDIO_FORMATS[id].headerless);
+assert.ok(CODEC_FREE_FORMAT_ID, 'a headerless format must be registered for this suite to run');
 
 // Matches config/config.example.json's tts.voices — the value docs/API.md's capabilities
 // example body cites, so the live 'voices' line and the doc's worked example agree.
@@ -489,7 +495,7 @@ test('a live audio-bearing turn carries every documented response header and its
       body: makePcm16({ samples: 10 }),
       headers: {
         Authorization: `Bearer ${TEST_CLIENT_TOKEN}`,
-        [INPUT_FORMAT_HEADER]: 'pcm16',
+        [INPUT_FORMAT_HEADER]: CODEC_FREE_FORMAT_ID,
       },
     });
     assert.equal(response.statusCode, 200);
@@ -533,7 +539,7 @@ test('a live audio-disabled turn carries the disabled audio-present value and a 
       body: makePcm16({ samples: 10 }),
       headers: {
         Authorization: `Bearer ${TEST_CLIENT_TOKEN}`,
-        [INPUT_FORMAT_HEADER]: 'pcm16',
+        [INPUT_FORMAT_HEADER]: CODEC_FREE_FORMAT_ID,
         [WANT_AUDIO_HEADER]: WANT_AUDIO_DISABLED_TOKEN,
       },
     });
@@ -563,7 +569,7 @@ test('a live unauthenticated POST /v1/turn returns 401, x-error-code UNAUTHORIZE
     const response = await request(port, {
       method: 'POST',
       path: '/v1/turn',
-      headers: { 'Content-Type': 'application/octet-stream', 'X-Voice-Input-Format': 'pcm16' },
+      headers: { 'Content-Type': 'application/octet-stream', [INPUT_FORMAT_HEADER]: CODEC_FREE_FORMAT_ID },
     });
     assert.equal(response.statusCode, 401);
     assert.equal(response.headers['x-error-code'], 'UNAUTHORIZED');
@@ -852,7 +858,7 @@ test('a live audio-bearing 200 turn response carries no body-length header of an
     const port = server.address().port;
     const response = await postTurn(port, {
       body: makePcm16({ samples: 10 }),
-      headers: { Authorization: `Bearer ${TEST_CLIENT_TOKEN}`, [INPUT_FORMAT_HEADER]: 'pcm16' },
+      headers: { Authorization: `Bearer ${TEST_CLIENT_TOKEN}`, [INPUT_FORMAT_HEADER]: CODEC_FREE_FORMAT_ID },
     });
     assert.equal(response.statusCode, 200);
     assertNoBodyLengthHeader(response);
@@ -872,7 +878,7 @@ test('a live audio-disabled 200 turn response carries no body-length header of a
       body: makePcm16({ samples: 10 }),
       headers: {
         Authorization: `Bearer ${TEST_CLIENT_TOKEN}`,
-        [INPUT_FORMAT_HEADER]: 'pcm16',
+        [INPUT_FORMAT_HEADER]: CODEC_FREE_FORMAT_ID,
         [WANT_AUDIO_HEADER]: WANT_AUDIO_DISABLED_TOKEN,
       },
     });

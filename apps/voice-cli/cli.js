@@ -472,6 +472,10 @@ function streamTurnResponseBody(req, res, { onAudioChunk } = {}) {
             const { transcript, reply } = splitTurnBody(res.headers, Buffer.concat(textChunks));
             decoded = { transcript, reply };
           } catch (err) {
+            // WR-06 (06-REVIEW.md): every other refusal path in this function destroys the
+            // request before settling, so the underlying socket is torn down immediately
+            // rather than left to the runtime's own cleanup.
+            req.destroy();
             settleReject(err);
             return;
           }

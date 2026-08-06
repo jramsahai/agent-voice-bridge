@@ -14,7 +14,14 @@ function extractReply(stdout) {
   if (!trimmed) return '';
   try {
     const parsed = JSON.parse(trimmed);
-    return parsed?.result?.payloads?.[0]?.text || parsed?.reply || parsed?.message || parsed?.text || trimmed;
+    // IN-01 (06-REVIEW.md): explicit != null checks, not ||, so a genuinely empty string in
+    // the primary field is preserved rather than treated the same as an absent field and
+    // falling through to the next candidate.
+    const candidates = [parsed?.result?.payloads?.[0]?.text, parsed?.reply, parsed?.message, parsed?.text];
+    for (const candidate of candidates) {
+      if (candidate != null) return candidate;
+    }
+    return trimmed;
   } catch {
     return trimmed;
   }

@@ -284,17 +284,21 @@ test('every one of this phase\'s test files that directly acquires the lock also
 // file PHASE_TEST_FILES above never covered, because it imports from packages/shared/audio and
 // packages/shared/errors rather than this phase's own session/lifecycle/pipeline directories.
 // The hazard is suite-wide, not scoped to this phase's own source, so this specific guard scans
-// every *.test.js file under test/ — not just PHASE_TEST_FILES — with one documented exemption:
-// test/convert.test.js is a Phase 1 file, out of scope for this phase to modify, and its use of
-// the pattern is a different claim than the one that broke here ("a real afconvert subprocess
-// invocation left no residue behind," measured after a real spawn actually happened) rather than
-// format-contract.test.js's broken claim ("no subprocess was ever spawned at all," which has a
-// deterministic, non-racy proof available — see the fix below). A future file reintroducing the
-// listing-read pattern for that latter kind of claim must use a call-count or an
-// already-returned meta flag instead, exactly as format-contract.test.js now does.
-const RACY_LISTING_READ_EXEMPT_FILES = new Set([path.join(TEST_DIR, 'convert.test.js')]);
+// every *.test.js file under test/ — not just PHASE_TEST_FILES.
+//
+// This guard formerly carried one documented exemption: test/convert.test.js, a Phase 1 file
+// that was out of scope for Phase 2 to modify. That exemption was retired on 2026-08-06, when
+// the file's temp-hygiene tests were finally fixed — they had been failing roughly 1 run in 8
+// for exactly the reason predicted here. They no longer diff the shared namespace at all: each
+// points $TMPDIR at a private root for the duration of the test (convert.js resolves
+// os.tmpdir() per call), which both removes the race and buys a stronger assertion — the
+// private root must be *empty*, not merely unchanged. The guard now runs with zero exemptions.
+//
+// A future file reintroducing the listing-read pattern must instead use a call-count, an
+// already-returned meta flag (as format-contract.test.js now does), or a private $TMPDIR root
+// (as convert.test.js now does).
 
-test('no test file in the suite proves temp hygiene by reading the shared os.tmpdir() listing directly, aside from the one documented, out-of-scope exemption', () => {
+test('no test file in the suite proves temp hygiene by reading the shared os.tmpdir() listing directly', () => {
   const racyListingRead = /fs\.readdirSync\(\s*os\.tmpdir\(\)\s*\)/;
   const allTestFiles = fs
     .readdirSync(TEST_DIR)
@@ -303,7 +307,6 @@ test('no test file in the suite proves temp hygiene by reading the shared os.tmp
     .filter((filePath) => filePath !== THIS_FILE);
   assert.ok(allTestFiles.length > 0, 'sanity: expected at least one test file under test/');
   for (const filePath of allTestFiles) {
-    if (RACY_LISTING_READ_EXEMPT_FILES.has(filePath)) continue;
     const source = fs.readFileSync(filePath, 'utf8');
     assert.ok(
       !racyListingRead.test(source),
@@ -312,15 +315,25 @@ test('no test file in the suite proves temp hygiene by reading the shared os.tmp
   }
 });
 
-test('sanity: the one documented exemption to the listing-read guard above still exists and still uses the pattern it is exempted for', () => {
-  for (const filePath of RACY_LISTING_READ_EXEMPT_FILES) {
-    assert.ok(fs.existsSync(filePath), `exempted file ${path.relative(repoRoot, filePath)} no longer exists — remove the stale exemption`);
-    const source = fs.readFileSync(filePath, 'utf8');
-    assert.ok(
-      /fs\.readdirSync\(\s*os\.tmpdir\(\)\s*\)/.test(source),
-      `${path.relative(repoRoot, filePath)} no longer uses the pattern it was exempted for — remove the stale exemption`,
-    );
-  }
+// Replaces the former "the one exemption is still live" sanity check, which existed so a stale
+// exemption could not outlive the file it covered. With the exemption retired there is nothing
+// left to go stale, so the check that earns its place now is the positive one: the file that
+// used to need the exemption really does isolate its temp namespace, rather than having simply
+// deleted the assertions that were failing.
+test('sanity: convert.test.js proves temp hygiene against a private $TMPDIR root, not the shared namespace', () => {
+  const convertTest = path.join(TEST_DIR, 'convert.test.js');
+  assert.ok(fs.existsSync(convertTest), 'expected test/convert.test.js to exist');
+  const source = fs.readFileSync(convertTest, 'utf8');
+  assert.match(
+    source,
+    /process\.env\.TMPDIR\s*=/,
+    'convert.test.js must point $TMPDIR at a private root for its temp-hygiene tests',
+  );
+  assert.match(
+    source,
+    /listMatchingTempEntries\(prefix,\s*root\)/,
+    'convert.test.js must list its own isolated root, never an implicit shared default',
+  );
 });
 
 // =====================================================================================

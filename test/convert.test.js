@@ -44,8 +44,41 @@ function readTempDirPrefix() {
   return match[1];
 }
 
-function listMatchingTempEntries(prefix) {
-  return fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith(prefix));
+// `dir` is deliberately required, with no os.tmpdir() default: the default was the entire
+// defect. Every caller must name the isolated root it owns, so a future call site cannot
+// silently reintroduce a listing read against the shared, process-wide temp namespace.
+function listMatchingTempEntries(prefix, dir) {
+  assert.ok(dir, 'listMatchingTempEntries requires an explicit directory — never the shared os.tmpdir()');
+  return fs.readdirSync(dir).filter((name) => name.startsWith(prefix));
+}
+
+// The hygiene tests below used to snapshot the shared os.tmpdir() before and after a
+// conversion and assert the two listings matched. That is racy by construction: `node --test`
+// runs test files in parallel *processes* that all share one real $TMPDIR, so a conversion
+// started by another file could create or remove its own `voice-bridge-convert-*` directory
+// between this file's two snapshots — observed failing roughly 1 run in 8, always as a
+// phantom entry appearing in or vanishing from the second listing.
+//
+// convert.js resolves os.tmpdir() at call time (not at module load), and os.tmpdir() re-reads
+// $TMPDIR on every call, so pointing $TMPDIR at a private directory for the duration of a test
+// gives that test a temp namespace no other process writes to. Each test file gets its own
+// process, so this mutation is invisible to the rest of the suite.
+//
+// Isolation also buys a strictly stronger assertion: instead of "the listing is unchanged"
+// (which a leak plus an unrelated removal could satisfy), each test can now assert the private
+// root holds *no* conversion residue at all.
+async function withIsolatedTmpdir(fn) {
+  const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vbtest-convert-tmproot-'));
+  const savedTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = isolatedRoot;
+  assert.equal(os.tmpdir(), isolatedRoot, 'sanity: os.tmpdir() must honour the overridden $TMPDIR');
+  try {
+    return await fn(isolatedRoot);
+  } finally {
+    if (savedTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmpdir;
+    fs.rmSync(isolatedRoot, { recursive: true, force: true });
+  }
 }
 
 // Stub scripts live in their own throwaway temp directory with a prefix that deliberately
@@ -157,43 +190,49 @@ test('convertWavToWhisperWav resamples directly to the whisper-ready shape', asy
 
 test('temp hygiene: a successful conversion leaves no residue', async () => {
   const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
-  const pcm = makePcm16({ samples: 4000 });
-  const wav = makeCanonicalWav({ pcm, sampleRate: 44100, channels: 1 });
-  const result = await prepareTranscriptionInput(wav, CONTAINER_FORMAT_ID);
-  assert.ok(!result.error);
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  await withIsolatedTmpdir(async (root) => {
+    const pcm = makePcm16({ samples: 4000 });
+    const wav = makeCanonicalWav({ pcm, sampleRate: 44100, channels: 1 });
+    const result = await prepareTranscriptionInput(wav, CONTAINER_FORMAT_ID);
+    assert.ok(!result.error);
+    assert.deepEqual(listMatchingTempEntries(prefix, root), [], 'a successful conversion must leave no residue');
+  });
 });
 
 test('temp hygiene: a non-zero afconvert exit leaves no residue', async () => {
+  const prefix = readTempDirPrefix();
+  // The stub directory is created from the *real* tmpdir, before the override, so the
+  // fixture this test writes for itself can never be mistaken for conversion residue.
   await withStubDir(async (stubDir) => {
     const stubPath = writeStub(stubDir, 'afconvert-fail.sh', '#!/bin/sh\nexit 1\n');
-    const prefix = readTempDirPrefix();
-    const before = listMatchingTempEntries(prefix);
-    const wav = makeCanonicalWav({ pcm: makePcm16({ samples: 2000 }), sampleRate: 44100 });
-    const result = await convertWavToWhisperWav(wav, { afconvertBin: stubPath });
-    assert.ok(result.error, 'expected a resolved failure envelope');
-    assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+    await withIsolatedTmpdir(async (root) => {
+      const wav = makeCanonicalWav({ pcm: makePcm16({ samples: 2000 }), sampleRate: 44100 });
+      const result = await convertWavToWhisperWav(wav, { afconvertBin: stubPath });
+      assert.ok(result.error, 'expected a resolved failure envelope');
+      assert.deepEqual(listMatchingTempEntries(prefix, root), [], 'a failed conversion must leave no residue');
+    });
   });
 });
 
 test('temp hygiene: a missing afconvert binary leaves no residue', async () => {
   const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
-  const wav = makeCanonicalWav({ pcm: makePcm16({ samples: 2000 }), sampleRate: 44100 });
-  const result = await convertWavToWhisperWav(wav, { afconvertBin: '/nonexistent-afconvert-binary-xyz' });
-  assert.ok(result.error, 'expected a resolved failure envelope');
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  await withIsolatedTmpdir(async (root) => {
+    const wav = makeCanonicalWav({ pcm: makePcm16({ samples: 2000 }), sampleRate: 44100 });
+    const result = await convertWavToWhisperWav(wav, { afconvertBin: '/nonexistent-afconvert-binary-xyz' });
+    assert.ok(result.error, 'expected a resolved failure envelope');
+    assert.deepEqual(listMatchingTempEntries(prefix, root), [], 'an unspawnable binary must leave no residue');
+  });
 });
 
 test('temp hygiene: an invalid input buffer creates no temp directory at all', async () => {
   const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
-  // Fails readWavFormat's own RIFF/WAVE preamble check before any temp directory is ever
-  // created — unlike 'no-data-chunk' (still a valid fmt chunk, just missing 'data'), this
-  // fixture is too short to even be a container, so this exercises the true fail-fast path.
-  await assert.rejects(() => prepareTranscriptionInput(makeMalformedWav('truncated-header'), CONTAINER_FORMAT_ID));
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
+  await withIsolatedTmpdir(async (root) => {
+    // Fails readWavFormat's own RIFF/WAVE preamble check before any temp directory is ever
+    // created — unlike 'no-data-chunk' (still a valid fmt chunk, just missing 'data'), this
+    // fixture is too short to even be a container, so this exercises the true fail-fast path.
+    await assert.rejects(() => prepareTranscriptionInput(makeMalformedWav('truncated-header'), CONTAINER_FORMAT_ID));
+    assert.deepEqual(listMatchingTempEntries(prefix, root), [], 'a fail-fast path must create no directory at all');
+  });
 });
 
 // --- Failure mapping and leak-freedom ---
@@ -294,21 +333,24 @@ test('several conversions launched concurrently all succeed and leave no temp re
   // overlap in practice — a fixed (non-unique) temp path would pass here in isolation and
   // fail intermittently under real suite load, which is the worst failure mode available.
   const prefix = readTempDirPrefix();
-  const before = listMatchingTempEntries(prefix);
+  await withIsolatedTmpdir(async (root) => {
+    const jobs = Array.from({ length: 6 }, (_, i) => {
+      const pcm = makePcm16({ samples: 2000 + i * 137 });
+      const wav = makeCanonicalWav({ pcm, sampleRate: 44100, channels: i % 2 === 0 ? 1 : 2 });
+      return prepareTranscriptionInput(wav, CONTAINER_FORMAT_ID);
+    });
 
-  const jobs = Array.from({ length: 6 }, (_, i) => {
-    const pcm = makePcm16({ samples: 2000 + i * 137 });
-    const wav = makeCanonicalWav({ pcm, sampleRate: 44100, channels: i % 2 === 0 ? 1 : 2 });
-    return prepareTranscriptionInput(wav, CONTAINER_FORMAT_ID);
+    const outcomes = await Promise.all(jobs);
+    for (const result of outcomes) {
+      assert.ok(!result.error, 'every concurrent conversion must succeed');
+      assert.deepEqual(readWavFormat(result.wavBuffer), { sampleRate: 16000, channels: 1, bitDepth: 16 });
+    }
+
+    // The six overlapping conversions above are this test's whole point, and the isolated
+    // root contains nothing else — so an empty listing here proves each one reclaimed its own
+    // unique directory, which a diff against the shared os.tmpdir() could never do cleanly.
+    assert.deepEqual(listMatchingTempEntries(prefix, root), [], 'six concurrent conversions must leave no residue');
   });
-
-  const outcomes = await Promise.all(jobs);
-  for (const result of outcomes) {
-    assert.ok(!result.error, 'every concurrent conversion must succeed');
-    assert.deepEqual(readWavFormat(result.wavBuffer), { sampleRate: 16000, channels: 1, bitDepth: 16 });
-  }
-
-  assert.deepEqual(listMatchingTempEntries(prefix).sort(), before.sort());
 });
 
 // Phase 3's test/http-turn.test.js is the first file in the repository that legitimately

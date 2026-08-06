@@ -1455,3 +1455,282 @@ test('readTurnFraming refuses an absent, non-numeric, negative, or non-safe-inte
   );
 });
 
+// =====================================================================================
+// Task 2 (06-07-PLAN.md): the edge and hostile-input surface the new incremental reader
+// introduces — the no-audio exact-length case, UTF-8 byte-vs-character splitting, sink
+// backpressure, a hostile oversized framing declaration, and partial-sink cleanup on a
+// ceiling breach.
+// =====================================================================================
+
+test('an audio-present-zero response whose body length exactly equals the two text byte counts exits OK, opens no sink, and writes no output file', async () => {
+  const transcript = 'no audio follows this response';
+  const reply = 'nothing after the two text spans';
+  const transcriptBuf = Buffer.from(transcript, 'utf8');
+  const replyBuf = Buffer.from(reply, 'utf8');
+  const bodyBuf = Buffer.concat([transcriptBuf, replyBuf]);
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, {
+        'x-voice-transcript-bytes': String(transcriptBuf.length),
+        'x-voice-reply-bytes': String(replyBuf.length),
+        'x-voice-audio-present': '0',
+      });
+      res.end(bodyBuf);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+
+  try {
+    const { result, stdout } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath }),
+    );
+    assert.equal(result, EXIT_CODES.OK);
+    assert.ok(stdout.some((line) => line.includes(transcript)));
+    assert.ok(stdout.some((line) => line.includes(reply)));
+    assert.equal(fs.existsSync(outPath), false, 'a no-audio turn must not leave a zero-length file behind');
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// Returns the byte offset of the first byte immediately after a multi-byte UTF-8 lead byte in
+// buf — i.e. an offset strictly inside that character's encoded sequence.
+function findMidCharacterSplitOffset(buf) {
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] >= 0xc0) {
+      return i + 1;
+    }
+  }
+  throw new Error('findMidCharacterSplitOffset: no multi-byte UTF-8 lead byte found in buffer');
+}
+
+test('a multi-byte transcript and reply split mid-character across two socket chunks decode to the exact original strings', async () => {
+  const transcript = 'café über straße 日本語';
+  const reply = 'résumé naïve 😀 emoji reply';
+  const transcriptBuf = Buffer.from(transcript, 'utf8');
+  const replyBuf = Buffer.from(reply, 'utf8');
+  // Proves the fixture actually exercises the byte-versus-character distinction, not just ASCII.
+  assert.notEqual(
+    transcript.length,
+    Buffer.byteLength(transcript, 'utf8'),
+    'sanity: the transcript fixture must contain at least one multi-byte character',
+  );
+
+  const audio = Buffer.from(Array.from({ length: 4096 }, (_, i) => i % 256));
+  const bodyBuf = Buffer.concat([transcriptBuf, replyBuf, audio]);
+  const splitOffset = findMidCharacterSplitOffset(transcriptBuf);
+  assert.equal(
+    bodyBuf[splitOffset] & 0xc0,
+    0x80,
+    'sanity: the chosen split offset must land on a UTF-8 continuation byte',
+  );
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, {
+        'x-voice-transcript-bytes': String(Buffer.byteLength(transcript, 'utf8')),
+        'x-voice-reply-bytes': String(Buffer.byteLength(reply, 'utf8')),
+        'x-voice-audio-present': '1',
+      });
+      res.write(bodyBuf.subarray(0, splitOffset));
+      res.write(bodyBuf.subarray(splitOffset));
+      res.end();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+
+  try {
+    const { result, stdout } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath }),
+    );
+    assert.equal(result, EXIT_CODES.OK);
+    assert.ok(stdout.some((line) => line === `transcript: ${transcript}`), 'the transcript must decode exactly');
+    assert.ok(stdout.some((line) => line === `reply: ${reply}`), 'the reply must decode exactly');
+    assert.deepEqual(fs.readFileSync(outPath), audio, 'the audio segment must still round-trip byte-for-byte');
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('a slow sink applying backpressure still receives every audio byte, in order, with no loss', async () => {
+  const transcript = 'backpressure test transcript';
+  const reply = 'backpressure test reply';
+  const transcriptBuf = Buffer.from(transcript, 'utf8');
+  const replyBuf = Buffer.from(reply, 'utf8');
+  const audioChunks = Array.from({ length: 5 }, (_, i) => Buffer.alloc(64 * 1024, i + 10));
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, {
+        'x-voice-transcript-bytes': String(transcriptBuf.length),
+        'x-voice-reply-bytes': String(replyBuf.length),
+        'x-voice-audio-present': '1',
+      });
+      res.write(transcriptBuf);
+      res.write(replyBuf);
+      for (const chunk of audioChunks) {
+        res.write(chunk);
+      }
+      res.end();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  // A plain object whose write always reports backpressure (returns false) and drains on a
+  // short timer — matching the .onDrain contract Task 1 attached directly to the real sink's
+  // own write function (createAudioSink in apps/voice-cli/cli.js).
+  const receivedChunks = [];
+  let drainWaiters = [];
+  const write = (chunk) => {
+    receivedChunks.push(Buffer.from(chunk));
+    setImmediate(() => {
+      const waiters = drainWaiters;
+      drainWaiters = [];
+      for (const waiter of waiters) waiter();
+    });
+    return false;
+  };
+  write.onDrain = (cb) => {
+    drainWaiters.push(cb);
+  };
+
+  try {
+    const pcmBuffer = wavToPcm(makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }));
+    const response = await postTurn({ host: '127.0.0.1', port, token: 'unused', pcmBuffer, onAudioChunk: write });
+    assert.equal(response.transcript, transcript);
+    assert.equal(response.reply, reply);
+    assert.deepEqual(
+      Buffer.concat(receivedChunks),
+      Buffer.concat(audioChunks),
+      'the slow sink must receive every audio byte, byte-for-byte and in order',
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a declared text span larger than MAX_RESPONSE_BYTES is refused before any body byte is retained', async () => {
+  const oversizedTranscriptBytes = MAX_RESPONSE_BYTES + 1;
+  let socketClosedBeforeBodyWriteAttempt = false;
+  let bodyWriteWasAttempted = false;
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const socket = req.socket;
+      res.writeHead(200, {
+        'x-voice-transcript-bytes': String(oversizedTranscriptBytes),
+        'x-voice-reply-bytes': '0',
+        'x-voice-audio-present': '0',
+      });
+      // Headers are otherwise buffered until the first body write — flush them now so the
+      // client's 'response' event (and its readTurnFraming refusal) fires immediately,
+      // before this server's own bounded wait below.
+      res.flushHeaders();
+      // Waits (bounded) for the underlying socket to actually close — the observable effect
+      // of the client's own req.destroy() propagating over the real loopback connection —
+      // before this server ever attempts to write a body byte. A non-refusing client would
+      // never close the socket here, so the bound makes a wrong implementation fail
+      // deterministically rather than hang.
+      const waitForSocketClose = new Promise((resolve) => {
+        if (socket.destroyed) {
+          resolve();
+          return;
+        }
+        const timer = setTimeout(resolve, 1500);
+        socket.once('close', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      waitForSocketClose.then(() => {
+        socketClosedBeforeBodyWriteAttempt = socket.destroyed;
+        bodyWriteWasAttempted = true;
+        if (!socket.destroyed) {
+          res.end(Buffer.from('small body that must never be consumed', 'utf8'));
+        }
+      });
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  try {
+    const pcmBuffer = wavToPcm(makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }));
+    await assert.rejects(
+      () => postTurn({ host: '127.0.0.1', port, token: 'unused', pcmBuffer, onAudioChunk: () => true }),
+      (error) => {
+        assert.equal(error.code, 'CONTRACT_VIOLATION');
+        return true;
+      },
+    );
+    await waitUntil(() => bodyWriteWasAttempted, { timeoutMs: 2000 });
+    assert.equal(
+      socketClosedBeforeBodyWriteAttempt,
+      true,
+      'the server must observe the client already destroyed the connection before this server attempted to write the body it queued',
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a ceiling breach after partial audio has been written removes the partial output file and never prints its path', async () => {
+  const transcript = 'partial cleanup transcript';
+  const reply = 'partial cleanup reply';
+  const transcriptBuf = Buffer.from(transcript, 'utf8');
+  const replyBuf = Buffer.from(reply, 'utf8');
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, {
+        'x-voice-transcript-bytes': String(transcriptBuf.length),
+        'x-voice-reply-bytes': String(replyBuf.length),
+        'x-voice-audio-present': '1',
+      });
+      res.write(transcriptBuf);
+      res.write(replyBuf);
+      res.write(Buffer.alloc(4096, 7)); // a first, legitimate audio chunk actually written
+      streamPastCeiling(res);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const tmpDir = makeTmpDir();
+  const inputPath = makeConformingInput(tmpDir);
+  const outPath = path.join(tmpDir, 'reply.pcm');
+
+  try {
+    const { result, stdout } = await captureConsole(() =>
+      runCliTurn({ host: '127.0.0.1', port, token: 'unused', inputPath, outPath }),
+    );
+    assert.equal(result, EXIT_CODES.CONTRACT_VIOLATION);
+    assert.equal(fs.existsSync(outPath), false, 'the partial output file must be removed on a ceiling breach');
+    assert.ok(
+      !stdout.some((line) => line.includes(outPath)),
+      'the output path must never be printed once the turn has failed',
+    );
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

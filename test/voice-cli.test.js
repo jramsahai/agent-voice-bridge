@@ -24,6 +24,8 @@ import {
   runCliTurn,
   playReplyPcm,
   readCapabilities,
+  postTurn,
+  readTurnFraming,
   main,
   DEFAULT_READ_TIMEOUT_MS,
   TOKEN_ENV_VAR,
@@ -1288,3 +1290,168 @@ test('readCapabilities refuses a capabilities response that streams past the res
     await closeServer(server);
   }
 });
+
+// =====================================================================================
+// Task 1 (06-07-PLAN.md): the gate-based incremental-consumption proof. Drives postTurn
+// directly (never runCliTurn) against a fake server that gates its own final audio write
+// open until the client's onAudioChunk callback has already fired at least once — proving
+// audio reaches the sink before the response stream's 'end' event, not merely that the final
+// bytes are correct once everything has arrived.
+//
+// Negative-case proof (recorded verbatim in 06-07-SUMMARY.md): against an accumulate-then-
+// concat reader (the pre-Task-1 buffering implementation), onAudioChunk is never called until
+// the 'end' event fires, so the gate this test relies on never opens, the server-recorded
+// flag below stays false, and the single onAudioChunk delivery would equal the whole audio
+// segment. This is a genuine negative-case proof, not a restatement of the final bytes being
+// correct — reverting streamTurnResponseBody's per-chunk dispatch to an end-of-stream flush
+// must make this test fail.
+// =====================================================================================
+
+// Shared harness for both of Task 1's own proof tests below — each calls this independently
+// so each test's name stands alone and asserts only the one property its name promises.
+async function runStreamingOrderProof() {
+  const transcript = 'streamed transcript text for the ordering proof';
+  const reply = 'streamed reply text for the ordering proof, somewhat longer than the transcript';
+  const transcriptBuf = Buffer.from(transcript, 'utf8');
+  const replyBuf = Buffer.from(reply, 'utf8');
+
+  // Several hundred kilobytes across at least four writes, so the multi-chunk expectation is
+  // not at the mercy of socket coalescing.
+  const audioChunkCount = 6;
+  const audioChunkSize = 96 * 1024;
+  const audioChunks = Array.from({ length: audioChunkCount }, (_, i) => Buffer.alloc(audioChunkSize, (i % 200) + 1));
+  const totalAudioLength = audioChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+
+  let gateOpened = false;
+  let gateWasOpenBeforeFinalWrite = false;
+  const gate = makeGate();
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', async () => {
+      res.writeHead(200, {
+        'x-voice-transcript-bytes': String(transcriptBuf.length),
+        'x-voice-reply-bytes': String(replyBuf.length),
+        'x-voice-audio-present': '1',
+      });
+      res.write(transcriptBuf);
+      res.write(replyBuf);
+      res.write(audioChunks[0]);
+
+      // Bounded wait: a non-streaming client produces a deterministic assertion failure here
+      // (gateWasOpenBeforeFinalWrite stays false) rather than a hang.
+      await Promise.race([gate.promise, new Promise((resolve) => setTimeout(resolve, 2000))]);
+
+      for (let i = 1; i < audioChunks.length - 1; i++) {
+        res.write(audioChunks[i]);
+      }
+      // Recorded immediately before the final write — the assertion this whole proof rests on.
+      gateWasOpenBeforeFinalWrite = gateOpened;
+      res.write(audioChunks[audioChunks.length - 1]);
+      res.end();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const receivedChunks = [];
+  const onAudioChunk = (chunk) => {
+    receivedChunks.push(Buffer.from(chunk));
+    if (!gateOpened) {
+      gateOpened = true;
+      gate.release();
+    }
+    return true;
+  };
+
+  try {
+    const pcmBuffer = wavToPcm(makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }));
+    const response = await postTurn({ host: '127.0.0.1', port, token: 'unused', pcmBuffer, onAudioChunk });
+    return { response, transcript, reply, receivedChunks, totalAudioLength, gateWasOpenBeforeFinalWrite };
+  } finally {
+    await closeServer(server);
+  }
+}
+
+test("audio bytes reach the sink before the response stream ends — the server observes the client's first audio byte before it writes the final chunk", async () => {
+  const { response, transcript, reply, receivedChunks, totalAudioLength, gateWasOpenBeforeFinalWrite } =
+    await runStreamingOrderProof();
+  assert.equal(response.transcript, transcript);
+  assert.equal(response.reply, reply);
+  assert.ok(
+    gateWasOpenBeforeFinalWrite,
+    "the server must have observed the client's first audio byte before writing its final chunk",
+  );
+  assert.ok(receivedChunks.length > 1, 'onAudioChunk must be invoked more than once');
+  const receivedTotal = receivedChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  assert.equal(
+    receivedTotal,
+    totalAudioLength,
+    'the concatenation of every onAudioChunk delivery must equal the audio the server sent',
+  );
+});
+
+test('no single sink call ever carries the whole audio segment', async () => {
+  const { receivedChunks, totalAudioLength } = await runStreamingOrderProof();
+  assert.ok(receivedChunks.length > 1, 'sanity: more than one chunk must have been delivered');
+  const largestSingleDelivery = Math.max(...receivedChunks.map((chunk) => chunk.length));
+  assert.ok(
+    largestSingleDelivery < totalAudioLength,
+    'no single onAudioChunk invocation may carry the entire audio segment',
+  );
+});
+
+// =====================================================================================
+// readTurnFraming — the exported framing-header validator (Task 1/2, 06-07-PLAN.md).
+// =====================================================================================
+
+test('readTurnFraming refuses an absent, non-numeric, negative, or non-safe-integer framing byte count', () => {
+  const validHeaders = {
+    'x-voice-transcript-bytes': '10',
+    'x-voice-reply-bytes': '5',
+    'x-voice-audio-present': '1',
+  };
+  // Sanity: the valid baseline this test mutates from must itself be accepted.
+  assert.deepEqual(readTurnFraming(validHeaders), { transcriptBytes: 10, replyBytes: 5, audioPresent: true });
+
+  const invalidTranscriptBytesValues = [
+    undefined, // absent
+    'not-a-number', // non-numeric
+    '-5', // negative
+    '1.5', // fractional, not a safe integer
+    '99999999999999999999', // above Number.MAX_SAFE_INTEGER
+  ];
+  for (const value of invalidTranscriptBytesValues) {
+    const headers = { ...validHeaders };
+    if (value === undefined) {
+      delete headers['x-voice-transcript-bytes'];
+    } else {
+      headers['x-voice-transcript-bytes'] = value;
+    }
+    assert.throws(
+      () => readTurnFraming(headers),
+      (error) => {
+        assert.equal(error.code, 'CONTRACT_VIOLATION');
+        return true;
+      },
+      `expected readTurnFraming to reject x-voice-transcript-bytes = ${JSON.stringify(value)}`,
+    );
+  }
+
+  // The sixth case: a text-span sum exceeding the response ceiling, derived from the imported
+  // MAX_RESPONSE_BYTES constant — never a typed byte-count literal.
+  const oversizedSumHeaders = {
+    'x-voice-transcript-bytes': String(MAX_RESPONSE_BYTES),
+    'x-voice-reply-bytes': '1',
+    'x-voice-audio-present': '0',
+  };
+  assert.throws(
+    () => readTurnFraming(oversizedSumHeaders),
+    (error) => {
+      assert.equal(error.code, 'CONTRACT_VIOLATION');
+      return true;
+    },
+    'expected readTurnFraming to reject a text-span sum exceeding MAX_RESPONSE_BYTES',
+  );
+});
+

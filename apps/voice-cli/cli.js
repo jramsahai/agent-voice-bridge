@@ -3,12 +3,12 @@
 // turn against the published API alone — everything downstream in this phase (transport
 // hardening, playback, the browser rewrite) assumes the wire contract proven here holds.
 //
-// One path only: argv -> WAV file read -> PCM extraction -> HTTP request -> header-framed
-// response split -> printed output. Transport is node:http exclusively — never the global
-// fetch API: per CLI-02's posture, undici's fetch implementation auto-follows redirects and
-// auto-decompresses gzip, silently defeating the "microcontroller-like client" this
-// reference implementation exists to prove (05-RESEARCH.md Pitfall 3). Do not import fetch
-// here or in any later plan.
+// One path only: argv -> WAV file read -> PCM extraction -> HTTP request -> incremental
+// text-then-audio-streamed response consumption -> printed output. Transport is node:http
+// exclusively — never the global fetch API: per CLI-02's posture, undici's fetch
+// implementation auto-follows redirects and auto-decompresses gzip, silently defeating the
+// "microcontroller-like client" this reference implementation exists to prove (05-RESEARCH.md
+// Pitfall 3). Do not import fetch here or in any later plan.
 //
 // The CLI never imports the shared configuration loader and never reads the operator's local
 // config file — it proves it needs only the published API and its own single provisioned
@@ -246,45 +246,56 @@ export function assertConformingWav(wavBuffer) {
   return format;
 }
 
-// IN-01 (05-REVIEW.md): shared response-body reader postTurn and readCapabilities both
-// invoke from their own response callback — the 3xx redirect refusal, content-encoding
-// refusal, and CR-02 response-ceiling tracking were near-verbatim duplicated across both
-// before this extraction; only each caller's own 'end'-time interpretation of the buffered
-// body (turn framing vs capabilities status/line parsing) stays local to that caller.
-// Resolves the raw concatenated body Buffer once the response stream's own 'end' event
-// fires; rejects with a tagged CONTRACT_VIOLATION error on any of the three refusals above.
-function readTurnResponseBody(req, res) {
-  return new Promise((resolve, reject) => {
-    // Redirect refusal: node:http never follows a Location header on its own — this makes
-    // that refusal explicit rather than incidental. The Location header itself is never
-    // read; there is nothing to act on, only a violation to report.
-    if (res.statusCode >= 300 && res.statusCode <= 399) {
-      res.resume();
-      const err = new Error(
-        `received a ${res.statusCode} redirect response — the service is specified never ` +
-          `to redirect (API-08); no second request was issued`,
-      );
-      err.code = 'CONTRACT_VIOLATION';
-      req.destroy();
-      reject(err);
-      return;
-    }
+// IN-01 (05-REVIEW.md): shared refusal guard postTurn and readCapabilities both invoke from
+// their own response callback — the 3xx redirect refusal and the content-encoding refusal
+// were near-verbatim duplicated across both before this extraction. Task 1 (06-07-PLAN.md)
+// split this further out of the old readTurnResponseBody so both readBufferedResponseBody
+// and the new incremental streamTurnResponseBody share one copy. Throws synchronously (never
+// returns a rejected promise itself) — safe to call as the first statement inside a Promise
+// executor, since a synchronous throw there is caught by the Promise constructor and turns
+// into a rejection automatically.
+function assertUntransformedResponse(req, res) {
+  // Redirect refusal: node:http never follows a Location header on its own — this makes
+  // that refusal explicit rather than incidental. The Location header itself is never
+  // read; there is nothing to act on, only a violation to report.
+  if (res.statusCode >= 300 && res.statusCode <= 399) {
+    res.resume();
+    const err = new Error(
+      `received a ${res.statusCode} redirect response — the service is specified never ` +
+        `to redirect (API-08); no second request was issued`,
+    );
+    err.code = 'CONTRACT_VIOLATION';
+    req.destroy();
+    throw err;
+  }
 
-    // Compression refusal: accept-encoding: identity was already sent above; a response
-    // that carries content-encoding anyway means something on the hop compressed it
-    // regardless — never decompressed here, only reported.
-    const contentEncoding = res.headers['content-encoding'];
-    if (contentEncoding) {
-      res.resume();
-      const err = new Error(
-        `response carried a content-encoding header ('${contentEncoding}') — this client ` +
-          `only ever sends accept-encoding: identity and never decompresses a response`,
-      );
-      err.code = 'CONTRACT_VIOLATION';
-      req.destroy();
-      reject(err);
-      return;
-    }
+  // Compression refusal: accept-encoding: identity was already sent above; a response
+  // that carries content-encoding anyway means something on the hop compressed it
+  // regardless — never decompressed here, only reported.
+  const contentEncoding = res.headers['content-encoding'];
+  if (contentEncoding) {
+    res.resume();
+    const err = new Error(
+      `response carried a content-encoding header ('${contentEncoding}') — this client ` +
+        `only ever sends accept-encoding: identity and never decompresses a response`,
+    );
+    err.code = 'CONTRACT_VIOLATION';
+    req.destroy();
+    throw err;
+  }
+}
+
+// Renamed from readTurnResponseBody (Task 1, 06-07-PLAN.md) — this reader still accumulates
+// the whole body via Buffer.concat, which is now correct only for the two callers left using
+// it: readCapabilities (a small, fully-known line-based body) and postTurn's non-200 branch
+// (a small, fully-known error envelope). The 200-status turn-response path moved to
+// streamTurnResponseBody below, which never buffers audio. Resolves the raw concatenated body
+// Buffer once the response stream's own 'end' event fires; rejects with a tagged
+// CONTRACT_VIOLATION error on any of assertUntransformedResponse's two refusals, or on
+// breaching the response ceiling below.
+function readBufferedResponseBody(req, res) {
+  return new Promise((resolve, reject) => {
+    assertUntransformedResponse(req, res);
 
     // CR-02 (05-REVIEW.md): a misbehaving backend or reverse proxy sending an oversized
     // or endlessly-streaming body has no ceiling without this — the client would grow its
@@ -317,18 +328,199 @@ function readTurnResponseBody(req, res) {
   });
 }
 
-// Issues POST /v1/turn via node:http (never fetch — see file header). Resolves
-// { statusCode, headers, body } once the response stream's own 'end' event fires — the
-// success response never sets Content-Length (it is chunked), so nothing here ever waits on,
-// trusts, or sizes a buffer from that header; the body is consumed only to the stream's own
-// 'end' event (the rule Phase 6's SPEC-03 will publish for every client). The 'timeout'
+// Exported so test/voice-cli.test.js can drive its edge-case surface directly (Task 2,
+// 06-07-PLAN.md). Parses and validates the three X-Voice-* framing headers into
+// { transcriptBytes, replyBytes, audioPresent } before streamTurnResponseBody attaches any
+// data listener — a hostile or malformed declaration is refused before a single body byte is
+// retained. Deliberately duplicates, rather than calls, splitTurnBody's own count validation:
+// splitTurnBody keeps its own message text and its own five existing unit tests unchanged, and
+// it runs later — after the body is known — to catch a declared-vs-received mismatch this
+// function cannot see yet (it only ever sees headers).
+export function readTurnFraming(headers) {
+  const rawTranscriptBytes = headers['x-voice-transcript-bytes'];
+  const rawReplyBytes = headers['x-voice-reply-bytes'];
+  const audioPresent = headers['x-voice-audio-present'] === '1';
+
+  const transcriptBytes = Number(rawTranscriptBytes);
+  if (!isValidFramingCount(transcriptBytes)) {
+    throwFramingViolation('x-voice-transcript-bytes', rawTranscriptBytes);
+  }
+  const replyBytes = Number(rawReplyBytes);
+  if (!isValidFramingCount(replyBytes)) {
+    throwFramingViolation('x-voice-reply-bytes', rawReplyBytes);
+  }
+
+  const textBoundary = transcriptBytes + replyBytes;
+  if (textBoundary > MAX_RESPONSE_BYTES) {
+    const err = new Error(
+      `declared text span of ${textBoundary} bytes (x-voice-transcript-bytes + ` +
+        `x-voice-reply-bytes) exceeds the ${MAX_RESPONSE_BYTES}-byte response ceiling — ` +
+        `refusing to retain any body byte`,
+    );
+    err.code = 'CONTRACT_VIOLATION';
+    throw err;
+  }
+
+  return { transcriptBytes, replyBytes, audioPresent };
+}
+
+function isValidFramingCount(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function throwFramingViolation(headerName, rawValue) {
+  const err = new Error(
+    `response header '${headerName}' is not a valid non-negative safe-integer byte count ` +
+      `(read: ${JSON.stringify(rawValue)})`,
+  );
+  err.code = 'CONTRACT_VIOLATION';
+  throw err;
+}
+
+// The incremental reader (Task 1, 06-07-PLAN.md) — the one piece of the CLI that proves
+// docs/API.md's MUST-level no-full-buffering claim (SPEC-03). Accumulates only the declared
+// text span (transcript bytes + reply bytes), decodes it exactly once via the unchanged
+// splitTurnBody, and hands every subsequent byte straight to onAudioChunk as it arrives.
+// Audio bytes are never pushed into an array, a Map, or a Buffer.concat call — the only
+// Buffer.concat calls in this function operate on the text accumulator.
+//
+// Decoding the text span only once the full span has arrived (never per-chunk) is what makes
+// a multi-byte character split across two socket chunks decode correctly — decoding a partial
+// span would risk cutting a multi-byte UTF-8 sequence in half.
+function streamTurnResponseBody(req, res, { onAudioChunk } = {}) {
+  return new Promise((resolve, reject) => {
+    assertUntransformedResponse(req, res);
+
+    let framing;
+    try {
+      framing = readTurnFraming(res.headers);
+    } catch (err) {
+      // Refused before any data listener is attached — nothing has been read yet, so
+      // destroying the request here is the only cleanup needed.
+      req.destroy();
+      throw err;
+    }
+    const { transcriptBytes, replyBytes, audioPresent } = framing;
+    const textBoundary = transcriptBytes + replyBytes;
+
+    const textChunks = [];
+    let textReceived = 0;
+    let decoded = null; // set to { transcript, reply } once the full text span is decoded
+    let receivedBytes = 0;
+    let settled = false;
+
+    const settleReject = (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+    const settleResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    res.on('data', (chunk) => {
+      if (settled) return;
+
+      // CR-02 (05-REVIEW.md), preserved verbatim: the ceiling is checked against every
+      // received byte before any of it is retained, text or audio alike.
+      receivedBytes += chunk.length;
+      if (receivedBytes > MAX_RESPONSE_BYTES) {
+        const err = new Error(
+          `response exceeded the ${MAX_RESPONSE_BYTES}-byte response ceiling — refusing to buffer further`,
+        );
+        err.code = 'CONTRACT_VIOLATION';
+        req.destroy();
+        settleReject(err);
+        return;
+      }
+
+      let audioChunk = null;
+      if (decoded === null) {
+        const remaining = textBoundary - textReceived;
+        if (chunk.length <= remaining) {
+          textChunks.push(chunk);
+          textReceived += chunk.length;
+        } else {
+          textChunks.push(chunk.subarray(0, remaining));
+          textReceived += remaining;
+          audioChunk = chunk.subarray(remaining);
+        }
+        if (textReceived === textBoundary) {
+          try {
+            const { transcript, reply } = splitTurnBody(res.headers, Buffer.concat(textChunks));
+            decoded = { transcript, reply };
+          } catch (err) {
+            settleReject(err);
+            return;
+          }
+        }
+      } else {
+        audioChunk = chunk;
+      }
+
+      if (audioChunk && audioChunk.length > 0 && audioPresent) {
+        // Handed straight to the caller-supplied sink, never retained here — this is what
+        // keeps the largest single sink call strictly below the total audio length for a
+        // multi-chunk reply.
+        const writeResult = onAudioChunk(audioChunk);
+        // Sink backpressure (T-06-14): pausing the response stream when the sink's own
+        // write signals it is full, and resuming only once the sink itself says it has
+        // drained, is what stops audio piling up inside the sink's internal writable
+        // buffer instead of the array this whole function exists to avoid. The drain
+        // signal is reached through the sink-supplied onAudioChunk function's own
+        // .onDrain registration, never by this reader reaching into a stream directly.
+        if (writeResult === false) {
+          res.pause();
+          onAudioChunk.onDrain(() => res.resume());
+        }
+      }
+    });
+
+    res.on('end', () => {
+      if (settled) return;
+      if (decoded === null) {
+        // The stream ended before the declared text span was satisfied — let the
+        // unchanged splitTurnBody raise its existing over-declared CONTRACT_VIOLATION
+        // against however much text actually arrived, producing the identical message
+        // shape and tag the previous buffering implementation produced.
+        try {
+          splitTurnBody(res.headers, Buffer.concat(textChunks));
+        } catch (err) {
+          settleReject(err);
+          return;
+        }
+        // splitTurnBody's own validation (transcriptBytes + replyBytes > body.length)
+        // always throws in this branch, since textReceived < textBoundary got us here —
+        // this line is unreachable but left rather than assumed.
+        return;
+      }
+      settleResolve({
+        transcript: decoded.transcript,
+        reply: decoded.reply,
+        audioBytes: Math.max(0, receivedBytes - textBoundary),
+      });
+    });
+
+    res.on('error', (err) => settleReject(err));
+  });
+}
+
+// Issues POST /v1/turn via node:http (never fetch — see file header). On a 200 response,
+// resolves { statusCode, headers, rawHeaders, transcript, reply, audioBytes } via the
+// incremental streamTurnResponseBody — the text span is consumed only to the stream's own
+// 'end' event, but the audio segment (Task 1, 06-07-PLAN.md) is consumed as it arrives, handed
+// straight to the caller-supplied onAudioChunk sink rather than accumulated to 'end'. On any
+// other status, resolves { statusCode, headers, rawHeaders, body } via readBufferedResponseBody
+// — an error body is small and fully known, so buffering it costs nothing. The 'timeout'
 // option only emits an event on socket inactivity; it does not abort anything on its own, so
-// readTurnResponseBody above must call req.destroy() itself (05-RESEARCH.md Pitfall 2). A 3xx
+// both readers above must call req.destroy() themselves (05-RESEARCH.md Pitfall 2). A 3xx
 // status or a content-encoding response header is a hard CONTRACT_VIOLATION failure rather
 // than a followed redirect or a silent decompression — both are behaviors the service is
 // specified never to exhibit (API-08), and a client that tolerated either would mask exactly
 // the proxy misconfiguration this posture exists to catch.
-export function postTurn({ host, port, token, pcmBuffer, timeoutMs = DEFAULT_READ_TIMEOUT_MS }) {
+export function postTurn({ host, port, token, pcmBuffer, timeoutMs = DEFAULT_READ_TIMEOUT_MS, onAudioChunk }) {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
@@ -348,9 +540,26 @@ export function postTurn({ host, port, token, pcmBuffer, timeoutMs = DEFAULT_REA
         },
       },
       (res) => {
-        readTurnResponseBody(req, res)
-          .then((body) => resolve({ statusCode: res.statusCode, headers: res.headers, body }))
-          .catch(reject);
+        if (res.statusCode === 200) {
+          streamTurnResponseBody(req, res, { onAudioChunk })
+            .then(({ transcript, reply, audioBytes }) =>
+              resolve({
+                statusCode: res.statusCode,
+                headers: res.headers,
+                rawHeaders: res.rawHeaders,
+                transcript,
+                reply,
+                audioBytes,
+              }),
+            )
+            .catch(reject);
+        } else {
+          readBufferedResponseBody(req, res)
+            .then((body) =>
+              resolve({ statusCode: res.statusCode, headers: res.headers, rawHeaders: res.rawHeaders, body }),
+            )
+            .catch(reject);
+        }
       },
     );
     req.on('timeout', () => {
@@ -476,10 +685,11 @@ export function readCapabilities({ host, port, token, timeoutMs = DEFAULT_READ_T
       },
       (res) => {
         // Same redirect refusal, content-encoding refusal, and CR-02 response-ceiling
-        // tracking as postTurn — both call sites share readTurnResponseBody (IN-01,
-        // 05-REVIEW.md). Only the status/line-body interpretation below is specific to the
-        // capabilities route.
-        readTurnResponseBody(req, res)
+        // tracking as postTurn's non-200 branch — both call sites share
+        // readBufferedResponseBody (IN-01, 05-REVIEW.md; renamed from readTurnResponseBody
+        // by Task 1, 06-07-PLAN.md). Only the status/line-body interpretation below is
+        // specific to the capabilities route.
+        readBufferedResponseBody(req, res)
           .then((body) => {
             const bodyText = body.toString('utf8');
             if (res.statusCode !== 200) {
@@ -508,11 +718,75 @@ export function readCapabilities({ host, port, token, timeoutMs = DEFAULT_READ_T
   });
 }
 
+// The incremental reader's byte sink (Task 1, 06-07-PLAN.md). Opens the output file lazily on
+// the first audio chunk — so a no-audio turn creates no file at all, matching the pre-existing
+// behavior — tracks bytes written, and exposes finish()/discard() so runCliTurn never touches
+// fs.WriteStream directly. write() returns whatever the underlying stream's own write()
+// returned (Node's own backpressure signal), and .onDrain is attached directly on the write
+// function itself so streamTurnResponseBody can register a one-shot resume callback without
+// reaching into the stream from inside the reader (see streamTurnResponseBody's own comment).
+function createAudioSink(outputPath) {
+  let stream = null;
+  let bytesWritten = 0;
+  let drainWaiters = [];
+
+  const write = (chunk) => {
+    if (!stream) {
+      stream = fs.createWriteStream(outputPath);
+      stream.on('drain', () => {
+        const waiters = drainWaiters;
+        drainWaiters = [];
+        for (const waiter of waiters) waiter();
+      });
+    }
+    bytesWritten += chunk.length;
+    return stream.write(chunk);
+  };
+  write.onDrain = (cb) => {
+    drainWaiters.push(cb);
+  };
+
+  return {
+    write,
+    get bytesWritten() {
+      return bytesWritten;
+    },
+    // Ends the stream and waits for the underlying file descriptor to actually close before
+    // resolving — a no-audio turn (stream never opened) resolves immediately.
+    finish() {
+      return new Promise((resolve, reject) => {
+        if (!stream) {
+          resolve();
+          return;
+        }
+        stream.end((err) => (err ? reject(err) : resolve()));
+      });
+    },
+    // T-06-12: removes a partially-written output file on any failure exit, and never lets a
+    // truncated stream be mistaken for a complete reply — called before any error line is
+    // printed and before the output path is ever logged, so a discarded sink's path can never
+    // reach stdout.
+    discard() {
+      return new Promise((resolve) => {
+        if (!stream) {
+          resolve();
+          return;
+        }
+        stream.destroy();
+        stream.once('close', () => {
+          fs.rm(outputPath, { force: true }, () => resolve());
+        });
+      });
+    },
+  };
+}
+
 // Composes the above into the CLI's one path: read the file, assert conformance, strip to raw
-// PCM (reusing wav.js — never re-walking RIFF chunks here), post, split, print, and write the
-// reply PCM when present. Every diagnostic line is built from a fixed set of named fields
-// (never by serialising a request/options object) and passed through redactToken() so a
-// token value can never reach stdout/stderr, even indirectly (T-05-02).
+// PCM (reusing wav.js — never re-walking RIFF chunks here), post with an incremental audio
+// sink wired in, print, and let the sink finish or discard. Every diagnostic line is built
+// from a fixed set of named fields (never by serialising a request/options object) and passed
+// through redactToken() so a token value can never reach stdout/stderr, even indirectly
+// (T-05-02).
 export async function runCliTurn({
   host,
   port,
@@ -542,10 +816,17 @@ export async function runCliTurn({
 
   const pcmBuffer = wavToPcm(wavBuffer);
 
+  // Resolved before the request is issued, not after (the buffering implementation resolved
+  // this only once a full body was already in hand) — the sink needs a target path the moment
+  // the first audio byte might arrive.
+  const outputPath = outPath ?? path.join(process.cwd(), DEFAULT_OUT_FILENAME);
+  const sink = createAudioSink(outputPath);
+
   let response;
   try {
-    response = await postTurn({ host, port, token, pcmBuffer, timeoutMs });
+    response = await postTurn({ host, port, token, pcmBuffer, timeoutMs, onAudioChunk: sink.write });
   } catch (error) {
+    await sink.discard();
     if (error.code === 'TIMEOUT') {
       reportError(`error: ${error.message}`);
       return EXIT_CODES.TIMEOUT;
@@ -559,6 +840,7 @@ export async function runCliTurn({
   }
 
   if (response.statusCode !== 200) {
+    await sink.discard();
     const errorCode = response.headers['x-error-code'] ?? 'UNKNOWN';
     // Distinguished from a generic failure (05-02-PLAN.md must_haves): the lock is held by
     // another client and this turn was refused immediately, not queued behind it.
@@ -570,28 +852,22 @@ export async function runCliTurn({
     return EXIT_CODES.HTTP_ERROR;
   }
 
-  let transcript;
-  let reply;
-  let audioPcm;
-  try {
-    ({ transcript, reply, audioPcm } = splitTurnBody(response.headers, response.body));
-  } catch (error) {
-    if (error.code === 'CONTRACT_VIOLATION') {
-      reportError(`error: ${error.message}`);
-      return EXIT_CODES.CONTRACT_VIOLATION;
-    }
-    throw error;
-  }
+  // The former try { splitTurnBody(...) } catch block that used to live here is gone — the
+  // framing error it used to catch now surfaces through postTurn's own rejection above, via
+  // streamTurnResponseBody's identical CONTRACT_VIOLATION tag and message shape.
+  const { transcript, reply } = response;
   console.log(`transcript: ${transcript}`);
   console.log(`reply: ${reply}`);
 
-  if (audioPcm) {
-    // Written first, unconditionally — the bytes survive regardless of whether playback ever
-    // starts or how it ends (must_haves truth: playback degrades, the turn does not).
-    const outputPath = outPath ?? path.join(process.cwd(), DEFAULT_OUT_FILENAME);
-    fs.writeFileSync(outputPath, audioPcm);
+  await sink.finish();
+
+  if (sink.bytesWritten > 0) {
     console.log(outputPath);
 
+    // Playback re-reads the saved output file rather than reusing an in-memory buffer — a
+    // post-transport local operation, outside the response-body consumption docs/API.md's
+    // MUST-level claim governs. --no-play (playReplyPcm's enabled: false) skips this entirely.
+    const audioPcm = fs.readFileSync(outputPath);
     const playback = await playReplyPcm(audioPcm, { playerBin, enabled: !noPlay });
     if (!playback.played && !playback.skipped) {
       reportError(`warning: playback failed (${playback.error?.message ?? 'unknown error'}); reply audio saved to ${outputPath}`);

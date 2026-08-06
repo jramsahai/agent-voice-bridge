@@ -28,6 +28,7 @@ import { randomUUID } from 'node:crypto';
 import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
 import { ERROR_CODES } from '../packages/shared/errors/error-codes.js';
 import { buildError } from '../packages/shared/errors/error-response.js';
+import { validateConfig } from '../packages/shared/config/validate-config.js';
 import {
   API_VERSION,
   MAX_REQUEST_AUDIO_BYTES,
@@ -850,4 +851,97 @@ test('test/http-turn.test.js still contains the five wire-hygiene test names thi
       `test/http-turn.test.js is missing the wire-hygiene test '${name}' — this file delegates origin-side coverage to it`,
     );
   }
+});
+
+// =====================================================================================
+// Task 3 (06-06-PLAN.md): README.md's configuration example, guarded against reintroducing
+// any shape validateConfig() rejects or any key path the shipped template does not carry.
+// Driven entirely by the imported validateConfig() and by reading config/config.example.json
+// from disk — no rejection message, rejected key name, or list of rejected keys is imported,
+// copied, or restated as a literal anywhere below. Closes 06-VERIFICATION.md Anti-Patterns
+// README.md:152-161 / 06-REVIEW.md CR-03.
+//
+// RED-phase stubs (06-06-PLAN.md Task 3, tdd="true"): both throw until the GREEN commit
+// implements them, so the tests below fail for the right reason before implementation exists.
+// =====================================================================================
+
+function extractConfigExampleFromReadmeText() {
+  throw new Error('extractConfigExampleFromReadmeText: not implemented');
+}
+
+function readmeConfigExample() {
+  throw new Error('readmeConfigExample: not implemented');
+}
+
+function collectKeyPaths() {
+  throw new Error('collectKeyPaths: not implemented');
+}
+
+test("README.md's configuration example produces the same validateConfig error set as config/config.example.json", () => {
+  const shippedTemplate = JSON.parse(fs.readFileSync(new URL('../config/config.example.json', import.meta.url), 'utf8'));
+  const readmeExample = readmeConfigExample();
+  const readmeErrors = validateConfig(readmeExample).slice().sort();
+  const templateErrors = validateConfig(shippedTemplate).slice().sort();
+  // Parity, not emptiness, is the right invariant here: the shipped template deliberately
+  // carries placeholder tokens that validateConfig rejects by design, so an emptiness
+  // assertion would fail against a genuinely correct README. Parity instead catches both a
+  // rejected key appearing in the README and a real secret being pasted into it.
+  assert.deepEqual(readmeErrors, templateErrors);
+});
+
+test("README.md's configuration example declares no key path absent from config/config.example.json", () => {
+  const shippedTemplate = JSON.parse(fs.readFileSync(new URL('../config/config.example.json', import.meta.url), 'utf8'));
+  const readmeExample = readmeConfigExample();
+  const templatePaths = new Set(collectKeyPaths(shippedTemplate));
+  for (const path of collectKeyPaths(readmeExample)) {
+    assert.ok(
+      templatePaths.has(path),
+      `README.md's configuration example declares key path '${path}', which config/config.example.json does not carry`,
+    );
+  }
+});
+
+test('the README config guard rejects a mutated example that reinstates the removed singular security token key', () => {
+  const shippedTemplate = JSON.parse(fs.readFileSync(new URL('../config/config.example.json', import.meta.url), 'utf8'));
+  const readmeExample = readmeConfigExample();
+  const mutated = structuredClone(readmeExample);
+  // Reinstates the key validateConfig is known to reject (packages/shared/config/validate-
+  // config.js's `'token' in config.security` check) — the assertion below is that the
+  // resulting error set differs from the correct README's, never that a message string
+  // matched, so this stays driven by the validator's own behavior.
+  mutated.security.token = 'reinstated-shared-secret-value';
+  const mutatedErrors = validateConfig(mutated).slice().sort();
+  const templateErrors = validateConfig(shippedTemplate).slice().sort();
+  assert.notDeepEqual(mutatedErrors, templateErrors);
+});
+
+test('the README config guard rejects a cloned example whose placeholder token is replaced with a real-looking secret', () => {
+  const shippedTemplate = JSON.parse(fs.readFileSync(new URL('../config/config.example.json', import.meta.url), 'utf8'));
+  const readmeExample = readmeConfigExample();
+  const mutated = structuredClone(readmeExample);
+  const [firstClientName] = Object.keys(mutated.security.clients);
+  mutated.security.clients[firstClientName] = 'a'.repeat(40);
+  const mutatedErrors = validateConfig(mutated).slice().sort();
+  const templateErrors = validateConfig(shippedTemplate).slice().sort();
+  // The placeholder-token rejection disappears once a real-looking secret replaces it, so
+  // the error sets must differ — a pasted real secret is exactly what this guard catches.
+  assert.notDeepEqual(mutatedErrors, templateErrors);
+});
+
+test('the README config guard rejects a cloned example carrying a key path the shipped template does not have', () => {
+  const shippedTemplate = JSON.parse(fs.readFileSync(new URL('../config/config.example.json', import.meta.url), 'utf8'));
+  const readmeExample = readmeConfigExample();
+  const mutated = structuredClone(readmeExample);
+  mutated.security.driftedExtraKey = 'unexpected';
+  const templatePaths = new Set(collectKeyPaths(shippedTemplate));
+  const offendingPath = collectKeyPaths(mutated).find((path) => !templatePaths.has(path));
+  assert.ok(offendingPath, 'expected the mutated fixture to carry at least one key path absent from the shipped template');
+});
+
+test('the README config extractor throws when handed README-shaped text with no fenced json block under the Configuration heading', () => {
+  const fixtureText = '## Configuration\n\nNo fenced example follows this heading.\n';
+  assert.throws(
+    () => extractConfigExampleFromReadmeText(fixtureText),
+    'extractConfigExampleFromReadmeText must throw when no fenced json block follows the heading',
+  );
 });

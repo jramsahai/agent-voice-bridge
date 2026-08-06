@@ -75,6 +75,47 @@ Content-Length: <n>
 <raw 16kHz mono signed 16-bit little-endian PCM bytes follow, exactly <n> of them>
 ```
 
+## POST /v1/turn — response
+
+A successful turn returns `200` with the following response headers:
+
+| Header | Meaning |
+|--------|---------|
+| `Content-Type` | Always `application/octet-stream`. |
+| `Cache-Control` | Always `no-transform`. |
+| `X-API-Version` | The current API version (`1`). |
+| `X-Voice-Transcript-Bytes` | UTF-8 byte length of the transcript segment. |
+| `X-Voice-Reply-Bytes` | UTF-8 byte length of the reply segment. |
+| `X-Voice-Output-Format` | The resolved reply format id — echoes the negotiated `X-Voice-Output-Format`. |
+| `X-Voice-Audio-Present` | `1` if an audio segment follows the two text segments, `0` if it does not. |
+
+### Response body framing
+
+The body is the transcript segment, then the reply segment, then — when `X-Voice-Audio-Present` is `1` — the audio segment. The three segments are concatenated with **no delimiter of any kind**. A client slices them by byte offset using the two byte-count headers; scanning the body for a separator is wrong and will corrupt the reply. The segment order is fixed and never varies.
+
+The two byte-count headers are UTF-8 **byte** lengths, not character or code-point counts. A client must slice by byte offset, never with a character-based string API — a multi-byte character in the transcript or reply would otherwise misalign every following byte.
+
+A body whose total length exactly equals `X-Voice-Transcript-Bytes` plus `X-Voice-Reply-Bytes` carries no audio segment. This exactly-equal case is a valid, complete response, not a truncated one.
+
+The audio segment, when present, is headerless raw bytes in the format named by `X-Voice-Output-Format` — no container, no length prefix. It simply ends when the connection ends.
+
+The response head and both text segments are written to the wire as soon as the transcript and reply are known — before speech synthesis begins. A client receives the text well before the audio and can display it immediately.
+
+Worked example — a `200` response carrying a 2-byte transcript, a 2-byte reply, and an audio segment:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream
+Cache-Control: no-transform
+X-API-Version: 1
+X-Voice-Transcript-Bytes: 2
+X-Voice-Reply-Bytes: 2
+X-Voice-Output-Format: pcm16
+X-Voice-Audio-Present: 1
+
+<body: bytes 0-1 are the transcript, bytes 2-3 are the reply, bytes 4 onward are the audio segment>
+```
+
 ## Errors
 
 Every non-2xx response from `POST /v1/turn` and from an unmatched path returns the same JSON envelope, an object under key `error` carrying `code` and `message`:

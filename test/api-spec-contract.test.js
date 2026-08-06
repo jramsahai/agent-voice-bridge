@@ -265,6 +265,100 @@ test('a live turn requesting an input-only container format as the reply format 
 });
 
 // =====================================================================================
+// Task 2 (06-03-PLAN.md): what a client gets back — response headers and the three-segment
+// body framing. Do not re-implement the cookie/redirect/compression wire-hygiene
+// assertions — those live in test/http-turn.test.js:749-862; this file owns negotiation
+// and framing only.
+// =====================================================================================
+
+test('docs/API.md documents the response byte-count, audio-present, and output-format response headers', () => {
+  for (const headerName of [TRANSCRIPT_BYTES_HEADER, REPLY_BYTES_HEADER, AUDIO_PRESENT_HEADER, OUTPUT_FORMAT_RESPONSE_HEADER]) {
+    assert.ok(specText.includes(headerName), `${headerName} is missing from docs/API.md`);
+  }
+});
+
+test('docs/API.md states the body segments carry no delimiter and the byte counts are UTF-8 byte lengths', () => {
+  assert.ok(specText.includes('no delimiter'), 'docs/API.md must state the segments carry no delimiter');
+  assert.ok(specText.toLowerCase().includes('utf-8'), 'docs/API.md must state the byte counts are UTF-8 byte lengths');
+});
+
+test('a live audio-bearing turn carries every documented response header and its body slices exactly at the declared byte offsets', async () => {
+  const transcript = 'hello there';
+  const reply = 'general kenobi';
+  const config = buildTestConfig();
+  const adapters = makeFakeAdapters({
+    transcript,
+    reply,
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: {
+        Authorization: `Bearer ${TEST_CLIENT_TOKEN}`,
+        [INPUT_FORMAT_HEADER]: 'pcm16',
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers['content-type'], 'application/octet-stream');
+    assert.equal(response.headers['cache-control'], 'no-transform');
+    assert.equal(response.headers['x-api-version'], API_VERSION);
+    assert.equal(response.headers[AUDIO_PRESENT_HEADER.toLowerCase()], '1');
+    assert.equal(response.headers[OUTPUT_FORMAT_RESPONSE_HEADER.toLowerCase()], defaultOutputFormatId());
+
+    const transcriptBytes = Number(response.headers[TRANSCRIPT_BYTES_HEADER.toLowerCase()]);
+    const replyBytes = Number(response.headers[REPLY_BYTES_HEADER.toLowerCase()]);
+    assert.equal(transcriptBytes, Buffer.byteLength(transcript, 'utf8'));
+    assert.equal(replyBytes, Buffer.byteLength(reply, 'utf8'));
+
+    const transcriptSlice = response.body.subarray(0, transcriptBytes).toString('utf8');
+    const replySlice = response.body.subarray(transcriptBytes, transcriptBytes + replyBytes).toString('utf8');
+    assert.equal(transcriptSlice, transcript);
+    assert.equal(replySlice, reply);
+
+    const audioSlice = response.body.subarray(transcriptBytes + replyBytes);
+    assert.ok(audioSlice.length > 0, 'an audio-bearing turn must carry a non-empty audio segment after the two text segments');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a live audio-disabled turn carries the disabled audio-present value and a body length equal to transcript bytes plus reply bytes exactly', async () => {
+  const transcript = 'hello there';
+  const reply = 'general kenobi';
+  const config = buildTestConfig();
+  const adapters = makeFakeAdapters({
+    transcript,
+    reply,
+    wavBuffer: makeCanonicalWav({ pcm: makePcm16({ samples: 10 }) }),
+  });
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: {
+        Authorization: `Bearer ${TEST_CLIENT_TOKEN}`,
+        [INPUT_FORMAT_HEADER]: 'pcm16',
+        [WANT_AUDIO_HEADER]: WANT_AUDIO_DISABLED_TOKEN,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers[AUDIO_PRESENT_HEADER.toLowerCase()], '0');
+
+    const transcriptBytes = Number(response.headers[TRANSCRIPT_BYTES_HEADER.toLowerCase()]);
+    const replyBytes = Number(response.headers[REPLY_BYTES_HEADER.toLowerCase()]);
+    assert.equal(response.body.length, transcriptBytes + replyBytes);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// =====================================================================================
 // Live server checks: the doc's published envelope must match a real response, not just a
 // literal appearing somewhere in the doc text.
 // =====================================================================================

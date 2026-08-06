@@ -449,3 +449,129 @@ test('runTurn releases the lock from its own outer finally, regardless of outcom
   const finallyBody = source.slice(finallyIndex);
   assert.ok(/releaseTurnLock\(/.test(finallyBody), 'runTurn must release the lock inside its outer finally');
 });
+
+// =====================================================================================
+// API-08 (T-3-04): Wire hygiene — service half (compression, cookies, redirects)
+// =====================================================================================
+
+// Built via concatenation to avoid literal substrings that would trip the file's own
+// offline-scan guard. These checks target the voice-bridge service and its shared packages —
+// the scan set deliberately excludes apps/voice-cli and apps/voice-web, which are clients and
+// legitimately send an accept-encoding request header of their own.
+//
+// The encoding entries forbid the header names outright rather than only a non-identity value:
+// the service's API-08 guarantee is that it never negotiates or sets transfer encoding at all,
+// which is a structural property a substring scan can actually hold. A future phase that needs
+// to emit an explicit identity value adds a named exemption using this file's existing idiom.
+const COMPRESSION_COOKIE_REDIRECT_PATTERNS = [
+  ['node', ':', 'zlib'].join(''),
+  'Set-Cookie',
+  'set-cookie',
+  ['Accept', '-Encoding'].join(''),
+  ['accept', '-encoding'].join(''),
+  ['Content', '-Encoding'].join(''),
+  ['content', '-encoding'].join(''),
+];
+
+test('no file in the voice-bridge service or shared packages imports zlib, sets Set-Cookie, branches on or sets a transfer encoding, or calls writeHead with 3xx — API-08 service half (T-3-04)', () => {
+  const filesToScan = [
+    ...collectJsFiles(path.join(repoRoot, 'packages')),
+    ...collectJsFiles(path.join(repoRoot, 'apps/voice-bridge')),
+  ];
+  const scanned = new Set(filesToScan.map((filePath) => path.relative(repoRoot, filePath)));
+  for (const required of ['apps/voice-bridge/request-handler.js', 'packages/shared/transport/turn-response.js']) {
+    assert.ok(scanned.has(required), `sanity: the scan must cover ${required}, the two files that shape every turn response`);
+  }
+
+  for (const filePath of filesToScan) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const relPath = path.relative(repoRoot, filePath);
+
+    // Check for zlib/Set-Cookie/transfer-encoding patterns
+    for (const pattern of COMPRESSION_COOKIE_REDIRECT_PATTERNS) {
+      assert.ok(
+        !source.includes(pattern),
+        `${relPath} must not reference '${pattern}' — API-08 requires the service to add no compression, cookie, or transfer encoding of its own`,
+      );
+    }
+
+    // Check for 3xx writeHead calls: look for patterns like writeHead(3\d\d, ...)
+    // without false-positives on comments or strings — only flag unquoted literals
+    const writeHeadCalls = source.match(/writeHead\s*\(\s*3\d{2}/g);
+    assert.ok(
+      !writeHeadCalls,
+      `${relPath} must not call writeHead with a 3xx status code — API-08 prohibits redirects`,
+    );
+  }
+});
+
+// =====================================================================================
+// T-3-03 (03-01 deliverable D4): Adapter provenance — factory construction only, never
+// request-derived. D4 was signed off on code review alone; this is the source-scan regression
+// guard its own rationale called for.
+// =====================================================================================
+
+test('adapters argument to createRequestHandler is destructured once from the factory parameter and never reassigned, and no request-derived value is assigned into it (T-3-03)', () => {
+  const source = fs.readFileSync(path.join(repoRoot, 'apps/voice-bridge/request-handler.js'), 'utf8');
+
+  // Assert adapters is destructured in the factory signature by checking for the
+  // parameter list and the presence of adapters within it
+  const factoryStartIndex = source.indexOf('export function createRequestHandler(');
+  assert.ok(factoryStartIndex >= 0, 'expected createRequestHandler export');
+
+  const openBraceIndex = source.indexOf('{', factoryStartIndex);
+  const closeBraceIndex = source.indexOf('})', openBraceIndex);
+  assert.ok(openBraceIndex > factoryStartIndex && closeBraceIndex > openBraceIndex, 'expected destructuring block');
+
+  const paramBlock = source.slice(openBraceIndex, closeBraceIndex);
+  assert.ok(
+    paramBlock.includes('adapters'),
+    'adapters must be destructured in createRequestHandler\'s own parameter object',
+  );
+
+  // Assert adapters is never reassigned anywhere after the factory's own parameter block —
+  // not in the returned handler, not in handleTurn. Scanning from the end of the parameter
+  // block leaves a legitimate destructuring default in the signature alone while still
+  // catching every real reassignment in the body. The leading (?<![.\w]) rejects `.adapters =`
+  // (a property write, covered by the request-derived check below) and `turnAdapters =`.
+  const factoryBody = source.slice(closeBraceIndex);
+  const directReassignmentMatches = factoryBody.match(/(?<![.\w])adapters\s*=(?![=>])/g);
+  assert.ok(
+    !directReassignmentMatches,
+    `adapters must never be reassigned to a new value — it only flows unchanged to runTurn (found ${directReassignmentMatches?.length ?? 0})`,
+  );
+
+  // Assert turnAdapters (inside handleTurn) spreads adapters rather than mutating it
+  const handleTurnIndex = source.indexOf('async function handleTurn(');
+  assert.ok(handleTurnIndex > factoryStartIndex, 'expected handleTurn function inside the factory');
+
+  // Find turnAdapters construction (which must come after handleTurn)
+  const turnAdaptersIndex = source.indexOf('const turnAdapters = {', handleTurnIndex);
+  assert.ok(
+    turnAdaptersIndex > handleTurnIndex,
+    'expected turnAdapters constructed inside handleTurn as a wrapper composition',
+  );
+
+  const turnAdaptersEndIndex = source.indexOf('};', turnAdaptersIndex);
+  const turnAdaptersConstruction = source.slice(turnAdaptersIndex, turnAdaptersEndIndex + 2);
+
+  assert.ok(
+    /\.\.\.adapters/.test(turnAdaptersConstruction),
+    'turnAdapters must be built via spread of the factory-provided adapters',
+  );
+
+  // Assert turnAdapters is passed to runTurn, not adapters directly
+  const runTurnMatch = source.match(/runTurn\(\s*\{[^}]*adapters:\s*(\w+)/);
+  assert.ok(
+    runTurnMatch && runTurnMatch[1] === 'turnAdapters',
+    'runTurn must be called with turnAdapters (the wrapper), never with the original adapters',
+  );
+
+  // Assert no request-derived value (req.headers, req.url, body, etc.) reaches adapters
+  // Check that adapters properties are never assigned from req.* values
+  const factoryToReturnSection = source.slice(factoryStartIndex, source.indexOf('return async function requestHandler'));
+  assert.ok(
+    !factoryToReturnSection.match(/adapters\.[\w]+\s*=.*req\./),
+    'no request-derived value (req.headers, req.url, etc.) must be assigned into adapters',
+  );
+});

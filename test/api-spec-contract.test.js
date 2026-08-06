@@ -24,7 +24,23 @@ import { randomUUID } from 'node:crypto';
 import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
 import { ERROR_CODES } from '../packages/shared/errors/error-codes.js';
 import { buildError } from '../packages/shared/errors/error-response.js';
-import { API_VERSION } from '../packages/shared/transport/turn-response.js';
+import {
+  API_VERSION,
+  MAX_REQUEST_AUDIO_BYTES,
+  TRANSCRIPT_BYTES_HEADER,
+  REPLY_BYTES_HEADER,
+  AUDIO_PRESENT_HEADER,
+  OUTPUT_FORMAT_RESPONSE_HEADER,
+} from '../packages/shared/transport/turn-response.js';
+import {
+  listReplyFormats,
+  defaultOutputFormatId,
+  INPUT_FORMAT_HEADER,
+  OUTPUT_FORMAT_HEADER,
+  WANT_AUDIO_HEADER,
+  WANT_AUDIO_DISABLED_TOKEN,
+} from '../packages/shared/transport/negotiate.js';
+import { listSupportedFormats } from '../packages/shared/audio/format-registry.js';
 import { makePcm16, makeCanonicalWav } from './helpers/fixtures.js';
 
 const specText = fs.readFileSync(new URL('../docs/API.md', import.meta.url), 'utf8');
@@ -93,6 +109,37 @@ function request(port, { method = 'GET', path, headers = {} }) {
   });
 }
 
+// POST /v1/turn helper (mirrors test/http-turn.test.js's postTurn): writes a real body and
+// sets Content-Length automatically, so a caller only supplies the audio bytes and any
+// header overrides (bearer token, negotiation headers).
+function postTurn(port, { body, headers = {} }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: '/v1/turn',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': body.length,
+          ...headers,
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) });
+        });
+      },
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 function buildTestAdapters() {
   return makeFakeAdapters({
     transcript: 'hi',
@@ -144,6 +191,77 @@ test('docs/API.md does not resurrect the removed pre-Phase-3 turn endpoint or th
     !specText.includes('security.token'),
     'docs/API.md must not document security.token — validateConfig rejects it at startup; clients authenticate via security.clients',
   );
+});
+
+// =====================================================================================
+// Task 1 (06-03-PLAN.md): what a client sends — auth, request headers, formats, limits.
+// Same Pattern 2 rule: import the constant, check the doc text, never type a duplicate.
+// =====================================================================================
+
+test('docs/API.md documents the three X-Voice-* request header names', () => {
+  for (const headerName of [INPUT_FORMAT_HEADER, OUTPUT_FORMAT_HEADER, WANT_AUDIO_HEADER]) {
+    assert.ok(specText.includes(headerName), `${headerName} is missing from docs/API.md`);
+  }
+});
+
+test('docs/API.md documents every registered input format id', () => {
+  for (const formatId of listSupportedFormats()) {
+    assert.ok(specText.includes(formatId), `input format '${formatId}' is missing from docs/API.md`);
+  }
+});
+
+test('docs/API.md documents every reply-direction format id and the default reply format', () => {
+  for (const formatId of listReplyFormats()) {
+    assert.ok(specText.includes(formatId), `reply format '${formatId}' is missing from docs/API.md`);
+  }
+  assert.ok(specText.includes(defaultOutputFormatId()), 'default reply format id is missing from docs/API.md');
+});
+
+test('docs/API.md documents the want-audio disable token and the maximum request byte count', () => {
+  assert.ok(
+    specText.includes(WANT_AUDIO_DISABLED_TOKEN),
+    `want-audio disable token '${WANT_AUDIO_DISABLED_TOKEN}' is missing from docs/API.md`,
+  );
+  assert.ok(
+    specText.includes(String(MAX_REQUEST_AUDIO_BYTES)),
+    `MAX_REQUEST_AUDIO_BYTES (${MAX_REQUEST_AUDIO_BYTES}) is missing from docs/API.md`,
+  );
+});
+
+test('docs/API.md carries a worked request example addressed to the placeholder tailnet host', () => {
+  assert.ok(
+    specText.includes('your-device.your-tailnet.ts.net'),
+    'docs/API.md worked example must use the placeholder tailnet hostname',
+  );
+});
+
+test('a live turn requesting an input-only container format as the reply format is rejected 415 FMT_UNSUPPORTED, matching docs/API.md', async () => {
+  const config = buildTestConfig();
+  const adapters = buildTestAdapters();
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    // Derived structurally, never typed: the id present in the full registry but absent
+    // from the reply-direction list is exactly the container format (wav) — this survives
+    // a future registry change without editing this test (06-RESEARCH.md Pattern 2).
+    const replyFormats = new Set(listReplyFormats());
+    const containerFormatId = listSupportedFormats().find((id) => !replyFormats.has(id));
+    assert.ok(containerFormatId, 'expected at least one registered format absent from the reply-direction list');
+
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: {
+        Authorization: `Bearer ${TEST_CLIENT_TOKEN}`,
+        [INPUT_FORMAT_HEADER]: defaultOutputFormatId(),
+        [OUTPUT_FORMAT_HEADER]: containerFormatId,
+      },
+    });
+    assert.equal(response.statusCode, 415);
+    assert.equal(response.headers['x-error-code'], 'FMT_UNSUPPORTED');
+  } finally {
+    await closeServer(server);
+  }
 });
 
 // =====================================================================================

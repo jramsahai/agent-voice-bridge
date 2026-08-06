@@ -23,6 +23,58 @@ Host: your-device.your-tailnet.ts.net
 Authorization: Bearer <your-bearer-token>
 ```
 
+## Authentication
+
+Every gated route (`POST /v1/turn`, `GET /v1/capabilities`, `GET /v1/health`) requires an `Authorization` header of the form:
+
+```
+Authorization: Bearer <token>
+```
+
+Tokens are per-client: each client is named and issued its own token in the operator's config (`security.clients`), and revoking one client's token leaves every other client's token working. A missing or invalid credential returns `401 UNAUTHORIZED`.
+
+The `Host` and `Origin` headers are also validated against the operator's configuration. A rejection of either check returns `403 FORBIDDEN` — the same code for both failure modes, deliberately indistinguishable. A client must not attempt to determine which of the two checks failed from the response alone.
+
+`GET /` and `GET /app.js` are ungated by design — no bearer token, no Host/Origin check — as already stated in the Routes table above.
+
+This section describes the authentication scheme only, not how the server compares a submitted token against its configured candidates.
+
+## Audio formats
+
+| Wire id | Direction | Shape |
+|---------|-----------|-------|
+| `pcm16` | input and reply | Headerless raw audio: 16000 Hz, mono, signed 16-bit little-endian, no container. |
+| `wav` | input only | A RIFF/WAVE container. Sample rate, channel count, and bit depth are declared in the file's own `fmt ` chunk rather than assumed by the server, and it is converted server-side before transcription. |
+
+The input-direction format list and the reply-direction format list are deliberately different. `wav` may be sent as input but is rejected as a reply format — requesting it via `X-Voice-Output-Format: wav` returns `415 FMT_UNSUPPORTED`. A client must not reuse the input format list for the reply direction, or vice versa; query each list independently (`GET /v1/capabilities`'s `input-formats` and `reply-formats` lines each publish the correct one).
+
+## POST /v1/turn — request
+
+`POST /v1/turn` runs one voice turn: transcribe, agent, optional speech.
+
+The request body is raw bytes in the format declared by `X-Voice-Input-Format` — no JSON envelope, no base64 encoding. `Content-Type` is always `application/octet-stream`.
+
+| Header | Values | Behavior when absent |
+|--------|--------|------------------------|
+| `X-Voice-Input-Format` | Any registered input format id (see Audio formats above: `pcm16`, `wav`) | **No default.** An absent or unregistered value is rejected `415 FMT_UNSUPPORTED`. |
+| `X-Voice-Output-Format` | Any reply-direction format id (see Audio formats above: `pcm16`) | Falls back to the default reply format (`pcm16`). |
+| `X-Voice-Want-Audio` | Any string | Audio is suppressed only when the value is the literal single character `0`. Any other value — including absent or empty — means audio is wanted. This is a deliberate fail-open: a typo in this header never silently drops the reply audio. |
+| `Authorization` | `Bearer <token>` | Missing or invalid returns `401 UNAUTHORIZED`. |
+| `Content-Length` | Byte count of the body | The body is capped at `9600000` bytes (5 minutes of 16kHz mono 16-bit PCM). A declared `Content-Length` above the cap is rejected `413 AUDIO_TOO_LARGE` before any body byte is read. |
+
+Worked example — a client sending 16kHz mono PCM directly, no container:
+
+```http
+POST /v1/turn HTTP/1.1
+Host: your-device.your-tailnet.ts.net
+Authorization: Bearer <your-bearer-token>
+Content-Type: application/octet-stream
+X-Voice-Input-Format: pcm16
+Content-Length: <n>
+
+<raw 16kHz mono signed 16-bit little-endian PCM bytes follow, exactly <n> of them>
+```
+
 ## Errors
 
 Every non-2xx response from `POST /v1/turn` and from an unmatched path returns the same JSON envelope, an object under key `error` carrying `code` and `message`:

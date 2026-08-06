@@ -17,6 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ERROR_CODES } from '../packages/shared/errors/error-codes.js';
+import { MIN_CLIENT_READ_TIMEOUT_MS } from '../packages/shared/transport/read-timeout.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -390,5 +391,20 @@ test('the no-audio branch of stopAndSend calls resetPlayer, and index.html ships
     indexHtmlSource,
     /audio\[hidden\]\s*\{\s*display:\s*none;\s*\}/,
     'an audio[hidden] display rule must back the hidden attribute, matching the .pill[hidden] precedent',
+  );
+});
+
+// docs/API.md's "Client read timeout" section records this client as a deliberate opt-out that
+// runs tighter than the published floor, and its "Consuming the response body" section makes the
+// same opt-out claim about buffering. Raising this value to the floor — the plausible "make the
+// browser compliant" edit — would silently falsify both statements. Asserting the documented
+// *relationship* rather than the literal, so retuning the browser's own UX value stays free.
+test('the browser client stays deliberately below the published client read-timeout floor', () => {
+  const declared = appJsSource.match(/const REQUEST_TIMEOUT_MS = (\d+);/);
+  assert.ok(declared, 'apps/voice-web/app.js must declare REQUEST_TIMEOUT_MS');
+  const browserTimeoutMs = Number(declared[1]);
+  assert.ok(
+    browserTimeoutMs < MIN_CLIENT_READ_TIMEOUT_MS,
+    `the browser's REQUEST_TIMEOUT_MS (${browserTimeoutMs}) must stay below the published floor (${MIN_CLIENT_READ_TIMEOUT_MS}) — docs/API.md records this client as a deliberate sub-floor opt-out, and raising it to the floor makes that published claim false`,
   );
 });

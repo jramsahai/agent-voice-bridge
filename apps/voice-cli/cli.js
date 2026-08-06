@@ -23,14 +23,16 @@ import { pathToFileURL } from 'node:url';
 
 import { wavToPcm, readWavFormat, pcmToWav, MAX_PCM_BYTES } from '../../packages/shared/audio/wav.js';
 import { withTempDir } from '../../packages/shared/lifecycle/tempfiles.js';
+import { MIN_CLIENT_READ_TIMEOUT_MS } from '../../packages/shared/transport/read-timeout.js';
 
 const execFileAsync = promisify(execFile);
 
-// Sizing basis (A3/D-03, 05-RESEARCH.md): real measured time-to-first-byte against live
-// backends ranges 5.4s-10.3s (03-UAT.md); the server-side adapter ceiling sum is 420,000ms
-// (transcribe 120s + agent 180s + speech 120s). 30s clears the measured TTFB with margin
-// while staying far short of that ceiling — a working value, overridable via --timeout-ms.
-export const DEFAULT_READ_TIMEOUT_MS = 30000;
+// Sizing basis (D-01): the default is the published minimum client read timeout, derived from
+// the transcribe and agent stage ceilings — the response's first byte cannot arrive until both
+// stages resolve, so a shorter inactivity timeout would spuriously abort a turn the server is
+// still honestly working on. The measured typical time-to-first-byte (5.4s-10.3s, 03-UAT.md) is
+// the typical case, not the floor. --timeout-ms remains available to tighten this per invocation.
+export const DEFAULT_READ_TIMEOUT_MS = MIN_CLIENT_READ_TIMEOUT_MS;
 export const TOKEN_ENV_VAR = 'VOICE_BRIDGE_CLI_TOKEN';
 export const EXIT_CODES = Object.freeze({
   OK: 0,

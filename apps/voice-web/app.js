@@ -18,9 +18,13 @@ let isBusy = false;
 let isRecording = false;
 let lastPlayerObjectUrl = null;
 
-// WR-06 (05-REVIEW.md): mirrors apps/voice-cli/cli.js's DEFAULT_READ_TIMEOUT_MS — without
-// this, a hung backend leaves the fetch promise never settling and the "Working..." button
-// stuck with no way to recover short of reloading the page.
+// WR-06 (05-REVIEW.md): without this, a hung backend leaves the fetch promise never settling
+// and the "Working..." button stuck with no way to recover short of reloading the page. This
+// deliberately stays tighter than the published minimum client read timeout
+// (packages/shared/transport/read-timeout.js) — a human is watching this page, and a five-minute
+// silent wait is worse than an early, recoverable error. A headless client (the reference CLI,
+// firmware) must use the published floor instead; the browser's own tighter value is a Phase 5
+// UX choice, not a spec requirement, and is unchanged by Phase 6.
 const REQUEST_TIMEOUT_MS = 30000;
 
 const TOKEN_STORAGE_KEY = 'voice-bridge-token';

@@ -30,6 +30,7 @@ import {
   EXIT_CODES,
   MAX_RESPONSE_BYTES,
 } from '../apps/voice-cli/cli.js';
+import { MIN_CLIENT_READ_TIMEOUT_MS } from '../packages/shared/transport/read-timeout.js';
 
 function uniqueSessionId(label) {
   return `voice-cli-test-${label}-${randomUUID()}`;
@@ -498,10 +499,14 @@ test('no CLI output path ever prints the bearer token value, on a successful tur
   }
 });
 
-// Sanity: the module never references node:http timeout constants outside DEFAULT_READ_TIMEOUT_MS
-// itself, i.e. the exported constant is the same value Pattern 1 in 05-RESEARCH.md locks in.
-test('DEFAULT_READ_TIMEOUT_MS is the locked 30 second default', () => {
-  assert.equal(DEFAULT_READ_TIMEOUT_MS, 30000);
+// The reference client's default read timeout must equal the published minimum client read
+// timeout (D-01) — a device that ships with the CLI's default is compliant with the floor the
+// specification publishes, never below it. MIN_CLIENT_READ_TIMEOUT_MS itself stays pinned at
+// 300000 so a careless change to either adapter's stage ceiling (stage-timeouts.js) is a
+// deliberate, visible edit rather than a silent drift.
+test('DEFAULT_READ_TIMEOUT_MS equals the published minimum client read timeout floor', () => {
+  assert.equal(DEFAULT_READ_TIMEOUT_MS, MIN_CLIENT_READ_TIMEOUT_MS);
+  assert.equal(MIN_CLIENT_READ_TIMEOUT_MS, 300000);
 });
 
 // =====================================================================================

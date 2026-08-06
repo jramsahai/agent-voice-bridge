@@ -146,6 +146,8 @@ A read buffer of **4096 bytes** is recommended, though not required — a client
 
 The maximum total reply a client must be prepared to stream through is the same 5-minute audio ceiling, in bytes, that bounds a request (`9600000` bytes — see the request byte-count ceiling above). A client must stream through that ceiling, never buffer the whole reply in memory to reach it.
 
+The reference command-line client (`apps/voice-cli/cli.js`) implements this by streaming every byte of the audio segment straight to its output sink as it arrives, never accumulating the segment in memory to reach the ceiling above. The browser client (`apps/voice-web/app.js`) deliberately opts out and buffers the whole response instead, trading strict compliance for implementation simplicity because a human is present to retry — the same deliberate opt-out this specification already records for that client's read timeout, below. A client with no human present to retry, the case this specification exists for, must follow the reference CLI's shape rather than the browser's.
+
 ## Client read timeout
 
 A client's HTTP read (inactivity) timeout — the maximum gap it tolerates between received bytes, never a total request-duration budget — must be configured to at least **300000 milliseconds** (5 minutes) to receive a `POST /v1/turn` response correctly. Applying this number as a total-duration cap instead of an inactivity gap produces different, wrong behavior: it must only ever be measured against the time since the last received byte, never against elapsed time since the request was sent.

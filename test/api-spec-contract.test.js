@@ -777,6 +777,72 @@ test('docs/API.md states a body length exactly equal to transcript bytes plus re
   );
 });
 
+// =====================================================================================
+// Task 3 (06-07-PLAN.md): region-scoped drift assertions on the client-posture paragraph
+// recording which client honours the MUST-level no-full-buffering claim and which
+// deliberately opts out. Both operate on the slice of docs/API.md from the
+// '## Consuming the response body' heading to the next top-level heading, never on the
+// whole document — a whole-document substring check is the exact vacuity plan 06-06 removed
+// from the error catalogue (a superseded independent-substring check that could not detect a
+// transposed row), and reintroducing that shape here would be the same defect in a new place.
+// =====================================================================================
+
+function consumingResponseBodySection(docText) {
+  const headingText = '## Consuming the response body';
+  const headingIndex = docText.indexOf(headingText);
+  assert.ok(headingIndex !== -1, `docs/API.md is missing its '${headingText}' heading`);
+  const afterHeading = docText.slice(headingIndex + headingText.length);
+  // A top-level heading only, never an h3 subheading like '### Consumption algorithm' — the
+  // pattern requires the two hashes to be followed directly by a space.
+  const nextHeadingOffset = afterHeading.search(/\n## /);
+  assert.ok(nextHeadingOffset !== -1, `expected another top-level heading after '${headingText}'`);
+  return afterHeading.slice(0, nextHeadingOffset);
+}
+
+const CONSUMING_SECTION_MUST_CLAIM =
+  'A client must stream through that ceiling, never buffer the whole reply in memory to reach it.';
+
+// Takes the section text as a parameter — not a closure over the module-level specText — so
+// the negative-case proof below can drive an in-memory mutated fixture through the identical
+// assertion path the real check uses (mirrors assertErrorCatalogueMatchesCode's own shape).
+function assertConsumingSectionCarriesMustClaim(section) {
+  assert.ok(
+    section.includes(CONSUMING_SECTION_MUST_CLAIM),
+    'the Consuming the response body section is missing its MUST-level no-full-buffering claim',
+  );
+}
+
+test('the Consuming the response body section still carries its MUST-level no-full-buffering claim', () => {
+  const section = consumingResponseBodySection(specText);
+  assertConsumingSectionCarriesMustClaim(section);
+
+  // Negative-case proof, driven through the identical assertion helper: a section fixture
+  // with the clause removed must fail this check — otherwise this test only restates the
+  // claim's presence rather than proving the check can catch its absence.
+  assert.ok(
+    section.includes(CONSUMING_SECTION_MUST_CLAIM),
+    'sanity: expected to find the MUST claim in the real section before mutating it away',
+  );
+  const mutatedSection = section.replace(CONSUMING_SECTION_MUST_CLAIM, '');
+  assert.notEqual(mutatedSection, section, 'sanity: the mutation must have actually removed something');
+  assert.throws(
+    () => assertConsumingSectionCarriesMustClaim(mutatedSection),
+    'assertConsumingSectionCarriesMustClaim must throw once the MUST-level claim has been removed from the section',
+  );
+});
+
+test("the Consuming the response body section names the reference CLI as compliant and records the browser client's deliberate opt-out", () => {
+  const section = consumingResponseBodySection(specText);
+  assert.ok(
+    section.includes('apps/voice-cli/cli.js'),
+    'the section must name the reference CLI client path as the client that honours the MUST-level claim',
+  );
+  assert.ok(
+    section.includes('apps/voice-web/app.js'),
+    "the section must record the browser client's deliberate opt-out by naming its path",
+  );
+});
+
 test('a live audio-bearing 200 turn response carries no body-length header of any kind, proving the chunked-framing claim docs/API.md makes', async () => {
   const config = buildTestConfig();
   const adapters = buildTestAdapters();

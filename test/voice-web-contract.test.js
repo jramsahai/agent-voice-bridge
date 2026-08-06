@@ -408,3 +408,57 @@ test('the browser client stays deliberately below the published client read-time
     `the browser's REQUEST_TIMEOUT_MS (${browserTimeoutMs}) must stay below the published floor (${MIN_CLIENT_READ_TIMEOUT_MS}) — docs/API.md records this client as a deliberate sub-floor opt-out, and raising it to the floor makes that published claim false`,
   );
 });
+
+// Phase 7 SC2+SC5: WR-05's mic-permission guards (05-REVIEW.md) landed at both call sites with
+// no test, so either could be deleted or emptied silently — and a denied microphone is the
+// single most common real-world failure mode for a mic app. Both call sites live inside inline
+// arrow event listeners (pointerdown and keydown), which extractFunctionSource/loadBrowserFunction
+// cannot reach — they anchor on a top-level `function name(` declaration — so this is a
+// source-shape assertion by necessity, not by preference.
+test('every awaited ensureRecorder() call site is wrapped in a catch that surfaces the failure and stops', () => {
+  const callSites = appJsSource.match(/await ensureRecorder\(\)/g) ?? [];
+  assert.ok(
+    callSites.length >= 2,
+    `sanity premise: apps/voice-web/app.js must await ensureRecorder() at least twice (the pointer path and the ` +
+      `keyboard path); found ${callSites.length}. If a path was deliberately removed, this premise is what needs ` +
+      'updating — do not weaken the guarded-count equality below.',
+  );
+
+  const guardPattern = /try\s*\{\s*await ensureRecorder\(\);\s*\}\s*catch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{([^{}]*)\}/g;
+  const guarded = [...appJsSource.matchAll(guardPattern)];
+
+  assert.equal(
+    guarded.length,
+    callSites.length,
+    `every awaited ensureRecorder() call must sit inside a try/catch: ${callSites.length} call sites but ` +
+      `${guarded.length} guarded ones. A removed guard, or a newly added third call site left unguarded, fails here ` +
+      'rather than passing silently — a getUserMedia rejection with no catch is an unhandled rejection the user never sees.',
+  );
+
+  for (const [index, match] of guarded.entries()) {
+    const body = match[2];
+    const statusCall = /setStatus\(\s*(['"`])((?:\\.|(?!\1)[^\\])*)\1\s*\)/.exec(body);
+    assert.ok(
+      statusCall,
+      `ensureRecorder guard #${index + 1} must call setStatus with a quoted string literal — an emptied catch body ` +
+        'swallows a denied microphone into silence, which is the exact defect WR-05 closed.',
+    );
+    assert.ok(
+      statusCall[2].length > 0,
+      `ensureRecorder guard #${index + 1} must pass a non-empty message to setStatus — a blank status line tells the ` +
+        'user nothing.',
+    );
+    assert.match(
+      body,
+      /setHint\(/,
+      `ensureRecorder guard #${index + 1} must call setHint so the user is told what to do about the failure, not just ` +
+        'that it happened.',
+    );
+    assert.match(
+      body,
+      /\breturn\b/,
+      `ensureRecorder guard #${index + 1} must return rather than fall through — proceeding past a failed ` +
+        'ensureRecorder() starts a recording against a mediaRecorder that does not exist.',
+    );
+  }
+});

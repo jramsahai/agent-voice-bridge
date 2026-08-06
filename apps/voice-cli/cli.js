@@ -147,26 +147,42 @@ export function parseCliArgs(argv) {
   };
   let flagToken = null;
 
-  for (let i = 0; i < argv.length; i++) {
+  // WR-05 (06-REVIEW.md): without this guard, `argv[++i] ?? default` happily consumes the
+  // next recognized flag as this flag's value (e.g. `--input --host 127.0.0.1` silently sets
+  // inputPath to the literal string '--host', leaving --host unset) — producing confusing
+  // downstream errors instead of a clear usage message naming the flag left without a value.
+  let usageErrorFromMissingValue = null;
+  const takeFlagValue = (flagName) => {
+    const next = argv[i + 1];
+    if (next === undefined || next.startsWith('--')) {
+      usageErrorFromMissingValue = `${flagName} requires a value`;
+      return null;
+    }
+    i += 1;
+    return next;
+  };
+
+  let i;
+  for (i = 0; i < argv.length; i++) {
     const arg = argv[i];
     switch (arg) {
       case '--input':
-        values.inputPath = argv[++i] ?? null;
+        values.inputPath = takeFlagValue('--input');
         break;
       case '--host':
-        values.host = argv[++i] ?? values.host;
+        values.host = takeFlagValue('--host') ?? values.host;
         break;
       case '--port':
-        values.port = Number(argv[++i]);
+        values.port = Number(takeFlagValue('--port'));
         break;
       case '--token':
-        flagToken = argv[++i] ?? null;
+        flagToken = takeFlagValue('--token');
         break;
       case '--out':
-        values.outPath = argv[++i] ?? null;
+        values.outPath = takeFlagValue('--out');
         break;
       case '--timeout-ms':
-        values.timeoutMs = Number(argv[++i]);
+        values.timeoutMs = Number(takeFlagValue('--timeout-ms'));
         break;
       case '--no-play':
         values.noPlay = true;
@@ -179,6 +195,9 @@ export function parseCliArgs(argv) {
         break;
       default:
         return { ok: false, exitCode: EXIT_CODES.USAGE, message: `unrecognized argument '${arg}'` };
+    }
+    if (usageErrorFromMissingValue) {
+      return { ok: false, exitCode: EXIT_CODES.USAGE, message: usageErrorFromMissingValue };
     }
   }
 

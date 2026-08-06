@@ -455,9 +455,13 @@ test('runTurn releases the lock from its own outer finally, regardless of outcom
 // =====================================================================================
 
 // Built via concatenation to avoid literal substrings that would trip the file's own
-// offline-scan guard. These checks target the voice-bridge service and its shared packages —
-// the scan set deliberately excludes apps/voice-cli and apps/voice-web, which are clients and
-// legitimately send an accept-encoding request header of their own.
+// offline-scan guard. These checks target the voice-bridge service, its shared packages, and
+// apps/voice-web — the browser client, which is held to the same no-encoding-negotiation rule
+// so a turn it drives stays as inspectable on the wire as one a device drives.
+//
+// apps/voice-cli is the one deliberate exclusion: test/voice-cli.test.js asserts that the CLI
+// sends `accept-encoding: identity` on purpose and treats a content-encoding response header
+// as a contract violation, so the string is load-bearing there rather than a regression.
 //
 // The encoding entries forbid the header names outright rather than only a non-identity value:
 // the service's API-08 guarantee is that it never negotiates or sets transfer encoding at all,
@@ -473,14 +477,20 @@ const COMPRESSION_COOKIE_REDIRECT_PATTERNS = [
   ['content', '-encoding'].join(''),
 ];
 
-test('no file in the voice-bridge service or shared packages imports zlib, sets Set-Cookie, branches on or sets a transfer encoding, or calls writeHead with 3xx — API-08 service half (T-3-04)', () => {
+test('no file in the voice-bridge service, shared packages, or the browser client imports zlib, sets Set-Cookie, branches on or sets a transfer encoding, or calls writeHead with 3xx — API-08 service half (T-3-04)', () => {
   const filesToScan = [
     ...collectJsFiles(path.join(repoRoot, 'packages')),
     ...collectJsFiles(path.join(repoRoot, 'apps/voice-bridge')),
+    ...collectJsFiles(path.join(repoRoot, 'apps/voice-web')),
   ];
   const scanned = new Set(filesToScan.map((filePath) => path.relative(repoRoot, filePath)));
-  for (const required of ['apps/voice-bridge/request-handler.js', 'packages/shared/transport/turn-response.js']) {
-    assert.ok(scanned.has(required), `sanity: the scan must cover ${required}, the two files that shape every turn response`);
+  const mustCover = [
+    'apps/voice-bridge/request-handler.js',
+    'packages/shared/transport/turn-response.js',
+    'apps/voice-web/app.js',
+  ];
+  for (const required of mustCover) {
+    assert.ok(scanned.has(required), `sanity: the scan must cover ${required} — a scan that silently stops covering a file reports clean for the wrong reason`);
   }
 
   for (const filePath of filesToScan) {
@@ -501,6 +511,17 @@ test('no file in the voice-bridge service or shared packages imports zlib, sets 
     assert.ok(
       !writeHeadCalls,
       `${relPath} must not call writeHead with a 3xx status code — API-08 prohibits redirects`,
+    );
+  }
+
+  // The walk above collects .js files only, so an inline <script> block in the browser
+  // client's page would carry encoding logic straight past it. Keep the page script-free
+  // apart from its module src, and the .js-only scan stays a complete account of voice-web.
+  const pageSource = fs.readFileSync(path.join(repoRoot, 'apps/voice-web/index.html'), 'utf8');
+  for (const tag of pageSource.match(/<script\b[^>]*>/g) ?? []) {
+    assert.ok(
+      /\ssrc\s*=/.test(tag),
+      `apps/voice-web/index.html must not carry an inline script block (${tag}) — it would bypass this test's .js-only walk`,
     );
   }
 });

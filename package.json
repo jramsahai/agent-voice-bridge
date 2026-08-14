@@ -1,9 +1,17 @@
 {
   "name": "openclaw-voice-bridge",
   "version": "0.1.0",
-  "private": true,
   "description": "Tailscale-first push-to-talk voice bridge for OpenClaw",
+  "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/agent-voice-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OWNER/agent-voice-bridge/issues"
+  },
+  "homepage": "https://github.com/OWNER/agent-voice-bridge#readme",
   "scripts": {
     "start": "node apps/voice-bridge/server.js",
     "start:kokoro": "python3 apps/kokoro-tts/server.py",

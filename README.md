@@ -4,6 +4,24 @@ A modular, portable voice companion for OpenClaw focused on private, remote, pus
 
 See [`docs/API.md`](./docs/API.md) for the versioned HTTP API contract a client can implement against without reading server source.
 
+> **Unofficial, third-party project.** This is not affiliated with, endorsed by, or supported
+> by the OpenClaw project.
+
+## macOS only
+
+This service runs on **macOS only** and will not run on Linux or Windows. It shells out to
+macOS-specific binaries at fixed paths: `/usr/bin/afconvert` for audio format conversion
+(the default in `packages/shared/audio/convert.js`), `/usr/bin/say` for the `macos-say` TTS
+provider, and a `#!/bin/zsh` wrapper script (`scripts/whisper-audio`) for local transcription.
+The OpenClaw CLI itself is typically installed via a Homebrew-style path. The test suite shells
+out to the real `/usr/bin/afconvert`, so it does not run on Linux either.
+
+## What OpenClaw is
+
+[OpenClaw](https://openclaw.ai/) is the agent CLI this bridge hands voice turns to. It is
+MIT-licensed and lives at [github.com/openclaw/openclaw](https://github.com/openclaw/openclaw).
+It installs via npm as the `openclaw` package, or via a Homebrew cask.
+
 ## What it is
 
 This project provides a small browser-based voice client and a local bridge service that lets you talk to an OpenClaw agent from other devices on your tailnet.

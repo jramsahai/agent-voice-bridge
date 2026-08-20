@@ -6,12 +6,12 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/agent-voice-bridge.git"
+    "url": "git+https://github.com/jramsahai/agent-voice-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/OWNER/agent-voice-bridge/issues"
+    "url": "https://github.com/jramsahai/agent-voice-bridge/issues"
   },
-  "homepage": "https://github.com/OWNER/agent-voice-bridge#readme",
+  "homepage": "https://github.com/jramsahai/agent-voice-bridge#readme",
   "scripts": {
     "start": "node apps/voice-bridge/server.js",
     "start:kokoro": "python3 apps/kokoro-tts/server.py",

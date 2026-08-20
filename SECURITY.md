@@ -4,7 +4,7 @@
 
 Report a vulnerability privately through GitHub's private vulnerability reporting on this
 repository: go to the Security tab and choose "Report a vulnerability", or open
-`https://github.com/OWNER/agent-voice-bridge/security/advisories/new` directly.
+`https://github.com/jramsahai/agent-voice-bridge/security/advisories/new` directly.
 
 **Do not report a vulnerability as a public issue.** A public issue is visible to everyone
 before a fix exists.

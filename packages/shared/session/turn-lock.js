@@ -103,6 +103,32 @@ function readHolderMetadata(lockPath) {
   }
 }
 
+// The (device, inode, birth time) triple identifying whatever directory sits at `dirPath` at
+// this instant, or null when nothing does. A reclaim binds itself to this rather than to the
+// path, because the path is precisely the thing another process can recreate underneath this
+// one. bigint stats are used so a 64-bit inode number survives the comparison intact instead
+// of being rounded through a double, and birth time is folded in as an independent second
+// signal because a filesystem is free to hand a recycled inode number straight back out to the
+// directory that replaces this one. Wrapped like every other read in this module: a failure
+// collapses to the safe "no identity" answer, which every caller treats as a lost race.
+function lockDirectoryIdentity(dirPath) {
+  try {
+    const stat = fs.statSync(dirPath, { bigint: true });
+    return { dev: stat.dev, ino: stat.ino, birthtimeNs: stat.birthtimeNs };
+  } catch {
+    return null;
+  }
+}
+
+// Deliberately false when either side is null: an identity that could not be read is never
+// evidence that two directories are the same directory.
+function isSameDirectory(a, b) {
+  if (a === null || b === null) {
+    return false;
+  }
+  return a.dev === b.dev && a.ino === b.ino && a.birthtimeNs === b.birthtimeNs;
+}
+
 // Exported so the reclaim fixtures in test/turn-lock.test.js can assert staleness directly
 // against hand-built holder.json fixtures, without going through a full acquire/release
 // cycle. Every filesystem read on this path is wrapped so a failure collapses to a safe
@@ -150,15 +176,33 @@ export function isTurnLockStale(sessionId) {
 // processes independently observing the same stale lock could both win that sequence, since
 // `rmSync`+`mkdirSync` are two unrelated syscalls with nothing atomic between them. Instead
 // the reclaimer *steals* the stale directory with a single `fs.renameSync(lockPath,
-// scratchPath)`, where `scratchPath` is unique to this attempt. POSIX rename is atomic with
-// respect to its source path: exactly one process's rename of a given source can succeed:
-// once it does, that path no longer exists, and every other process's identical rename call
-// throws ENOENT. A losing reclaimer therefore has no directory to remove and no directory to
-// recreate — it reports busy immediately, precisely the "single attempt, no retry" contract.
-// The winner alone now owns `scratchPath` (no other process ever learns its name), discards
-// it, and then makes one single further `mkdirSync(lockPath)` attempt to (re)establish the
-// lock — itself subject to losing to a third, unrelated fresh acquirer that raced into the
-// same brief window, which is reported as busy exactly like any other contention.
+// scratchPath)`, where `scratchPath` is unique to this attempt.
+//
+// That rename is atomic with respect to the *path* and to nothing more, and the distinction is
+// the whole of CR-01b. Exactly one process can rename a given path at a given instant, but a
+// path is a name, not the directory it names: winning the rename proves *that* this process
+// won, never *what* it won. If a faster reclaimer already completed this entire sequence, the
+// name now points at that reclaimer's brand-new, live lock — and a second rename of the same
+// name succeeds just as happily, handing the loser a live lock it has no right to and leaving
+// two processes each believing they hold the turn. Staleness was checked against one directory
+// and the steal took another; the earlier version of this comment asserted the losing rename
+// would throw ENOENT, which is true only if nothing recreates the name in between, and a
+// winning reclaimer's own final create is exactly something that does.
+//
+// So the steal is bound to identity rather than to the name. The directory's (device, inode,
+// birth time) triple is captured *before* the staleness verdict is formed, and the directory
+// the rename actually produced is compared against it afterwards. Equal means the verdict and
+// the steal concern the same directory, and the reclaim is real. Unequal means this process
+// lost the race and is holding somebody else's live lock: it puts that directory straight back
+// and reports busy — a single attempt, no retry, and nothing destroyed.
+//
+// The steal is followed immediately by one further create of the lock path, ahead of the
+// comparison and ahead of discarding anything, so the path is never observably free for longer
+// than a single syscall gap. That placeholder does double duty: a fresh acquirer racing the gap
+// meets EEXIST rather than an open door, and — because the placeholder is empty — a restore is
+// one atomic rename over it rather than a remove-then-move that would open a second window of
+// its own. Losing even that one-syscall gap to a third, unrelated fresh acquirer is reported as
+// busy exactly like any other contention.
 export function acquireTurnLock(sessionId) {
   assertValidSessionId(sessionId);
 
@@ -178,24 +222,62 @@ export function acquireTurnLock(sessionId) {
     if (err.code !== 'EEXIST') {
       throw err;
     }
-    if (!isTurnLockStale(sessionId)) {
+    // Captured before the staleness verdict, never after. The verdict reads the directory
+    // through this same path, so anything that replaces the directory between these two steps
+    // leaves `observed` a strictly older observation than the evidence the verdict was formed
+    // from, and the comparison after the steal then refuses. Capturing it after the verdict
+    // would invert exactly that: a verdict formed about one directory would go on to authorise
+    // stealing its replacement, which is the defect this ordering exists to prevent.
+    const observed = lockDirectoryIdentity(lockPath);
+    if (observed === null || !isTurnLockStale(sessionId)) {
       return false;
     }
-    // Single reclaim attempt: atomically steal the stale directory via rename (see the
-    // block comment above), then make one further mkdirSync attempt to recreate it. Either
-    // step losing — the rename because another reclaimer stole it first, or the mkdirSync
-    // because a third acquirer claimed the path in the gap — reports busy. No retry, no
-    // poll, no second attempt at either step.
+
+    // Single reclaim attempt: steal the directory via rename (see the block comment above),
+    // re-occupy the path at once, then prove the steal took the directory the verdict was about.
+    // Any step losing — the rename because the path went away, the identity check because a
+    // faster reclaimer got there first, the re-occupation because a third acquirer claimed the
+    // path in the gap — reports busy. No retry, no poll, no second attempt at any step.
     const scratchPath = `${lockPath}.reclaim-${randomUUID()}`;
     try {
       fs.renameSync(lockPath, scratchPath);
     } catch {
       return false;
     }
-    fs.rmSync(scratchPath, { recursive: true, force: true });
+
+    // The very next syscall, ahead of the comparison and ahead of discarding anything, so the
+    // steal leaves no open door behind it. A concurrent acquirer arriving now meets EEXIST and
+    // then reads this placeholder as "no holder metadata, modified moments ago", which
+    // MISSING_HOLDER_GRACE_MS already classifies as not reclaimable — so it refuses rather than
+    // reclaiming a directory this process has not finished deciding about.
+    let pathReoccupied = true;
     try {
       fs.mkdirSync(lockPath);
     } catch {
+      pathReoccupied = false;
+    }
+
+    if (!isSameDirectory(lockDirectoryIdentity(scratchPath), observed)) {
+      // The rename won the name but took a different directory than the one judged stale:
+      // another reclaimer finished first, and what this process is holding is that reclaimer's
+      // live lock. Put it back — one rename over the empty placeholder above, so the path is
+      // never free at any point in between — and report busy. If the placeholder was lost and
+      // something non-empty now holds the path, the restore cannot land; discard the directory
+      // rather than leak it into the lock root forever, and let the rightful holder's own token
+      // check (see releaseTurnLock) keep it from removing whatever stands there instead.
+      try {
+        fs.renameSync(scratchPath, lockPath);
+      } catch {
+        fs.rmSync(scratchPath, { recursive: true, force: true });
+      }
+      return false;
+    }
+
+    fs.rmSync(scratchPath, { recursive: true, force: true });
+
+    if (!pathReoccupied) {
+      // The steal was legitimate, but a third, unrelated fresh acquirer claimed the path in the
+      // one-syscall gap above. Reported as busy exactly like any other contention.
       return false;
     }
   }
@@ -206,11 +288,26 @@ export function acquireTurnLock(sessionId) {
   // ownership, checked back by releaseTurnLock (CR-02) so a release can never remove a lock
   // a later acquirer has since replaced.
   const token = randomUUID();
-  fs.writeFileSync(
-    path.join(lockPath, 'holder.json'),
-    JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), sessionId, token }),
-    'utf8',
-  );
+  try {
+    fs.writeFileSync(
+      path.join(lockPath, 'holder.json'),
+      JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), sessionId, token }),
+      { encoding: 'utf8', flag: 'wx' },
+    );
+  } catch (err) {
+    // An exclusive create, because the directory this write lands in was created empty moments
+    // ago by whichever of the two creates above succeeded. An existing holder.json can therefore
+    // only mean the path stopped being this process's between that create and this write — a
+    // reclaimer restoring a live lock it should never have taken, replacing this brand-new
+    // directory with the rightful holder's. ENOENT means the directory was removed outright.
+    // Both are contention and are reported as busy; without this guard the write would instead
+    // land inside the restored holder's directory and overwrite its metadata, which is the same
+    // mutual-exclusion break by a longer route. Anything else is a real I/O failure and throws.
+    if (err.code === 'EEXIST' || err.code === 'ENOENT') {
+      return false;
+    }
+    throw err;
+  }
 
   heldSessionId = sessionId;
   heldToken = token;

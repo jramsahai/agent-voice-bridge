@@ -366,6 +366,208 @@ process.send('ready');
   }
 });
 
+// CR-01b: the fork race above is the honest end-to-end proof, but it can only ever *observe*
+// the window — two real processes either hit it or they do not. CI found it exactly once while
+// 25 consecutive local runs of that same test never did, so it is not a regression guard: a
+// reverted fix would sail past it almost every time. These two tests *force* the interleaving
+// instead of racing for it, so the guarantee is asserted deterministically on every run.
+//
+// The seam is the node:fs default export. turn-lock.js reaches fs.renameSync and fs.mkdirSync
+// by property lookup at call time, so replacing one of those properties for the duration of a
+// single acquireTurnLock call injects a preemption at the exact instruction the defect lived
+// at — no test hook in production source, and nothing about what acquireTurnLock does is
+// altered. Each patch fires at most once, keys on the specific path being operated on, restores
+// the real implementation immediately after the call, and restores it again from a finally.
+
+// The defect itself: a reclaimer forms its staleness verdict about one directory, and by the
+// time its rename runs, a faster reclaimer has finished and the lock *path* names that
+// reclaimer's brand-new live directory instead. The rename succeeds — POSIX rename is atomic
+// per path, not per directory — and pre-fix the loser went on to destroy the winner's lock and
+// report success, leaving two processes each believing they held the turn. The injected work
+// below is exactly what that faster reclaimer would have done in the gap.
+test('a reclaimer whose stale directory is replaced mid-steal refuses, leaving the faster reclaimer untouched', () => {
+  const sessionId = uniqueSessionId('reclaim-identity-swap');
+  const lockPath = turnLockPathFor(sessionId);
+  const realRenameSync = fs.renameSync;
+  const winnerToken = `winner-${randomUUID()}`;
+  let injectionFired = false;
+
+  // A real, now-exited pid — same honesty requirement as every other reclaim fixture here.
+  const finished = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+  assert.ok(finished.pid > 0, 'expected the short-lived process to report a real pid');
+  writeHolderFile(lockPath, {
+    pid: finished.pid,
+    acquiredAt: new Date().toISOString(),
+    sessionId,
+    token: 'stale-token',
+  });
+  assert.equal(isTurnLockStale(sessionId), true, 'sanity: the seeded directory must actually be stale before it is raced');
+  const staleIno = fs.statSync(lockPath, { bigint: true }).ino;
+
+  try {
+    fs.renameSync = function (oldPath, newPath) {
+      // Once, and only on the steal of the lock path itself: the injected reclaim's own rename
+      // and the losing reclaimer's restore must both reach the real implementation.
+      if (!injectionFired && oldPath === lockPath) {
+        injectionFired = true;
+        const winnerScratch = `${lockPath}.reclaim-winner`;
+        realRenameSync.call(fs, lockPath, winnerScratch);
+        fs.rmSync(winnerScratch, { recursive: true, force: true });
+        fs.mkdirSync(lockPath);
+        // process.pid, because the faster reclaimer is alive: its lock is emphatically not stale.
+        fs.writeFileSync(
+          path.join(lockPath, 'holder.json'),
+          JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), sessionId, token: winnerToken }),
+          'utf8',
+        );
+      }
+      return realRenameSync.call(fs, oldPath, newPath);
+    };
+
+    const acquired = acquireTurnLock(sessionId);
+    fs.renameSync = realRenameSync;
+
+    assert.equal(injectionFired, true, 'sanity: the interleaving must actually have been injected into the steal');
+    assert.notEqual(
+      fs.statSync(lockPath, { bigint: true }).ino,
+      staleIno,
+      'sanity: the injected reclaim must really have replaced the directory, not merely rewritten its metadata',
+    );
+    assert.equal(
+      acquired,
+      false,
+      'a steal that took a different directory than the one judged stale must report busy — winning the rename ' +
+        'proves only THAT this process won the path, never WHAT it won',
+    );
+    const holder = JSON.parse(fs.readFileSync(path.join(lockPath, 'holder.json'), 'utf8'));
+    assert.equal(holder.token, winnerToken, "the faster reclaimer's live lock must survive the losing reclaimer untouched");
+  } finally {
+    fs.renameSync = realRenameSync;
+    releaseTurnLock(sessionId);
+    fs.rmSync(lockPath, { recursive: true, force: true });
+  }
+});
+
+// The *ordering* the fix above depends on, pinned separately. Capturing the directory identity
+// and forming the staleness verdict are two reads of the same path, and only one order is safe:
+// identity first. Reverse them and a swap landing in between hands the reclaimer a verdict about
+// the old directory together with an identity captured from its live replacement — the two agree,
+// the comparison passes, and the reclaimer destroys a live lock while believing it did everything
+// right. The previous test cannot see that, because its injection fires at the rename, by which
+// point both orderings have already captured the same identity; a mutation swapping the two lines
+// survives it. This injection fires *inside* the staleness verdict instead: fs.readFileSync
+// returns the stale metadata the verdict is entitled to, and the faster reclaimer completes in the
+// instant after that read. Only identity-captured-first refuses here.
+test('a reclaimer captures directory identity before forming its staleness verdict, not after', () => {
+  const sessionId = uniqueSessionId('reclaim-verdict-ordering');
+  const lockPath = turnLockPathFor(sessionId);
+  const holderPath = path.join(lockPath, 'holder.json');
+  const realReadFileSync = fs.readFileSync;
+  const winnerToken = `winner-${randomUUID()}`;
+  let injectionFired = false;
+
+  const finished = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+  assert.ok(finished.pid > 0, 'expected the short-lived process to report a real pid');
+  writeHolderFile(lockPath, {
+    pid: finished.pid,
+    acquiredAt: new Date().toISOString(),
+    sessionId,
+    token: 'stale-token',
+  });
+  assert.equal(isTurnLockStale(sessionId), true, 'sanity: the seeded directory must actually be stale before it is raced');
+  const staleIno = fs.statSync(lockPath, { bigint: true }).ino;
+
+  try {
+    // Installed only now, so the sanity check above reads the fixture undisturbed. Keyed on this
+    // session's own holder.json and fires once, so no other read in the process is affected.
+    fs.readFileSync = function (target, options) {
+      if (!injectionFired && target === holderPath) {
+        injectionFired = true;
+        const staleMetadata = realReadFileSync.call(fs, target, options);
+        const winnerScratch = `${lockPath}.reclaim-winner`;
+        fs.renameSync(lockPath, winnerScratch);
+        fs.rmSync(winnerScratch, { recursive: true, force: true });
+        fs.mkdirSync(lockPath);
+        fs.writeFileSync(
+          holderPath,
+          JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), sessionId, token: winnerToken }),
+          'utf8',
+        );
+        // The verdict still sees what it read before the swap — which is the whole point.
+        return staleMetadata;
+      }
+      return realReadFileSync.call(fs, target, options);
+    };
+
+    const acquired = acquireTurnLock(sessionId);
+    fs.readFileSync = realReadFileSync;
+
+    assert.equal(injectionFired, true, 'sanity: the interleaving must actually have been injected into the staleness verdict');
+    assert.notEqual(
+      fs.statSync(lockPath, { bigint: true }).ino,
+      staleIno,
+      'sanity: the injected reclaim must really have replaced the directory mid-verdict',
+    );
+    assert.equal(
+      acquired,
+      false,
+      'identity must be captured before the staleness verdict: capturing it afterwards reads it from the ' +
+        'live replacement, so the comparison agrees with itself and authorises destroying a live lock',
+    );
+    const holder = JSON.parse(realReadFileSync.call(fs, holderPath, 'utf8'));
+    assert.equal(holder.token, winnerToken, "the faster reclaimer's live lock must survive untouched");
+  } finally {
+    fs.readFileSync = realReadFileSync;
+    releaseTurnLock(sessionId);
+    fs.rmSync(lockPath, { recursive: true, force: true });
+  }
+});
+
+// The counterpart guard, at the other end of the same window. A losing reclaimer restores the
+// rightful holder's directory over the placeholder it created, and that restore can land on top
+// of a third acquirer's brand-new empty directory in the one-syscall gap between that acquirer's
+// own create and its metadata write. Without an exclusive create, the third acquirer would then
+// write holder.json straight into the restored holder's directory and come away believing it
+// holds a lock that is demonstrably someone else's — the same mutual-exclusion break by a longer
+// route. Forced here by injecting the replacement at exactly that instruction.
+test('an acquirer whose new lock directory is replaced before it writes metadata refuses instead of overwriting the holder', () => {
+  const sessionId = uniqueSessionId('holder-write-usurped');
+  const lockPath = turnLockPathFor(sessionId);
+  const realMkdirSync = fs.mkdirSync;
+  const rightfulToken = `rightful-${randomUUID()}`;
+  let injectionFired = false;
+
+  try {
+    fs.mkdirSync = function (dirPath, options) {
+      const result = realMkdirSync.call(fs, dirPath, options);
+      // Keyed on the lock path, so the lock-root create that precedes it is left alone.
+      if (!injectionFired && dirPath === lockPath) {
+        injectionFired = true;
+        fs.rmSync(lockPath, { recursive: true, force: true });
+        realMkdirSync.call(fs, lockPath);
+        fs.writeFileSync(
+          path.join(lockPath, 'holder.json'),
+          JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), sessionId, token: rightfulToken }),
+          'utf8',
+        );
+      }
+      return result;
+    };
+
+    const acquired = acquireTurnLock(sessionId);
+    fs.mkdirSync = realMkdirSync;
+
+    assert.equal(injectionFired, true, 'sanity: the replacement must actually have been injected before the write');
+    assert.equal(acquired, false, 'an acquirer must report busy once the directory at the path is no longer the one it created');
+    const holder = JSON.parse(fs.readFileSync(path.join(lockPath, 'holder.json'), 'utf8'));
+    assert.equal(holder.token, rightfulToken, "the live holder's metadata must not have been overwritten by the refused acquirer");
+  } finally {
+    fs.mkdirSync = realMkdirSync;
+    releaseTurnLock(sessionId);
+    fs.rmSync(lockPath, { recursive: true, force: true });
+  }
+});
+
 // --- No waiting anywhere ---
 
 test('source scan: turn-lock.js contains no timer, no promise-returning filesystem call, and no while loop', () => {

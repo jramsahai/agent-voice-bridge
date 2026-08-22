@@ -3,8 +3,8 @@
 // between the request being fully sent and the first response byte arriving, because the
 // response head is written only after both the transcribe and agent stages resolve (the
 // speech/TTS stage runs after that first byte is already on the wire). The measured typical
-// case is 5.4-10.3 seconds per docs/API.md — that is the
-// typical experience, not the floor (D-01).
+// case is 5.4-10.3 seconds — docs/API.md, "Client read timeout", records both measurements
+// against live backends — and that is the typical experience, not the floor (D-01).
 //
 // Computed as the sum of the two stage ceilings, never a typed literal: raising either ceiling
 // in stage-timeouts.js raises this floor automatically, with no second edit to remember.

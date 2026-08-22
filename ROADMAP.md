@@ -30,8 +30,5 @@
 ## Questions to resolve
 - What is the cleanest OpenClaw API/session path for turn submission?
 - Should the first bridge be HTTP upload based or WebSocket based?
-- Which frontend stack should be used for the voice UI?
-- Should TTS audio be generated to temp files or streamed directly?
- base64 audio.
 - Which frontend stack should be used for the voice UI? Current scaffold uses vanilla browser APIs for speed.
 - Should TTS audio be generated to temp files or streamed directly? Current scaffold generates temp files.

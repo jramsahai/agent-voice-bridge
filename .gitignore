@@ -4,3 +4,4 @@ node_modules/
 .tmp/
 config/config.local.json
 reply.pcm
+.claude/settings.local.json

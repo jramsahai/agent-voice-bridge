@@ -1744,6 +1744,97 @@ test('a live request through the stub proxy with a recognized Host reaches the o
 });
 
 // =====================================================================================
+// 08-02-PLAN.md Task 1 (TEST-06): byte-fidelity passthrough. Compares a proxied response
+// against a direct-to-origin response for the identical request rather than against typed
+// expectations — a proxy-only assertion has nothing to detect a rewritten body against, and
+// would pass a stub that silently re-encoded the reply. The two requests are issued
+// sequentially, not concurrently, because the origin holds a single-conversation turn lock
+// (PROJECT.md) — a concurrent pair would race for the lock and one side would observe
+// 409 TURN_BUSY instead of 200.
+// =====================================================================================
+
+test('a live turn forwarded through the stub proxy to a recognized Host is byte-for-byte identical to the same turn taken directly against the origin', async () => {
+  const config = buildTestConfig({ security: { expectedHost: PLACEHOLDER_TAILNET_HOST } });
+  const adapters = buildTestAdapters();
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const originServer = await startServer(handler);
+  const proxyServer = await startStubProxy({
+    knownHosts: new Set([PLACEHOLDER_TAILNET_HOST]),
+    originPort: originServer.address().port,
+  });
+  try {
+    const body = makePcm16({ samples: 10 });
+    const turnHeaders = {
+      Authorization: `Bearer ${TEST_CLIENT_TOKEN}`,
+      [INPUT_FORMAT_HEADER]: CODEC_FREE_FORMAT_ID,
+      Host: PLACEHOLDER_TAILNET_HOST,
+    };
+
+    // Sequential, not Promise.all — see comment above.
+    const proxied = await postTurn(proxyServer.address().port, { body, headers: turnHeaders });
+    const direct = await postTurn(originServer.address().port, { body, headers: turnHeaders });
+
+    assert.equal(proxied.statusCode, 200, 'expected the proxied turn to succeed with 200');
+    assert.equal(direct.statusCode, 200, 'expected the direct turn to succeed with 200');
+
+    const proxiedPairs = [];
+    for (let i = 0; i < proxied.rawHeaders.length; i += 2) {
+      proxiedPairs.push([proxied.rawHeaders[i].toLowerCase(), proxied.rawHeaders[i + 1]]);
+    }
+
+    // 1. No compression: any content-encoding present on the proxied response must be identity.
+    for (const [name, value] of proxiedPairs) {
+      if (name === 'content-encoding') {
+        assert.equal(value, 'identity', 'any content-encoding present on the proxied response must be exactly identity');
+      }
+    }
+
+    // 2. No redirects: status is outside the 3xx range, and matches the direct response's status.
+    assert.ok(
+      proxied.statusCode < 300 || proxied.statusCode >= 400,
+      `proxied response status ${proxied.statusCode} must never be a 3xx redirect`,
+    );
+    assert.equal(proxied.statusCode, direct.statusCode, 'the proxied and direct responses must carry the same status');
+
+    // 3. No rewrite or re-buffering: bodies are byte-for-byte identical, no body-length header
+    // survives the hop, and exactly one no-transform cache-control survives it too.
+    assert.ok(
+      proxied.body.equals(direct.body),
+      'the proxied response body must be byte-for-byte identical to the direct response body',
+    );
+    assertNoBodyLengthHeader(proxied);
+    const cacheControlPairs = proxiedPairs.filter(([name]) => name === 'cache-control');
+    assert.equal(cacheControlPairs.length, 1, 'the proxied response must carry exactly one cache-control header');
+    assert.ok(
+      cacheControlPairs[0][1].includes('no-transform'),
+      'the proxied response cache-control must include the no-transform directive',
+    );
+
+    // 4. Header passthrough unmodified: the api-version header and every X-Voice-* header
+    // arrive at the proxy client with the exact value the origin emitted for the same request.
+    const guaranteedHeaderNames = [
+      API_VERSION_HEADER_NAME,
+      TRANSCRIPT_BYTES_HEADER,
+      REPLY_BYTES_HEADER,
+      AUDIO_PRESENT_HEADER,
+      OUTPUT_FORMAT_RESPONSE_HEADER,
+    ];
+    for (const headerName of guaranteedHeaderNames) {
+      const lowerName = headerName.toLowerCase();
+      assert.ok(lowerName in proxied.headers, `expected the proxied response to carry ${headerName}`);
+      assert.ok(lowerName in direct.headers, `expected the direct response to carry ${headerName}`);
+      assert.equal(
+        proxied.headers[lowerName],
+        direct.headers[lowerName],
+        `${headerName} must survive the proxy hop unmodified — proxied '${proxied.headers[lowerName]}' vs direct '${direct.headers[lowerName]}'`,
+      );
+    }
+  } finally {
+    await Promise.all([closeServer(originServer), closeServer(proxyServer)]);
+  }
+});
+
+// =====================================================================================
 // 08-01-PLAN.md Task 2 (TEST-07): the vacuity guard. assertProxyRejectionSectionStatesObservedFailure
 // above is a prose-only check whose section.includes('404') assertion is exactly the
 // independent-substring predicate Phase 6 closed for the error catalogue — satisfiable by a

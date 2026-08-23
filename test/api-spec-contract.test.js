@@ -1561,6 +1561,12 @@ function startStubProxy({ knownHosts, originPort }) {
           upstreamRes.pipe(res);
         },
       );
+      upstream.on('error', () => {
+        if (!res.headersSent) res.writeHead(502);
+        res.end();
+      });
+      req.on('error', () => upstream.destroy());
+      res.on('error', () => upstream.destroy());
       req.pipe(upstream);
     });
     server.listen(0, '127.0.0.1', () => resolve(server));

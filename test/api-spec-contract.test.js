@@ -1432,3 +1432,55 @@ test('the Audio formats and capabilities sections each forbid reusing the input 
     'the check must throw once the reply-direction-scope claim is removed from the Audio formats section',
   );
 });
+
+// =====================================================================================
+// 07 UAT gap G-07-2 (SPEC-10): the sixth measured correction. Every other SPEC-05..09 claim
+// this phase landed carries a region-scoped pin above; this one did not, and the section was
+// deletable with the whole suite still green — the one correction found by reading the
+// firmware skill directly was the one correction nothing defended. Region-scoped for the same
+// reason as the pins above: "reply" and "deterministic" both occur elsewhere in the document
+// for unrelated reasons, so a whole-document includes() would stay green with the fact gone
+// from the section that must carry it.
+// =====================================================================================
+
+const REPLY_DETERMINISM_HEADING = '### Reply text is not deterministic';
+const REPLY_NONDETERMINISM_CLAIM =
+  'Two turns carrying byte-identical request audio can return different reply text';
+const REPLY_NO_FIXTURE_DIFF_CLAIM = 'A client must not diff reply text against a fixture';
+
+function assertReplyDeterminismSectionStatesTheMeasuredCorrection(section) {
+  assert.ok(
+    section.includes(REPLY_NONDETERMINISM_CLAIM),
+    'the reply-determinism section must state that byte-identical request audio can return different reply text — the measured fact a client author would otherwise learn only from the firmware skill',
+  );
+  assert.ok(
+    section.includes(REPLY_NO_FIXTURE_DIFF_CLAIM),
+    'the reply-determinism section must instruct a client not to diff reply text against a fixture — the fact without its consequence leaves the test-writing trap open',
+  );
+  assert.ok(
+    section.includes('Assert on the framing instead'),
+    'the reply-determinism section must name the alternative a client should assert on instead of reply content',
+  );
+  assert.ok(
+    section.includes('is stable for identical input; the reply segment is not'),
+    'the reply-determinism section must scope the instability to the reply segment — a client CAN rely on transcript stability, and losing that contrast overstates what varies',
+  );
+  assert.ok(
+    section.includes('`X-Voice-Reply-Bytes` always describes the reply that was actually sent'),
+    'the reply-determinism section must state that a varying reply never makes the byte-count header wrong — otherwise a reader can conclude the framing headers are unreliable too',
+  );
+}
+
+test('the reply-determinism section states that reply text varies for identical input and that a client must not diff it against a fixture', () => {
+  const section = regionUnderHeading(specText, REPLY_DETERMINISM_HEADING);
+  assertReplyDeterminismSectionStatesTheMeasuredCorrection(section);
+
+  // Negative-case proof through the identical assertion path, on the do-not-diff instruction:
+  // the fact alone does not tell a firmware author what to do differently.
+  const mutated = section.replace(REPLY_NO_FIXTURE_DIFF_CLAIM, '');
+  assert.notEqual(mutated, section, 'sanity: the mutation must have actually removed the claim');
+  assert.throws(
+    () => assertReplyDeterminismSectionStatesTheMeasuredCorrection(mutated),
+    'the check must throw once the do-not-diff-against-a-fixture instruction is removed from the section',
+  );
+});

@@ -1293,3 +1293,67 @@ test('the POST /v1/turn request section states a 413 can arrive mid-upload and t
     'the check must throw once the mid-upload read-response claim is removed from the section',
   );
 });
+
+// =====================================================================================
+// 07-02-PLAN.md Task 2 (SPEC-07): all four framing claims are already stated in docs/API.md
+// (confirmed present at 06-line-cited locations below). This does not rewrite that prose — it
+// pins each claim to the section that must carry it, region-scoped via regionUnderHeading,
+// so a later edit that relocates or deletes one out of its section fails the build. The
+// whole-document checks at lines ~476-479 and ~763-769 above are retained, not replaced —
+// those prove cross-section presence; these prove the claim lives in the right place.
+// =====================================================================================
+
+const CAPABILITIES_CONTENT_LENGTH_CLAIM = 'this response carries a real `Content-Length` header';
+
+function assertSpec07FramingClaimsLiveInTheRightSections({ framingSection, consumingSection, capabilitiesSection }) {
+  assert.ok(
+    framingSection.includes('no delimiter of any kind'),
+    'the Response body framing section must state the segments carry no delimiter of any kind',
+  );
+  assert.ok(
+    /multi-byte character/.test(framingSection),
+    'the Response body framing section must state the multi-byte-misalignment consequence of byte-offset slicing',
+  );
+  assert.ok(
+    consumingSection.includes('no body-length header'),
+    'the Consuming the response body section must state that no body-length header is sent',
+  );
+  assert.ok(
+    consumingSection.includes('Read until the connection ends'),
+    'the Consuming the response body section must instruct the client to read until the connection ends',
+  );
+  assert.ok(
+    capabilitiesSection.includes(CAPABILITIES_CONTENT_LENGTH_CLAIM),
+    'the GET /v1/capabilities section must state that it carries a real Content-Length header',
+  );
+  assert.ok(
+    capabilitiesSection.includes('Unlike `POST /v1/turn`'),
+    'the GET /v1/capabilities section must contrast its real Content-Length against the turn response, not state it unqualified',
+  );
+}
+
+test('each SPEC-07 framing claim lives in the section that must carry it, not merely somewhere in the document', () => {
+  const framingSection = regionUnderHeading(specText, '### Response body framing');
+  const consumingSection = regionUnderHeading(specText, '## Consuming the response body');
+  const capabilitiesSection = regionUnderHeading(specText, '## GET /v1/capabilities');
+  assertSpec07FramingClaimsLiveInTheRightSections({ framingSection, consumingSection, capabilitiesSection });
+
+  // Negative-case proof driven on the claim with no prior coverage anywhere in the suite —
+  // demonstrates a genuinely new guard rather than re-proving what the whole-document tests
+  // already cover.
+  const mutatedCapabilitiesSection = capabilitiesSection.replace(CAPABILITIES_CONTENT_LENGTH_CLAIM, '');
+  assert.notEqual(
+    mutatedCapabilitiesSection,
+    capabilitiesSection,
+    'sanity: the mutation must have actually removed the claim',
+  );
+  assert.throws(
+    () =>
+      assertSpec07FramingClaimsLiveInTheRightSections({
+        framingSection,
+        consumingSection,
+        capabilitiesSection: mutatedCapabilitiesSection,
+      }),
+    'the check must throw once the capabilities real-Content-Length claim is removed from its section',
+  );
+});

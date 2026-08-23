@@ -1357,3 +1357,67 @@ test('each SPEC-07 framing claim lives in the section that must carry it, not me
     'the check must throw once the capabilities real-Content-Length claim is removed from its section',
   );
 });
+
+// =====================================================================================
+// 07-02-PLAN.md Task 3 (SPEC-09): both claims are already stated in docs/API.md. As with
+// Task 2, no prose rewrite — confirm and pin, region-scoped.
+// =====================================================================================
+
+const ORIGIN_OMISSION_CLAIM = 'Do not synthesize a plausible-looking `Origin` value.';
+
+function assertOriginSectionStatesOmissionRatherThanSynthesis(section) {
+  assert.ok(
+    section.includes('omit `Origin` entirely'),
+    'the Origin header section must instruct a non-browser client to omit Origin entirely',
+  );
+  assert.ok(
+    section.includes(ORIGIN_OMISSION_CLAIM),
+    'the Origin header section must separately instruct a client not to synthesize a plausible-looking Origin value',
+  );
+}
+
+test('the Origin header section states omission rather than synthesis', () => {
+  const section = regionUnderHeading(specText, '### The `Origin` header');
+  assertOriginSectionStatesOmissionRatherThanSynthesis(section);
+
+  const mutated = section.replace(ORIGIN_OMISSION_CLAIM, '');
+  assert.notEqual(mutated, section, 'sanity: the mutation must have actually removed the claim');
+  assert.throws(
+    () => assertOriginSectionStatesOmissionRatherThanSynthesis(mutated),
+    'the check must throw once the do-not-synthesize claim is removed from the section',
+  );
+});
+
+const REPLY_DIRECTION_CLAIM = 'must not reuse the input format list for the reply direction';
+
+function assertReplyDirectionScopeIsStatedInBothSections({ audioFormatsSection, capabilitiesSection }) {
+  assert.ok(
+    audioFormatsSection.includes(REPLY_DIRECTION_CLAIM),
+    'the Audio formats section must forbid reusing the input format list for the reply direction',
+  );
+  assert.ok(
+    /reused `input-formats` for the reply direction/.test(capabilitiesSection),
+    'the GET /v1/capabilities section must separately warn against reusing input-formats for the reply direction',
+  );
+}
+
+test('the Audio formats and capabilities sections each forbid reusing the input format list for the reply direction', () => {
+  const audioFormatsSection = regionUnderHeading(specText, '## Audio formats');
+  const capabilitiesSection = regionUnderHeading(specText, '## GET /v1/capabilities');
+  assertReplyDirectionScopeIsStatedInBothSections({ audioFormatsSection, capabilitiesSection });
+
+  const mutatedAudioFormatsSection = audioFormatsSection.replace(REPLY_DIRECTION_CLAIM, '');
+  assert.notEqual(
+    mutatedAudioFormatsSection,
+    audioFormatsSection,
+    'sanity: the mutation must have actually removed the claim',
+  );
+  assert.throws(
+    () =>
+      assertReplyDirectionScopeIsStatedInBothSections({
+        audioFormatsSection: mutatedAudioFormatsSection,
+        capabilitiesSection,
+      }),
+    'the check must throw once the reply-direction-scope claim is removed from the Audio formats section',
+  );
+});

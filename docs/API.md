@@ -329,7 +329,7 @@ Verified automatically by this repository's own test suite (`test/http-turn.test
 
 ### What the operator's reverse-proxy configuration must honour
 
-No test in this repository can reach this half — there is no proxy inside `node --test`, and standing one up is out of scope. The operator's reverse proxy must:
+Verified automatically by this repository's own test suite (`test/api-spec-contract.test.js`'s stub-proxy tests): a real turn is forwarded through an in-process proxy and what the client observes is compared, byte for byte, against what the origin emitted for the same request. That stub reproduces route-by-`Host` forwarding and rejection and nothing else — it is not Tailscale Serve, so a green suite proves this document and the stub agree with each other, not that either agrees with a live Serve instance. The operator's reverse proxy must:
 
 - Not enable compression on the turn endpoint.
 - Not issue redirects in front of it.

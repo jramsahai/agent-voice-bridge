@@ -1915,3 +1915,68 @@ test('the proxy-rejection check fails loudly when the section carries no parseab
     'assertProxyRejectionMatchesObserved must throw when the section carries no parseable claimed status',
   );
 });
+
+// =====================================================================================
+// 08-02-PLAN.md Task 2 (TEST-06): retire the "no test can reach this half" claim under
+// the operator reverse-proxy subsection and pin its replacement region-scoped — names the
+// proof (this file) and names the fidelity limit (not Tailscale Serve), and keeps all four
+// original operator bullets. Mirrors assertProxyRejectionSectionStatesObservedFailure's
+// shape: a pure function taking section text as a parameter, never closing over specText.
+// =====================================================================================
+
+const OPERATOR_PROXY_HEADING = "### What the operator's reverse-proxy configuration must honour";
+const OPERATOR_PROXY_PROOF_FILE = 'test/api-spec-contract.test.js';
+const OPERATOR_PROXY_FIDELITY_LIMIT_CLAIM = 'it is not Tailscale Serve';
+
+function assertOperatorProxySectionNamesItsProof(section) {
+  assert.ok(
+    section.includes(OPERATOR_PROXY_PROOF_FILE),
+    `the operator reverse-proxy subsection must name ${OPERATOR_PROXY_PROOF_FILE} as its automated proof`,
+  );
+  assert.ok(
+    section.includes(OPERATOR_PROXY_FIDELITY_LIMIT_CLAIM),
+    'the operator reverse-proxy subsection must state that the stub is not Tailscale Serve',
+  );
+  assert.ok(
+    section.includes('Not enable compression on the turn endpoint'),
+    'the operator reverse-proxy subsection must keep its no-compression bullet',
+  );
+  assert.ok(
+    section.includes('Not issue redirects in front of it'),
+    'the operator reverse-proxy subsection must keep its no-redirects bullet',
+  );
+  assert.ok(
+    section.includes('Not rewrite, re-buffer, or otherwise transform the response body'),
+    'the operator reverse-proxy subsection must keep its no-rewrite/re-buffer/transform bullet',
+  );
+  assert.ok(
+    section.includes('Pass through every `X-Voice-*` header and the `X-API-Version` header unmodified'),
+    'the operator reverse-proxy subsection must keep its header-passthrough bullet',
+  );
+}
+
+test('the operator reverse-proxy subsection names the test file that verifies it and names the stub fidelity limit', () => {
+  const section = regionUnderHeading(specText, OPERATOR_PROXY_HEADING);
+  assertOperatorProxySectionNamesItsProof(section);
+
+  // Negative-case proof, driven through the identical assertion path: removing the
+  // proof-file name must make the check throw, otherwise this test only restates the
+  // claim's presence rather than proving the check can catch its absence.
+  const mutated = section.replace(OPERATOR_PROXY_PROOF_FILE, '');
+  assert.notEqual(mutated, section, 'sanity: the mutation must have actually removed the proof-file name');
+  assert.throws(
+    () => assertOperatorProxySectionNamesItsProof(mutated),
+    'the check must throw once the proof-file name is removed from the section',
+  );
+});
+
+test('docs/API.md no longer claims that no test in this repository can reach the proxy half', () => {
+  // This literal is hand-typed deliberately: it is a value that must never appear in the
+  // document again, not a catalogue being duplicated, so there is nothing to import — same
+  // rationale as the file's existing deleted-surface guard (the removed /api/turn endpoint
+  // and the removed singular security.token config key).
+  assert.ok(
+    !specText.includes('No test in this repository can reach this half'),
+    'docs/API.md must not resurrect the claim that no test in this repository can reach the proxy half — this phase\'s stub-proxy tests made that claim false',
+  );
+});

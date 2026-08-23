@@ -849,6 +849,7 @@ function assertWireHygiene(response) {
   );
 }
 
+// WIRE-HYGIENE-COVERAGE-ANCHOR: 200-audio
 test('wire hygiene: a 200 response with audio carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
   const config = buildTestConfig();
   const adapters = makeFakeAdapters({
@@ -868,6 +869,7 @@ test('wire hygiene: a 200 response with audio carries no cookie, no redirect sta
   }
 });
 
+// WIRE-HYGIENE-COVERAGE-ANCHOR: 200-text
 test('wire hygiene: a 200 text-only response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
   const config = buildTestConfig();
   const adapters = makeFakeAdapters({
@@ -890,6 +892,7 @@ test('wire hygiene: a 200 text-only response carries no cookie, no redirect stat
   }
 });
 
+// WIRE-HYGIENE-COVERAGE-ANCHOR: 401
 test('wire hygiene: a 401 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
   const config = buildTestConfig({ clients: { 'test-client': 'the-real-token' } });
   const adapters = makeFakeAdapters({
@@ -909,6 +912,7 @@ test('wire hygiene: a 401 response carries no cookie, no redirect status, no com
   }
 });
 
+// WIRE-HYGIENE-COVERAGE-ANCHOR: 413
 test('wire hygiene: a 413 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
   const config = buildTestConfig();
   const adapters = makeFakeAdapters({
@@ -934,6 +938,7 @@ test('wire hygiene: a 413 response carries no cookie, no redirect status, no com
   }
 });
 
+// WIRE-HYGIENE-COVERAGE-ANCHOR: 415
 test('wire hygiene: a 415 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control', async () => {
   const config = buildTestConfig();
   const adapters = makeFakeAdapters({

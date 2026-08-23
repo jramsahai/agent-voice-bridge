@@ -909,19 +909,19 @@ test('docs/API.md contains a Deployment requirements section covering TLS postur
   );
 });
 
-test('test/http-turn.test.js still contains the five wire-hygiene test names this file delegates origin-side no-cookie, no-redirect, no-compression coverage to — deleting one removes coverage docs/API.md claims', () => {
+// Anchored on marker comments rather than full-sentence test-name literals so a harmless
+// rewording of a wire-hygiene test's name (typo fix, wording clarification) does not trip this
+// guard — only actually removing a WIRE-HYGIENE-COVERAGE-ANCHOR comment (which sits directly
+// above its test) does. See WR-02 in 08-REVIEW.md.
+const WIRE_HYGIENE_COVERAGE_ANCHORS = ['200-audio', '200-text', '401', '413', '415'];
+
+test('test/http-turn.test.js still carries a WIRE-HYGIENE-COVERAGE-ANCHOR for each of the five wire-hygiene cases this file delegates origin-side no-cookie, no-redirect, no-compression coverage to — deleting one removes coverage docs/API.md claims', () => {
   const httpTurnSource = fs.readFileSync(new URL('../test/http-turn.test.js', import.meta.url), 'utf8');
-  const wireHygieneTestNames = [
-    'wire hygiene: a 200 response with audio carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control',
-    'wire hygiene: a 200 text-only response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control',
-    'wire hygiene: a 401 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control',
-    'wire hygiene: a 413 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control',
-    'wire hygiene: a 415 response carries no cookie, no redirect status, no compression, and exactly one no-transform cache-control',
-  ];
-  for (const name of wireHygieneTestNames) {
+  const foundAnchors = [...httpTurnSource.matchAll(/\/\/ WIRE-HYGIENE-COVERAGE-ANCHOR: (\S+)/g)].map((m) => m[1]);
+  for (const anchor of WIRE_HYGIENE_COVERAGE_ANCHORS) {
     assert.ok(
-      httpTurnSource.includes(name),
-      `test/http-turn.test.js is missing the wire-hygiene test '${name}' — this file delegates origin-side coverage to it`,
+      foundAnchors.includes(anchor),
+      `test/http-turn.test.js is missing the WIRE-HYGIENE-COVERAGE-ANCHOR: ${anchor} marker — this file delegates origin-side coverage for that case to it`,
     );
   }
 });

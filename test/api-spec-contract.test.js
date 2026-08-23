@@ -1158,3 +1158,67 @@ test('README.md links to the published API specification', () => {
     'README.md must link to docs/API.md so a reader arriving at the repo root finds the published contract',
   );
 });
+
+// =====================================================================================
+// 07-01-PLAN.md (SPEC-05/SPEC-06): region-scoped drift assertions for the proxy-observed
+// bad-Host rejection and the absent-X-Error-Code rule. `sectionUnderHeading` above only
+// terminates at the next '## ' (level 2) heading and throws when none follows — wrong for
+// the new '### Rejections that never reach the origin' h3 subsection, whose region must stop
+// at the following h3 ('### What the origin guarantees'), not run past it. `regionUnderHeading`
+// terminates at the next level-2 OR level-3 heading, or end-of-document if neither follows.
+// =====================================================================================
+
+function regionUnderHeading(docText, headingText) {
+  const headingIndex = docText.indexOf(headingText);
+  assert.ok(headingIndex !== -1, `docs/API.md is missing its '${headingText}' heading`);
+  const afterHeading = docText.slice(headingIndex + headingText.length);
+  const nextHeadingOffset = afterHeading.search(/\n(## |### )/);
+  return nextHeadingOffset === -1 ? afterHeading : afterHeading.slice(0, nextHeadingOffset);
+}
+
+const PROXY_REJECTION_HEADING = '### Rejections that never reach the origin';
+const PROXY_REJECTION_TERMINAL_CLAIM = 'terminal, not retryable';
+
+function assertProxyRejectionSectionStatesObservedFailure(section) {
+  assert.ok(section.includes('Tailscale Serve'), 'the proxy-rejection subsection must name Tailscale Serve');
+  assert.ok(section.includes('404'), 'the proxy-rejection subsection must state the observed 404 status');
+  assert.ok(
+    section.includes('no `X-Error-Code` header'),
+    'the proxy-rejection subsection must state that no X-Error-Code header is present',
+  );
+  assert.ok(
+    section.includes('the origin never sees the request, so its logs show nothing for it'),
+    'the proxy-rejection subsection must state that the origin never sees the request and its logs show nothing for it',
+  );
+  assert.ok(
+    section.includes(PROXY_REJECTION_TERMINAL_CLAIM),
+    'the proxy-rejection subsection must state the outcome is terminal, not retryable',
+  );
+}
+
+test('the Deployment requirements proxy-rejection subsection states the observed 404, the absent X-Error-Code header, and that the outcome is terminal', () => {
+  const section = regionUnderHeading(specText, PROXY_REJECTION_HEADING);
+  assertProxyRejectionSectionStatesObservedFailure(section);
+
+  // Negative-case proof, driven through the identical assertion path: removing the terminal
+  // claim from the section must make the check throw, otherwise this test only restates the
+  // claim's presence rather than proving the check can catch its absence.
+  const mutated = section.replace(PROXY_REJECTION_TERMINAL_CLAIM, '');
+  assert.notEqual(mutated, section, 'sanity: the mutation must have actually removed the claim');
+  assert.throws(
+    () => assertProxyRejectionSectionStatesObservedFailure(mutated),
+    'the check must throw once the terminal-not-retryable claim is removed from the section',
+  );
+});
+
+test('regionUnderHeading slices a strict subset of the document, never the whole of it', () => {
+  const section = regionUnderHeading(specText, PROXY_REJECTION_HEADING);
+  assert.ok(
+    section.length < specText.length,
+    'regionUnderHeading must return a strict subset of the document, not the whole of it',
+  );
+  assert.ok(
+    !section.includes('## Authentication'),
+    'the sliced region must not reach back into an earlier, unrelated section of the document',
+  );
+});

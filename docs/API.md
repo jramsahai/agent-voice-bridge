@@ -292,6 +292,20 @@ A `POST /v1/turn` that arrives while another turn is in progress is rejected imm
 
 The service binds plain HTTP and never terminates TLS, by design. A reverse proxy owns encryption — this project's own deployment fronts the origin with Tailscale Serve (see `TAILSCALE.md`), terminating HTTPS at the tailnet edge and forwarding plain HTTP to the origin on loopback. Exposing the origin outside a trusted network without proxy-terminated TLS exposes both the bearer token and the audio in the clear. This is a constraint the operator must resolve with a proxy — it is never presented here as an acceptable way to expose this service on its own.
 
+### Rejections that never reach the origin
+
+The `403 FORBIDDEN` documented above under The `Host` header is what the **origin** returns, for a client that dials the origin directly on its own non-standard port.
+
+This project's shipped deployment sits the origin behind **Tailscale Serve**, which routes by `Host` before it ever opens a connection to the origin, so a `Host` Serve does not recognise is answered by the proxy itself and never reaches the origin at all.
+
+A client dialing this deployment with a bad `Host` observes a `404` carrying no `X-Error-Code` header, no JSON error envelope, and none of the `X-API-Version` / `X-Voice-*` headers this specification otherwise guarantees — none of that is the origin's output.
+
+This is invisible from the server side: the origin never sees the request, so its logs show nothing for it.
+
+The outcome is terminal, not retryable: a retry re-issues the same request against the same proxy-side routing decision, so nothing server-side can ever make it succeed. Surface it to the operator as a `Host` misconfiguration.
+
+This describes the deployment this project ships — Tailscale Serve fronting the origin — and is a property of the proxy layer, not a promise about every reverse proxy a client might sit behind.
+
 ### What the origin guarantees
 
 Verified automatically by this repository's own test suite (`test/http-turn.test.js`'s wire-hygiene tests), across every status code a turn can return, not just the success path:

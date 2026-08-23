@@ -36,6 +36,7 @@ import {
   REPLY_BYTES_HEADER,
   AUDIO_PRESENT_HEADER,
   OUTPUT_FORMAT_RESPONSE_HEADER,
+  buildTurnResponseHead,
 } from '../packages/shared/transport/turn-response.js';
 import {
   listReplyFormats,
@@ -1483,4 +1484,261 @@ test('the reply-determinism section states that reply text varies for identical 
     () => assertReplyDeterminismSectionStatesTheMeasuredCorrection(mutated),
     'the check must throw once the do-not-diff-against-a-fixture instruction is removed from the section',
   );
+});
+
+// =====================================================================================
+// 08-01-PLAN.md (TEST-06/TEST-07): the proxy-fronted half of the drift gate. Every live check
+// above dials the origin directly — docs/API.md's proxy-path claims (the
+// '### Rejections that never reach the origin' region, PROXY_REJECTION_HEADING above) had
+// nothing behind them. This section stands up an in-process, standard-library stub proxy
+// that routes by `Host` — forward to the origin, or answer 404 itself with no origin
+// contact — proves live that a client observes something different through the proxy than
+// the origin itself emits for the same bad `Host`, and adds a bidirectional parse-and-compare
+// of the proxy-rejection claim against the live-observed values, mirroring
+// assertErrorCatalogueMatchesCode's own shape (parameter-not-closure, non-vacuity guard
+// first, forward-and-reverse direction).
+//
+// D-A (08-01-PLAN.md): this stub proves docs/API.md and the running code agree with each
+// other, not that either agrees with a real Tailscale Serve instance. That residual is a
+// manual verification carried in 08-VALIDATION.md — no test name, assertion message, or
+// comment below may state or imply the stub proxy is verified fidelity to a live Serve
+// instance.
+// =====================================================================================
+
+// Same placeholder tailnet hostname docs/API.md's worked example uses (asserted present
+// above by the 'carries a worked request example' test) — reused rather than a fresh
+// literal, so the stub proxy's knownHosts set and the origin's configured expectedHost agree
+// with the one hostname the published contract already shows a client.
+const PLACEHOLDER_TAILNET_HOST = 'your-device.your-tailnet.ts.net';
+
+// Unmistakably outside PLACEHOLDER_TAILNET_HOST and outside every other expectedHost fixture
+// in this suite — never a value any config in this file configures.
+const UNRECOGNIZED_HOST = 'not-a-configured-host.invalid';
+
+// The X-Error-Code header name, recovered from buildError() rather than typed — same idiom
+// as the existing 'docs/API.md documents the X-Error-Code header name...' test above.
+const ERROR_CODE_HEADER_NAME = Object.keys(buildError('NOT_FOUND').headers)[0];
+
+// The X-API-Version header name, recovered from buildTurnResponseHead() by finding the
+// header key whose value equals the imported API_VERSION constant — never typed.
+const SAMPLE_TURN_RESPONSE_HEAD = buildTurnResponseHead({
+  transcript: '',
+  reply: '',
+  outputFormatId: defaultOutputFormatId(),
+  audioPresent: false,
+});
+const API_VERSION_HEADER_NAME = Object.keys(SAMPLE_TURN_RESPONSE_HEAD.headers).find(
+  (key) => SAMPLE_TURN_RESPONSE_HEAD.headers[key] === API_VERSION,
+);
+assert.ok(API_VERSION_HEADER_NAME, 'expected buildTurnResponseHead to expose a header carrying API_VERSION');
+
+// Boots a loopback stub proxy that routes by `Host`: a member of knownHosts is forwarded
+// verbatim to the origin on originPort; anything else is answered 404 by the proxy itself,
+// with no connection to the origin ever opened on that branch — the only thing that makes an
+// origin-invocation counter meaningful for the reject-branch tests below. Streams both
+// directions rather than buffering either, so this never changes the mid-upload timing
+// characteristics docs/API.md documents elsewhere.
+function startStubProxy({ knownHosts, originPort }) {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      const host = typeof req.headers.host === 'string' ? req.headers.host.toLowerCase() : req.headers.host;
+      if (!knownHosts.has(host)) {
+        req.resume();
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const upstream = http.request(
+        {
+          host: '127.0.0.1',
+          port: originPort,
+          method: req.method,
+          path: req.url,
+          headers: req.headers,
+        },
+        (upstreamRes) => {
+          res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+          upstreamRes.pipe(res);
+        },
+      );
+      req.pipe(upstream);
+    });
+    server.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
+
+// Boots an origin (with an invocation counter wrapped around createRequestHandler) and a
+// stub proxy in front of it, whose only known host is PLACEHOLDER_TAILNET_HOST, then issues
+// the bad-Host turn through the proxy with UNRECOGNIZED_HOST. Both this function's own live
+// test and Task 2's negative-case tests below call this, so the fixtures and the live check
+// share one observation path. Tears both servers down in a single finally via Promise.all —
+// closing only one would leak the other listener for the rest of the run.
+async function observeProxyRejection() {
+  const config = buildTestConfig({ security: { expectedHost: PLACEHOLDER_TAILNET_HOST } });
+  const adapters = buildTestAdapters();
+  let originInvocations = 0;
+  const baseHandler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const originServer = await startServer((req, res) => {
+    originInvocations += 1;
+    baseHandler(req, res);
+  });
+  const proxyServer = await startStubProxy({
+    knownHosts: new Set([PLACEHOLDER_TAILNET_HOST]),
+    originPort: originServer.address().port,
+  });
+  try {
+    const response = await postTurn(proxyServer.address().port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { Host: UNRECOGNIZED_HOST },
+    });
+    return { response, originInvocations };
+  } finally {
+    await Promise.all([closeServer(originServer), closeServer(proxyServer)]);
+  }
+}
+
+// Finds the paragraph in a docs/API.md region carrying the proxy-rejection claim sentence and
+// extracts { claimedStatus, claimedAbsentHeaderTokens } from it — the backticked three-digit
+// status following 'observes a', plus the ordered backticked X-* header tokens (including the
+// wildcard family token ending in a hyphen-star, e.g. X-Voice-*) the sentence names as
+// absent. Takes text as a parameter, never closes over the module-level specText, and never
+// throws — a negative fixture with the claim paragraph removed or truncated away must reach
+// the caller's own non-vacuity guard, not throw here. Modelled on parseErrorCatalogueRows.
+function parseProxyRejectionClaim(section) {
+  const paragraphs = section.split(/\n\n+/);
+  const claimParagraph = paragraphs.find((paragraph) => paragraph.includes('observes a `'));
+  if (!claimParagraph) {
+    return { claimedStatus: null, claimedAbsentHeaderTokens: [] };
+  }
+  const statusMatch = /observes a `(\d{3})`/.exec(claimParagraph);
+  const claimedStatus = statusMatch ? Number(statusMatch[1]) : null;
+  const claimedAbsentHeaderTokens = [...claimParagraph.matchAll(/`(X-[A-Za-z0-9-]+\*?)`/g)].map((match) => match[1]);
+  return { claimedStatus, claimedAbsentHeaderTokens };
+}
+
+// Bidirectional compare of the parsed proxy-rejection claim against live-observed values,
+// modelled on assertErrorCatalogueMatchesCode: (1) non-vacuity guard first — a renamed
+// heading or reworded claim must fail loudly, never match nothing and pass; (2) the claimed
+// status must equal what was actually observed; (3) forward direction — no header the claim
+// names as absent may appear in the observed response (exact lowercased equality for a plain
+// token, prefix match for the wildcard family token); (4) reverse direction — every header
+// name in a guarantee set built from imported code must be covered by at least one claimed
+// token, so a document that quietly drops one of the guaranteed names from the sentence
+// fails too. Takes section as a parameter, never closes over specText, so the live call site
+// and both Task 2 negative fixtures share this one assertion path.
+function assertProxyRejectionMatchesObserved(section, { observedStatus, observedHeaderNames }) {
+  const { claimedStatus, claimedAbsentHeaderTokens } = parseProxyRejectionClaim(section);
+  assert.ok(
+    claimedStatus !== null && claimedAbsentHeaderTokens.length > 0,
+    'the proxy-rejection claim parsed to no claimed status or no claimed absent header tokens — a renamed heading or reworded claim must fail loudly, never match nothing and pass',
+  );
+  assert.equal(
+    claimedStatus,
+    observedStatus,
+    `docs/API.md's proxy-rejection claim states status ${claimedStatus}, but the live stub proxy observed ${observedStatus}`,
+  );
+
+  const lowerObservedHeaderNames = observedHeaderNames.map((name) => name.toLowerCase());
+  for (const token of claimedAbsentHeaderTokens) {
+    if (token.endsWith('-*')) {
+      const prefix = token.slice(0, -1).toLowerCase();
+      const present = lowerObservedHeaderNames.find((name) => name.startsWith(prefix));
+      assert.ok(
+        !present,
+        `docs/API.md claims no ${token} headers are present on the proxy-rejected response, but the live response carried '${present}'`,
+      );
+    } else {
+      const lowerToken = token.toLowerCase();
+      assert.ok(
+        !lowerObservedHeaderNames.includes(lowerToken),
+        `docs/API.md claims no ${token} header is present on the proxy-rejected response, but the live response carried one`,
+      );
+    }
+  }
+
+  const guaranteedHeaderNames = [
+    TRANSCRIPT_BYTES_HEADER,
+    REPLY_BYTES_HEADER,
+    AUDIO_PRESENT_HEADER,
+    OUTPUT_FORMAT_RESPONSE_HEADER,
+    API_VERSION_HEADER_NAME,
+    ERROR_CODE_HEADER_NAME,
+  ];
+  for (const headerName of guaranteedHeaderNames) {
+    const covered = claimedAbsentHeaderTokens.some((token) => {
+      if (token.endsWith('-*')) {
+        return headerName.toLowerCase().startsWith(token.slice(0, -1).toLowerCase());
+      }
+      return token.toLowerCase() === headerName.toLowerCase();
+    });
+    assert.ok(
+      covered,
+      `docs/API.md's proxy-rejection claim silently dropped ${headerName} from its list of headers a client behind the proxy will not see`,
+    );
+  }
+}
+
+test('a live request through the stub proxy with an unrecognized Host is answered 404 with no X-Error-Code header, and the origin is never invoked', async () => {
+  const { response, originInvocations } = await observeProxyRejection();
+  assert.equal(response.statusCode, 404);
+  const observedHeaderNames = Object.keys(response.headers);
+  assert.ok(
+    !observedHeaderNames.map((name) => name.toLowerCase()).includes(ERROR_CODE_HEADER_NAME.toLowerCase()),
+    `expected no ${ERROR_CODE_HEADER_NAME} header on the stub proxy's own 404`,
+  );
+  assert.equal(response.body.length, 0, "expected a zero-length body on the stub proxy's own 404 — no JSON envelope");
+  assert.equal(originInvocations, 0, 'expected the origin to never be invoked for an unrecognized Host');
+
+  const section = regionUnderHeading(specText, PROXY_REJECTION_HEADING);
+  assertProxyRejectionMatchesObserved(section, {
+    observedStatus: response.statusCode,
+    observedHeaderNames,
+  });
+});
+
+test('the same origin dialed directly with the same unrecognized Host answers 403 FORBIDDEN with an X-Error-Code header, proving the divergence the proxy-path gate exists to catch', async () => {
+  const config = buildTestConfig({ security: { expectedHost: PLACEHOLDER_TAILNET_HOST } });
+  const adapters = buildTestAdapters();
+  const handler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const response = await postTurn(port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { Host: UNRECOGNIZED_HOST },
+    });
+    assert.equal(response.statusCode, ERROR_CODES.FORBIDDEN.status);
+    assert.equal(response.headers[ERROR_CODE_HEADER_NAME.toLowerCase()], 'FORBIDDEN');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a live request through the stub proxy with a recognized Host reaches the origin and the origin status and X-Error-Code reach the client unchanged', async () => {
+  const config = buildTestConfig({ security: { expectedHost: PLACEHOLDER_TAILNET_HOST } });
+  const adapters = buildTestAdapters();
+  let originInvocations = 0;
+  const baseHandler = createRequestHandler({ config, adapters, webDir: '/nonexistent' });
+  const originServer = await startServer((req, res) => {
+    originInvocations += 1;
+    baseHandler(req, res);
+  });
+  const proxyServer = await startStubProxy({
+    knownHosts: new Set([PLACEHOLDER_TAILNET_HOST]),
+    originPort: originServer.address().port,
+  });
+  try {
+    // Authorization deliberately omitted so the origin answers its own UNAUTHORIZED
+    // rejection cheaply — the point of this test is that the proxy forwards to the origin
+    // and relays the origin's status/header unchanged, not what that status happens to be.
+    const response = await postTurn(proxyServer.address().port, {
+      body: makePcm16({ samples: 10 }),
+      headers: { Host: PLACEHOLDER_TAILNET_HOST },
+    });
+    assert.equal(originInvocations, 1, 'expected a recognized Host to be forwarded to the origin exactly once');
+    assert.equal(response.statusCode, ERROR_CODES.UNAUTHORIZED.status);
+    assert.equal(response.headers[ERROR_CODE_HEADER_NAME.toLowerCase()], 'UNAUTHORIZED');
+  } finally {
+    await Promise.all([closeServer(originServer), closeServer(proxyServer)]);
+  }
 });

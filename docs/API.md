@@ -83,6 +83,8 @@ The request body is raw bytes in the format declared by `X-Voice-Input-Format` �
 | `Authorization` | `Bearer <token>` | Missing or invalid returns `401 UNAUTHORIZED`. |
 | `Content-Length` | Byte count of the body | The body is capped at `9600000` bytes (5 minutes of 16kHz mono 16-bit PCM). A declared `Content-Length` above the cap is rejected `413 AUDIO_TOO_LARGE` before any body byte is read. |
 
+The `Content-Length` row above describes only the first of two `413 AUDIO_TOO_LARGE` triggers — the declared-length check, which fires before any body byte is read. The same `9600000`-byte ceiling above is also enforced against the running total of bytes actually received as the body streams in, so a client that under-declares `Content-Length`, sends none at all, or uses chunked request framing still meets `413 AUDIO_TOO_LARGE` — this second trigger firing while the request body is still uploading, part-way through the transfer rather than before it starts. When this trigger fires, the server writes the `413` and ends the response while the client may still be writing its request body, so the client's next body write can fail with a broken pipe or a connection reset. Do not treat the broken pipe as terminal: a client must still read the response after a failed body write, because a complete `413 AUDIO_TOO_LARGE` — envelope, `X-Error-Code` header, and all — may already be waiting on the socket. Treating the write failure as the end of the exchange discards the only explanation the server ever sends.
+
 Worked example — a client sending 16kHz mono PCM directly, no container:
 
 ```http

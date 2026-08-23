@@ -1257,3 +1257,39 @@ test('the Errors section states what an absent X-Error-Code means and cross-refe
     'the check must throw once the absent-X-Error-Code claim is removed from the section',
   );
 });
+
+// =====================================================================================
+// 07-02-PLAN.md Task 1 (SPEC-08): the mid-upload 413 trigger — a second, distinct path to
+// 413 AUDIO_TOO_LARGE that fires on the running received-byte total rather than the declared
+// Content-Length, and the client instruction to keep reading the response after a failed
+// body write rather than treating a broken pipe as terminal.
+// =====================================================================================
+
+const MID_UPLOAD_READ_RESPONSE_CLAIM = 'still read the response after a failed body write';
+
+function assertTurnRequestSectionStatesMidUploadTrigger(section) {
+  assert.ok(
+    section.includes('while the request body is still uploading'),
+    'the POST /v1/turn request section must state that a second 413 trigger can fire while the request body is still uploading',
+  );
+  assert.ok(
+    section.includes(MID_UPLOAD_READ_RESPONSE_CLAIM),
+    'the POST /v1/turn request section must instruct a client to still read the response after a failed body write',
+  );
+  assert.ok(
+    section.includes('not treat the broken pipe as terminal'),
+    'the POST /v1/turn request section must instruct a client not to treat the broken pipe as terminal',
+  );
+}
+
+test('the POST /v1/turn request section states a 413 can arrive mid-upload and that the client must still read the response after a failed body write', () => {
+  const section = regionUnderHeading(specText, '## POST /v1/turn — request');
+  assertTurnRequestSectionStatesMidUploadTrigger(section);
+
+  const mutated = section.replace(MID_UPLOAD_READ_RESPONSE_CLAIM, '');
+  assert.notEqual(mutated, section, 'sanity: the mutation must have actually removed the claim');
+  assert.throws(
+    () => assertTurnRequestSectionStatesMidUploadTrigger(mutated),
+    'the check must throw once the mid-upload read-response claim is removed from the section',
+  );
+});

@@ -1742,3 +1742,85 @@ test('a live request through the stub proxy with a recognized Host reaches the o
     await Promise.all([closeServer(originServer), closeServer(proxyServer)]);
   }
 });
+
+// =====================================================================================
+// 08-01-PLAN.md Task 2 (TEST-07): the vacuity guard. assertProxyRejectionSectionStatesObservedFailure
+// above is a prose-only check whose section.includes('404') assertion is exactly the
+// independent-substring predicate Phase 6 closed for the error catalogue — satisfiable by a
+// transposed status pair because the transposed value is already present elsewhere in the
+// region. Both tests below drive the same assertProxyRejectionMatchesObserved function the
+// live test calls — a parallel hand-rolled "does this look empty" check would prove nothing
+// about whether the real check can go vacuous.
+// =====================================================================================
+
+test('the proxy-rejection check rejects a transposed status pair that the pre-existing prose check still accepts', async () => {
+  const { response } = await observeProxyRejection();
+  const observedStatus = response.statusCode;
+  const observedHeaderNames = Object.keys(response.headers);
+  const section = regionUnderHeading(specText, PROXY_REJECTION_HEADING);
+
+  // The two statuses to transpose: the live-observed proxy status (parsed by
+  // parseProxyRejectionClaim from 'observes a `NNN`') and the origin-side status the same
+  // region already names in its opening sentence ('`NNN FORBIDDEN`'). Neither is typed —
+  // both are read from live observation or from the imported catalogue.
+  const originStatus = ERROR_CODES.FORBIDDEN.status;
+  const proxyStatusPattern = new RegExp(`(observes a \`)${observedStatus}(\`)`);
+  const originStatusPattern = new RegExp(`(\`)${originStatus}( FORBIDDEN\`)`);
+  assert.ok(proxyStatusPattern.test(section), 'expected to find the live-observed proxy status in the proxy-rejection region');
+  assert.ok(originStatusPattern.test(section), "expected to find the origin's own status in the proxy-rejection region");
+
+  // Two-phase substitution through unique placeholder tokens, mirroring the existing
+  // __TRANSPOSE_PLACEHOLDER_...__ technique above, so the second replacement cannot rewrite
+  // output the first just produced.
+  const proxyPlaceholder = '__TRANSPOSE_PLACEHOLDER_PROXY_STATUS__';
+  const originPlaceholder = '__TRANSPOSE_PLACEHOLDER_ORIGIN_STATUS__';
+  let transposedSection = section.replace(proxyStatusPattern, `$1${proxyPlaceholder}$2`);
+  transposedSection = transposedSection.replace(originStatusPattern, `$1${originPlaceholder}$2`);
+  transposedSection = transposedSection.replace(proxyPlaceholder, String(originStatus));
+  transposedSection = transposedSection.replace(originPlaceholder, String(observedStatus));
+  assert.notEqual(transposedSection, section, 'sanity: the mutation must have actually swapped the two statuses');
+
+  // 1. The structured check rejects the fixture.
+  assert.throws(
+    () => assertProxyRejectionMatchesObserved(transposedSection, { observedStatus, observedHeaderNames }),
+    'assertProxyRejectionMatchesObserved must throw on a transposed proxy/origin status pair',
+  );
+
+  // 2. Demonstration half: the superseded prose check does NOT throw on this exact fixture —
+  // called directly, not through assert.throws, so a regression here fails this test loudly.
+  // It only checks that '404' appears somewhere in the region, and the transposition moved
+  // that digit string onto the origin-status mention rather than removing it — precisely the
+  // class of defect this check cannot detect.
+  assertProxyRejectionSectionStatesObservedFailure(transposedSection);
+
+  // 3. Both status values still independently appear in the transposed text, proving the
+  // fixture is one a substring-presence predicate cannot discriminate.
+  assert.ok(
+    transposedSection.includes(String(observedStatus)),
+    `${observedStatus} must still independently appear in the transposed section`,
+  );
+  assert.ok(
+    transposedSection.includes(String(originStatus)),
+    `${originStatus} must still independently appear in the transposed section`,
+  );
+});
+
+test('the proxy-rejection check fails loudly when the section carries no parseable claimed status', async () => {
+  const { response } = await observeProxyRejection();
+  const observedStatus = response.statusCode;
+  const observedHeaderNames = Object.keys(response.headers);
+  const section = regionUnderHeading(specText, PROXY_REJECTION_HEADING);
+
+  // Slice the region to end before the line carrying the claimed status — a heading-present,
+  // claim-absent fixture, distinct from an absent-heading fixture (mirrors the zero-row
+  // catalogue fixture's own construction above).
+  const claimLineStart = section.indexOf('A client dialing this deployment with a bad');
+  assert.ok(claimLineStart !== -1, 'expected to find the claim sentence in the proxy-rejection region');
+  const vacuousSection = section.slice(0, claimLineStart);
+  assert.notEqual(vacuousSection, section, 'sanity: the mutation must have actually removed the claim');
+
+  assert.throws(
+    () => assertProxyRejectionMatchesObserved(vacuousSection, { observedStatus, observedHeaderNames }),
+    'assertProxyRejectionMatchesObserved must throw when the section carries no parseable claimed status',
+  );
+});

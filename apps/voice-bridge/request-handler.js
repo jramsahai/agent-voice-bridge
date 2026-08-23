@@ -16,6 +16,7 @@ import {
   buildErrorResponseHead,
   MAX_REQUEST_AUDIO_BYTES,
   API_VERSION,
+  API_VERSION_HEADER_NAME,
   TRANSCRIPT_BYTES_HEADER,
   REPLY_BYTES_HEADER,
 } from '../../packages/shared/transport/turn-response.js';
@@ -68,7 +69,7 @@ function sendLinesBody(res, status, headers, pairs) {
     ...headers,
     'Content-Type': 'text/plain; charset=utf-8',
     'Cache-Control': 'no-transform',
-    'X-API-Version': API_VERSION,
+    [API_VERSION_HEADER_NAME]: API_VERSION,
     'Content-Length': String(bodyBuffer.length),
   });
   res.end(bodyBuffer);

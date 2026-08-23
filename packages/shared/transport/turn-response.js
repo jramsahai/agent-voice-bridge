@@ -9,6 +9,7 @@
 import { MAX_PCM_BYTES } from '../audio/wav.js';
 
 export const API_VERSION = '1';
+export const API_VERSION_HEADER_NAME = 'X-API-Version';
 export const TRANSCRIPT_BYTES_HEADER = 'X-Voice-Transcript-Bytes';
 export const REPLY_BYTES_HEADER = 'X-Voice-Reply-Bytes';
 export const AUDIO_PRESENT_HEADER = 'X-Voice-Audio-Present';
@@ -32,7 +33,7 @@ export function buildTurnResponseHead({ transcript, reply, outputFormatId, audio
     headers: {
       'Content-Type': 'application/octet-stream',
       'Cache-Control': 'no-transform',
-      'X-API-Version': API_VERSION,
+      [API_VERSION_HEADER_NAME]: API_VERSION,
       [TRANSCRIPT_BYTES_HEADER]: String(transcriptBuffer.length),
       [REPLY_BYTES_HEADER]: String(replyBuffer.length),
       [OUTPUT_FORMAT_RESPONSE_HEADER]: outputFormatId,
@@ -65,7 +66,7 @@ export function buildErrorResponseHead(envelope) {
       ...envelope.headers,
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-transform',
-      'X-API-Version': API_VERSION,
+      [API_VERSION_HEADER_NAME]: API_VERSION,
     },
     bodyBuffer,
   };

@@ -27,16 +27,16 @@ import { randomUUID } from 'node:crypto';
 
 import { createRequestHandler } from '../apps/voice-bridge/request-handler.js';
 import { ERROR_CODES } from '../packages/shared/errors/error-codes.js';
-import { buildError } from '../packages/shared/errors/error-response.js';
+import { ERROR_CODE_HEADER_NAME } from '../packages/shared/errors/error-response.js';
 import { validateConfig } from '../packages/shared/config/validate-config.js';
 import {
   API_VERSION,
+  API_VERSION_HEADER_NAME,
   MAX_REQUEST_AUDIO_BYTES,
   TRANSCRIPT_BYTES_HEADER,
   REPLY_BYTES_HEADER,
   AUDIO_PRESENT_HEADER,
   OUTPUT_FORMAT_RESPONSE_HEADER,
-  buildTurnResponseHead,
 } from '../packages/shared/transport/turn-response.js';
 import {
   listReplyFormats,
@@ -358,9 +358,10 @@ test('catalogue matching is keyed by error code, not by table row order', () => 
 });
 
 test('docs/API.md documents the X-Error-Code header name buildError() actually returns', () => {
-  const envelope = buildError('NOT_FOUND');
-  const [headerName] = Object.keys(envelope.headers);
-  assert.ok(specText.includes(headerName), `${headerName} is missing from docs/API.md`);
+  assert.ok(
+    specText.includes(ERROR_CODE_HEADER_NAME),
+    `${ERROR_CODE_HEADER_NAME} is missing from docs/API.md`,
+  );
 });
 
 // Task 2: a future bump to API_VERSION must fail the build until docs/API.md follows —
@@ -1515,22 +1516,11 @@ const PLACEHOLDER_TAILNET_HOST = 'your-device.your-tailnet.ts.net';
 // in this suite — never a value any config in this file configures.
 const UNRECOGNIZED_HOST = 'not-a-configured-host.invalid';
 
-// The X-Error-Code header name, recovered from buildError() rather than typed — same idiom
-// as the existing 'docs/API.md documents the X-Error-Code header name...' test above.
-const ERROR_CODE_HEADER_NAME = Object.keys(buildError('NOT_FOUND').headers)[0];
-
-// The X-API-Version header name, recovered from buildTurnResponseHead() by finding the
-// header key whose value equals the imported API_VERSION constant — never typed.
-const SAMPLE_TURN_RESPONSE_HEAD = buildTurnResponseHead({
-  transcript: '',
-  reply: '',
-  outputFormatId: defaultOutputFormatId(),
-  audioPresent: false,
-});
-const API_VERSION_HEADER_NAME = Object.keys(SAMPLE_TURN_RESPONSE_HEAD.headers).find(
-  (key) => SAMPLE_TURN_RESPONSE_HEAD.headers[key] === API_VERSION,
-);
-assert.ok(API_VERSION_HEADER_NAME, 'expected buildTurnResponseHead to expose a header carrying API_VERSION');
+// Both header names are imported directly by name from the modules that define them
+// (ERROR_CODE_HEADER_NAME from error-response.js, API_VERSION_HEADER_NAME from
+// turn-response.js) rather than recovered positionally/by-value from a sample envelope —
+// see 08-REVIEW.md IN-01: positional/value derivation silently picks the wrong header if a
+// second header is ever added to either envelope shape.
 
 // Boots a loopback stub proxy that routes by `Host`: a member of knownHosts is forwarded
 // verbatim to the origin on originPort; anything else is answered 404 by the proxy itself,

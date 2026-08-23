@@ -5,6 +5,10 @@
 import { ERROR_CODES, isKnownErrorCode } from './error-codes.js';
 import { listSupportedFormats } from '../audio/format-registry.js';
 
+// Named export so consumers (including tests deriving the header name to assert on) never
+// have to re-derive it positionally from the headers object buildError() below returns.
+export const ERROR_CODE_HEADER_NAME = 'X-Error-Code';
+
 // A reflected caller-controlled identifier is bounded so this module can never be used
 // as an arbitrary-length reflector for hostile input (documented limit — read by the
 // test suite rather than duplicated there).
@@ -41,7 +45,7 @@ export function buildError(code, message, extra = {}) {
   const safeMessage = typeof message === 'string' && message.length > 0 ? message : ERROR_CODES[code].title;
   return {
     status,
-    headers: { 'X-Error-Code': code },
+    headers: { [ERROR_CODE_HEADER_NAME]: code },
     body: {
       error: {
         ...(extra.body ?? {}),

@@ -254,6 +254,8 @@ Every non-2xx response from `POST /v1/turn` and from an unmatched path returns t
 
 The `X-Error-Code` response header carries the same code as `error.code`, so a client with no JSON parser can still branch on the failure without touching the body. `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-transform`, and `X-API-Version` ride on every response, including every error.
 
+That guarantee is about responses **this service's origin** produces — every error `buildError` emits carries `X-Error-Code`. A client will nonetheless meet error responses on the deployed path that carry no `X-Error-Code`, because a proxy in front of the origin can answer a request the origin never receives. If `X-Error-Code` is absent from an error response, it did not come from this service's origin, so no code in the error catalogue describes it, and a client must not branch on the catalogue for it. Do not retry it: a retry re-issues the identical request against a rejection the origin never saw, so the retry loop is unbounded rather than eventually-successful. Treat the response as terminal and surface it to the operator — see Rejections that never reach the origin under Deployment requirements below.
+
 `GET /v1/capabilities` and `GET /v1/health` render the identical `code`/`message` pair as two plain-text lines instead, under `Content-Type: text/plain; charset=utf-8`, still carrying the same `X-Error-Code` header:
 
 ```

@@ -1222,3 +1222,38 @@ test('regionUnderHeading slices a strict subset of the document, never the whole
     'the sliced region must not reach back into an earlier, unrelated section of the document',
   );
 });
+
+const ABSENT_ERROR_CODE_CLAIM = "it did not come from this service's origin";
+
+function assertErrorsSectionStatesAbsentErrorCodeRule(section) {
+  assert.ok(
+    section.includes('If `X-Error-Code` is absent from an error response'),
+    'the Errors section must state the rule for an error response with no X-Error-Code header',
+  );
+  assert.ok(
+    section.includes(ABSENT_ERROR_CODE_CLAIM),
+    "the Errors section must state that an absent X-Error-Code response did not come from this service's origin",
+  );
+  assert.ok(
+    section.includes('Do not retry it'),
+    'the Errors section must instruct a client not to retry a response with no X-Error-Code',
+  );
+  assert.ok(
+    section.includes('Rejections that never reach the origin'),
+    'the Errors section must cross-reference the Deployment requirements proxy-rejection subsection by name',
+  );
+}
+
+test('the Errors section states what an absent X-Error-Code means and cross-references the proxy-rejection subsection', () => {
+  const section = regionUnderHeading(specText, '## Errors');
+  assertErrorsSectionStatesAbsentErrorCodeRule(section);
+
+  // Negative-case proof, identical to Task 1's shape: removing the claim must make the
+  // check throw, proving this test can catch the claim's absence, not just restate it.
+  const mutated = section.replace(ABSENT_ERROR_CODE_CLAIM, '');
+  assert.notEqual(mutated, section, 'sanity: the mutation must have actually removed the claim');
+  assert.throws(
+    () => assertErrorsSectionStatesAbsentErrorCodeRule(mutated),
+    'the check must throw once the absent-X-Error-Code claim is removed from the section',
+  );
+});

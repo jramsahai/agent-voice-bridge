@@ -1265,6 +1265,17 @@ function regionUnderHeading(docText, headingText) {
 const PROXY_REJECTION_HEADING = '### Rejections that never reach the origin';
 const PROXY_REJECTION_TERMINAL_CLAIM = 'terminal, not retryable';
 
+// The proxy-rejection subsection describes TWO listeners with opposite behaviour, and the 404
+// half is true of only one of them. An earlier revision of this document stated the 404 shape
+// as a property of "Tailscale Serve" and of "this project's shipped deployment" without naming
+// a port; that reading is false on the HTTPS listener, which routes on the TLS server name and
+// forwards `Host` to the origin untouched. These two claims are required alongside the 404
+// claims so the section cannot drift back to the unscoped wording: whatever else it says, it
+// must keep saying that the HTTPS listener does not gate on `Host` and that a bad `Host`
+// consequently reaches the origin there.
+const PROXY_REJECTION_SNI_CLAIM = 'never consults the HTTP `Host` header for routing';
+const PROXY_REJECTION_ORIGIN_REACHED_CLAIM = 'does reach the origin';
+
 function assertProxyRejectionSectionStatesObservedFailure(section) {
   assert.ok(section.includes('Tailscale Serve'), 'the proxy-rejection subsection must name Tailscale Serve');
   assert.ok(section.includes('404'), 'the proxy-rejection subsection must state the observed 404 status');
@@ -1275,6 +1286,14 @@ function assertProxyRejectionSectionStatesObservedFailure(section) {
   assert.ok(
     section.includes('the origin never sees the request, so its logs show nothing for it'),
     'the proxy-rejection subsection must state that the origin never sees the request and its logs show nothing for it',
+  );
+  assert.ok(
+    section.includes(PROXY_REJECTION_SNI_CLAIM),
+    'the proxy-rejection subsection must state that the HTTPS listener never consults the HTTP Host header for routing — without it the 404 claim reads as unscoped and is false on that listener',
+  );
+  assert.ok(
+    section.includes(PROXY_REJECTION_ORIGIN_REACHED_CLAIM),
+    'the proxy-rejection subsection must state that a bad Host does reach the origin on the listener that does not gate on it',
   );
   assert.ok(
     section.includes(PROXY_REJECTION_TERMINAL_CLAIM),
@@ -1294,6 +1313,39 @@ test('the Deployment requirements proxy-rejection subsection states the observed
   assert.throws(
     () => assertProxyRejectionSectionStatesObservedFailure(mutated),
     'the check must throw once the terminal-not-retryable claim is removed from the section',
+  );
+});
+
+test('the proxy-rejection subsection scopes its 404 claim to a listener, and states that the other listener forwards a bad Host to the origin', () => {
+  const section = regionUnderHeading(specText, PROXY_REJECTION_HEADING);
+
+  // Both listeners must be named by port, so the 404 shape can never again be read as a
+  // property of the proxy product as a whole.
+  assert.ok(section.includes('`:80`'), 'the proxy-rejection subsection must name the :80 listener the 404 claim belongs to');
+  assert.ok(section.includes('`:443`'), 'the proxy-rejection subsection must name the :443 listener that behaves differently');
+
+  // The residual is stated, not tested: nothing offline can open a real Serve connection, so
+  // the document must say so rather than let a green suite imply otherwise.
+  assert.ok(
+    section.includes('covered by no automated test here'),
+    'the proxy-rejection subsection must state that the :443 and failed-handshake shapes are covered by no automated test in this repository',
+  );
+
+  // Negative-case proof through the identical assertion path, mirroring the terminal-claim
+  // mutation above: removing the SNI claim must make the check throw. Without this the two new
+  // asserts only restate the claims' presence rather than proving absence is caught.
+  const mutated = section.replace(PROXY_REJECTION_SNI_CLAIM, '');
+  assert.notEqual(mutated, section, 'sanity: the mutation must have actually removed the SNI claim');
+  assert.throws(
+    () => assertProxyRejectionSectionStatesObservedFailure(mutated),
+    'the check must throw once the claim that the HTTPS listener ignores the Host header is removed',
+  );
+
+  const mutatedReach = section.replace(PROXY_REJECTION_ORIGIN_REACHED_CLAIM, '');
+  assert.notEqual(mutatedReach, section, 'sanity: the mutation must have actually removed the origin-reached claim');
+  assert.throws(
+    () => assertProxyRejectionSectionStatesObservedFailure(mutatedReach),
+    'the check must throw once the claim that a bad Host reaches the origin is removed',
   );
 });
 
@@ -1589,6 +1641,10 @@ const PLACEHOLDER_TAILNET_HOST = 'your-device.your-tailnet.ts.net';
 // in this suite — never a value any config in this file configures.
 const UNRECOGNIZED_HOST = 'not-a-configured-host.invalid';
 
+// The reject-branch body the stub writes. Kept as a named constant so the assertion below
+// compares against one declared value rather than restating a literal the stub could drift from.
+const STUB_PROXY_NOT_FOUND_BODY = '404 page not found\n';
+
 // Both header names are imported directly by name from the modules that define them
 // (ERROR_CODE_HEADER_NAME from error-response.js, API_VERSION_HEADER_NAME from
 // turn-response.js) rather than recovered positionally/by-value from a sample envelope —
@@ -1607,8 +1663,17 @@ function startStubProxy({ knownHosts, originPort }) {
       const host = typeof req.headers.host === 'string' ? req.headers.host.toLowerCase() : req.headers.host;
       if (!knownHosts.has(host)) {
         req.resume();
-        res.writeHead(404);
-        res.end();
+        // Body and headers here mirror the shape a live Serve plain-HTTP listener was observed
+        // to emit for an unmatched Host (Go's http.NotFound: a short text/plain notice with
+        // nosniff), rather than the header-less empty 404 this stub used to write. This narrows
+        // one avoidable difference between stub and observation; it is NOT a fidelity claim —
+        // per D-A nothing here is verified against a live Serve instance, and the HTTPS
+        // listener's server-name routing is not modelled by this stub at all.
+        res.writeHead(404, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        res.end(STUB_PROXY_NOT_FOUND_BODY);
         return;
       }
       const upstream = http.request(
@@ -1755,7 +1820,15 @@ test('a live request through the stub proxy with an unrecognized Host is answere
     !observedHeaderNames.map((name) => name.toLowerCase()).includes(ERROR_CODE_HEADER_NAME.toLowerCase()),
     `expected no ${ERROR_CODE_HEADER_NAME} header on the stub proxy's own 404`,
   );
-  assert.equal(response.body.length, 0, "expected a zero-length body on the stub proxy's own 404 — no JSON envelope");
+  assert.equal(
+    response.body.toString('utf8'),
+    STUB_PROXY_NOT_FOUND_BODY,
+    "expected the stub proxy's own 404 to carry its short plain-text notice, not a JSON error envelope",
+  );
+  assert.throws(
+    () => JSON.parse(response.body.toString('utf8')),
+    "the stub proxy's own 404 body must not parse as JSON — docs/API.md tells a client no error envelope arrives on this path",
+  );
   assert.equal(originInvocations, 0, 'expected the origin to never be invoked for an unrecognized Host');
 
   const section = regionUnderHeading(specText, PROXY_REJECTION_HEADING);
@@ -1974,7 +2047,10 @@ test('the proxy-rejection check fails loudly when the section carries no parseab
   // Slice the region to end before the line carrying the claimed status — a heading-present,
   // claim-absent fixture, distinct from an absent-heading fixture (mirrors the zero-row
   // catalogue fixture's own construction above).
-  const claimLineStart = section.indexOf('A client dialing this deployment with a bad');
+  // Anchored on the marker parseProxyRejectionClaim itself keys on, not on a prose literal —
+  // a reworded claim sentence must not silently turn this fixture into a no-op (the section was
+  // reworded once already, to scope the 404 claim to a single listener).
+  const claimLineStart = section.indexOf('observes a `');
   assert.ok(claimLineStart !== -1, 'expected to find the claim sentence in the proxy-rejection region');
   const vacuousSection = section.slice(0, claimLineStart);
   assert.notEqual(vacuousSection, section, 'sanity: the mutation must have actually removed the claim');

@@ -914,17 +914,90 @@ test('docs/API.md contains a Deployment requirements section covering TLS postur
 // rewording of a wire-hygiene test's name (typo fix, wording clarification) does not trip this
 // guard — only actually removing a WIRE-HYGIENE-COVERAGE-ANCHOR comment (which sits directly
 // above its test) does. See WR-02 in 08-REVIEW.md.
+//
+// The strengthened guard (assertWireHygieneCoverageAnchorsAreFollowedByTests) checks not just
+// that each anchor comment is present, but that a test() declaration follows it — an orphaned
+// anchor comment with no test after it fails loudly. Takes source text as a parameter (never
+// closes over module-level state) so both the live call site and a negative-case fixture can
+// drive the identical check path. Modelled on parseProxyRejectionClaim/assertProxyRejectionMatchesObserved.
 const WIRE_HYGIENE_COVERAGE_ANCHORS = ['200-audio', '200-text', '401', '413', '415'];
+
+function assertWireHygieneCoverageAnchorsAreFollowedByTests(httpTurnSource) {
+  for (let i = 0; i < WIRE_HYGIENE_COVERAGE_ANCHORS.length; i++) {
+    const anchor = WIRE_HYGIENE_COVERAGE_ANCHORS[i];
+    const anchorText = `// WIRE-HYGIENE-COVERAGE-ANCHOR: ${anchor}`;
+    const anchorIndex = httpTurnSource.indexOf(anchorText);
+    assert.ok(
+      anchorIndex !== -1,
+      `test/http-turn.test.js is missing the WIRE-HYGIENE-COVERAGE-ANCHOR: ${anchor} marker — this file delegates origin-side coverage for that case to it`,
+    );
+
+    // Bind each anchor to the region up to the next anchor (or a fixed 300-char limit for the last one).
+    // This prevents accepting a test that belongs to a neighbouring anchor or unrelated code section.
+    const searchStart = anchorIndex + anchorText.length;
+    let searchEnd;
+    if (i < WIRE_HYGIENE_COVERAGE_ANCHORS.length - 1) {
+      const nextAnchor = WIRE_HYGIENE_COVERAGE_ANCHORS[i + 1];
+      const nextAnchorText = `// WIRE-HYGIENE-COVERAGE-ANCHOR: ${nextAnchor}`;
+      const nextAnchorIndex = httpTurnSource.indexOf(nextAnchorText, searchStart);
+      searchEnd = nextAnchorIndex !== -1 ? nextAnchorIndex : httpTurnSource.length;
+    } else {
+      // For the last anchor, use a fixed 300-character window to cover its test() declaration
+      // without reaching into unrelated code sections that follow the wire-hygiene cluster.
+      searchEnd = searchStart + 300;
+    }
+    const searchScope = httpTurnSource.slice(searchStart, searchEnd);
+    // Match test() declarations: test followed by optional whitespace, opening paren, optional whitespace,
+    // and then a quote (single, double, or template literal). This avoids matching "test(" in comments.
+    const testMatch = /\btest\s*\(\s*['"`]/.exec(searchScope);
+    assert.ok(
+      testMatch,
+      `test/http-turn.test.js has a WIRE-HYGIENE-COVERAGE-ANCHOR: ${anchor} comment but no test() declaration follows it — the delegated coverage for this wire-hygiene case is missing`,
+    );
+  }
+}
 
 test('test/http-turn.test.js still carries a WIRE-HYGIENE-COVERAGE-ANCHOR for each of the five wire-hygiene cases this file delegates origin-side no-cookie, no-redirect, no-compression coverage to — deleting one removes coverage docs/API.md claims', () => {
   const httpTurnSource = fs.readFileSync(new URL('../test/http-turn.test.js', import.meta.url), 'utf8');
-  const foundAnchors = [...httpTurnSource.matchAll(/\/\/ WIRE-HYGIENE-COVERAGE-ANCHOR: (\S+)/g)].map((m) => m[1]);
-  for (const anchor of WIRE_HYGIENE_COVERAGE_ANCHORS) {
-    assert.ok(
-      foundAnchors.includes(anchor),
-      `test/http-turn.test.js is missing the WIRE-HYGIENE-COVERAGE-ANCHOR: ${anchor} marker — this file delegates origin-side coverage for that case to it`,
-    );
-  }
+  assertWireHygieneCoverageAnchorsAreFollowedByTests(httpTurnSource);
+});
+
+test('the wire-hygiene coverage guard fails loudly when an anchor comment has no test() following it', () => {
+  // A synthetic source with all five anchors present, but the 413 anchor (an interior one,
+  // not the last) has no test() declaration after it. This proves the guard detects missing
+  // tests for interior anchors, not just the last one, and is not vacuous on missing-anchor checks.
+  const sourceWithOrphanedAnchor = `
+// WIRE-HYGIENE-COVERAGE-ANCHOR: 200-audio
+test('wire hygiene: 200-audio...', async () => {
+  // test body
+});
+
+// WIRE-HYGIENE-COVERAGE-ANCHOR: 200-text
+test('wire hygiene: 200-text...', async () => {
+  // test body
+});
+
+// WIRE-HYGIENE-COVERAGE-ANCHOR: 401
+test('wire hygiene: 401...', async () => {
+  // test body
+});
+
+// WIRE-HYGIENE-COVERAGE-ANCHOR: 413
+// No test() follows this anchor — the declaration is missing.
+
+// WIRE-HYGIENE-COVERAGE-ANCHOR: 415
+test('wire hygiene: 415...', async () => {
+  // test body
+});
+`;
+
+  // Assert that the function throws AND that the error message names the orphaned anchor (413),
+  // proving we hit the orphaned-anchor branch and not the missing-anchor branch for some other anchor.
+  assert.throws(
+    () => assertWireHygieneCoverageAnchorsAreFollowedByTests(sourceWithOrphanedAnchor),
+    /413/,
+    'assertWireHygieneCoverageAnchorsAreFollowedByTests must throw with message naming 413 when that anchor has no test() after it',
+  );
 });
 
 // =====================================================================================

@@ -1054,15 +1054,27 @@ test('the README config extractor throws when handed README-shaped text with no 
 // fact deleted from the section that must carry it.
 // =====================================================================================
 
-// Slices from a heading to the next top-level heading. An h3 heading is a valid start (its
-// region simply runs to the following h2), but only an h2 ever terminates a region.
-function sectionUnderHeading(docText, headingText) {
+// Shared implementation for both region-slicing helpers below (sectionUnderHeading here,
+// regionUnderHeading further down). The two only differ in (a) which pattern terminates the
+// slice and (b) whether a missing terminator is an error or falls back to end-of-document —
+// expressing both through one function keeps a future slicing-logic fix (e.g. a `\r\n`
+// line-ending edge case) from being applied to one and forgotten on the other.
+function sliceUnderHeading(docText, headingText, { terminatorPattern, requireTerminator = true }) {
   const headingIndex = docText.indexOf(headingText);
   assert.ok(headingIndex !== -1, `docs/API.md is missing its '${headingText}' heading`);
   const afterHeading = docText.slice(headingIndex + headingText.length);
-  const nextHeadingOffset = afterHeading.search(/\n## /);
-  assert.ok(nextHeadingOffset !== -1, `expected a top-level heading after '${headingText}'`);
+  const nextHeadingOffset = afterHeading.search(terminatorPattern);
+  if (nextHeadingOffset === -1) {
+    assert.ok(!requireTerminator, `expected a top-level heading after '${headingText}'`);
+    return afterHeading;
+  }
   return afterHeading.slice(0, nextHeadingOffset);
+}
+
+// Slices from a heading to the next top-level heading. An h3 heading is a valid start (its
+// region simply runs to the following h2), but only an h2 ever terminates a region.
+function sectionUnderHeading(docText, headingText) {
+  return sliceUnderHeading(docText, headingText, { terminatorPattern: /\n## / });
 }
 
 const SEGMENT_ORDER_CLAIM = 'The segment order is fixed and never varies';
@@ -1169,11 +1181,10 @@ test('README.md links to the published API specification', () => {
 // =====================================================================================
 
 function regionUnderHeading(docText, headingText) {
-  const headingIndex = docText.indexOf(headingText);
-  assert.ok(headingIndex !== -1, `docs/API.md is missing its '${headingText}' heading`);
-  const afterHeading = docText.slice(headingIndex + headingText.length);
-  const nextHeadingOffset = afterHeading.search(/\n(## |### )/);
-  return nextHeadingOffset === -1 ? afterHeading : afterHeading.slice(0, nextHeadingOffset);
+  return sliceUnderHeading(docText, headingText, {
+    terminatorPattern: /\n(## |### )/,
+    requireTerminator: false,
+  });
 }
 
 const PROXY_REJECTION_HEADING = '### Rejections that never reach the origin';

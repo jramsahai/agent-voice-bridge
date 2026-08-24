@@ -109,6 +109,15 @@ async function speakWithKokoroOnnx(text, ttsConfig, { signal } = {}) {
   const command = ttsConfig.command || 'tts-kokoro';
   const voice = ttsConfig.voice || 'af_heart';
 
+  // WR-04: the spawn fallback's CLI argv (below) has no speed slot at all, so a configured
+  // tts.speed is silently dropped whenever this path is taken — unlike speakWithFastApi,
+  // which honours it. This is the only diagnostic an operator gets when that happens.
+  if (ttsConfig.speed !== undefined && ttsConfig.speed !== DEFAULT_KOKORO_SPEED) {
+    console.error(
+      '[voice-bridge] tts.speed is configured but the spawn-based Kokoro fallback does not support it; ignoring',
+    );
+  }
+
   // Wrapped in withTempDir so this directory is guaranteed removed on success, on the
   // command's non-zero exit, on a timeout, and on an abort. This is now the only reply path
   // in this module that creates a temp directory at all — the FastAPI path above needs none.

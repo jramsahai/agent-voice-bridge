@@ -20,6 +20,10 @@ const HTTP_PROBE_TIMEOUT_MS = 2000;
 // across every entry in process.env.PATH the same way. Resolves when runnable, rejects
 // otherwise.
 export async function probeExecutable(command) {
+  if (typeof command !== 'string' || command.length === 0) {
+    throw new Error('probeExecutable: command must be a non-empty string');
+  }
+
   const hasPathSeparator = command.includes(path.sep) || command.includes('/');
 
   if (hasPathSeparator) {

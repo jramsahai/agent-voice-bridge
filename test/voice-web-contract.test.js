@@ -462,3 +462,102 @@ test('every awaited ensureRecorder() call site is wrapped in a catch that surfac
     );
   }
 });
+
+// =====================================================================================
+// DEBT-08: hasToken() and its two call sites. This is a UX convenience, not the
+// access-control boundary — a tokenless request still receives a real 401 from the
+// server's own request validation (AUTH-04 / validateRequest()), enforced independently
+// of anything this page does. These tests exist to stop the browser from attempting a
+// request it already knows will be refused, and to give the user a clearer message than a
+// round-trip 401 would. Do not read them as proof of an access-control boundary; the
+// server enforces that, not this file (RESEARCH.md Pitfall 4).
+// =====================================================================================
+
+test('every path that starts a recording is preceded by a token-presence refusal in the same listener', () => {
+  const recordingStarts = [...appJsSource.matchAll(/mediaRecorder\.start\(\)/g)];
+  assert.ok(
+    recordingStarts.length >= 2,
+    `sanity premise: apps/voice-web/app.js must call mediaRecorder.start() at least twice (the pointer path and ` +
+      `the keyboard path); found ${recordingStarts.length}. If a path was deliberately removed, this premise is ` +
+      'what needs updating — do not weaken the guarded-count equality below.',
+  );
+
+  const refusals = [...appJsSource.matchAll(/if\s*\(\s*!hasToken\(\)\s*\)/g)];
+  assert.equal(
+    refusals.length,
+    recordingStarts.length,
+    `every recording-start site must be preceded by a token-presence refusal: ${recordingStarts.length} ` +
+      `recording-start site(s) but ${refusals.length} refusal(s). A newly added third recording-start site left ` +
+      'unguarded fails here rather than shipping silently.',
+  );
+
+  const listenerRegistrationPattern = /addEventListener\(/g;
+  for (const startMatch of recordingStarts) {
+    let nearestListenerIndex = -1;
+    listenerRegistrationPattern.lastIndex = 0;
+    let listenerMatch;
+    while ((listenerMatch = listenerRegistrationPattern.exec(appJsSource)) !== null) {
+      if (listenerMatch.index > startMatch.index) break;
+      nearestListenerIndex = listenerMatch.index;
+    }
+    assert.ok(
+      nearestListenerIndex !== -1,
+      `expected an addEventListener( registration preceding the recording-start call at index ${startMatch.index}`,
+    );
+    const slice = appJsSource.slice(nearestListenerIndex, startMatch.index);
+    assert.match(
+      slice,
+      /if\s*\(\s*!hasToken\(\)\s*\)/,
+      'the token-presence refusal must sit inside the same listener that reaches the recording start — this is ' +
+        'what proves the guard is inside the same listener, not merely somewhere else in the file',
+    );
+  }
+});
+
+test('each token-presence refusal tells the user what to do and stops rather than falling through', () => {
+  const guardPattern = /if\s*\(\s*!hasToken\(\)\s*\)\s*\{([^{}]*)\}/g;
+  const guarded = [...appJsSource.matchAll(guardPattern)];
+  assert.ok(
+    guarded.length >= 2,
+    `sanity premise: expected at least two hasToken() refusal bodies to inspect; found ${guarded.length}`,
+  );
+
+  for (const [index, match] of guarded.entries()) {
+    const body = match[1];
+    const statusCall = /setStatus\(\s*(['"`])((?:\\.|(?!\1)[^\\])*)\1\s*\)/.exec(body);
+    assert.ok(
+      statusCall,
+      `hasToken refusal #${index + 1} must call setStatus with a quoted string literal — a refusal with no message ` +
+        'tells the user nothing about why nothing happened.',
+    );
+    assert.ok(
+      statusCall[2].length > 0,
+      `hasToken refusal #${index + 1} must pass a non-empty message to setStatus.`,
+    );
+    assert.match(
+      body,
+      /setHint\(/,
+      `hasToken refusal #${index + 1} must call setHint so the user is told what to do about the refusal, not just ` +
+        'that it happened.',
+    );
+    assert.match(
+      body,
+      /\breturn\b/,
+      `hasToken refusal #${index + 1} must return rather than fall through — proceeding past a missing token ` +
+        'starts a request the server will reject anyway.',
+    );
+  }
+});
+
+test('hasToken treats a whitespace-only token as absent', () => {
+  const fakeTokenEl = { value: '   ' };
+  const hasToken = loadBrowserFunction('hasToken', { tokenEl: fakeTokenEl });
+
+  assert.equal(hasToken(), false, 'a whitespace-only token must be treated as absent');
+
+  fakeTokenEl.value = '  abc  ';
+  assert.equal(hasToken(), true, 'a token with non-whitespace content must be treated as present after trimming');
+
+  fakeTokenEl.value = '';
+  assert.equal(hasToken(), false, 'an empty token must be treated as absent');
+});

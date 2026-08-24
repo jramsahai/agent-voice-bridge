@@ -168,6 +168,9 @@ export async function prepareTranscriptionInput(audioBuffer, declaredFormatId, o
     return { error: unsupportedFormatError(declaredFormatId) };
   }
   if (entry.headerless) {
+    // DEBT-01: a non-Buffer audioBuffer is refused inside pcmToWav() with an AUDIO_MALFORMED
+    // Error shape-identical to the container branch's readWavFormat() rejection below — not a
+    // raw TypeError — so no caller of this branch can bypass the guard.
     const wavBuffer = pcmToWav(audioBuffer, entry);
     return {
       wavBuffer,

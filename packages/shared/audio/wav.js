@@ -14,6 +14,14 @@ if (!(AUDIO_TOO_LARGE_CODE in ERROR_CODES) || !(AUDIO_MALFORMED_CODE in ERROR_CO
 export const MAX_PCM_BYTES = 16000 * 2 * 300; // 5 minutes of 16 kHz mono s16le
 
 export function pcmToWav(pcmBuffer, { sampleRate = 16000, channels = 1, bitDepth = 16 } = {}) {
+  // DEBT-01: reject anything that is not a Buffer before pcmBuffer.length is ever read, so a
+  // caller handing this the wrong type gets the same catalogued AUDIO_MALFORMED shape the
+  // container branch's malformedError() already produces below, instead of an uncaught
+  // TypeError a device state machine cannot classify. malformedError is a hoisted function
+  // declaration, so it is callable here even though its definition appears later in this file.
+  if (!Buffer.isBuffer(pcmBuffer)) {
+    throw malformedError('PCM input is not a Buffer');
+  }
   if (pcmBuffer.length > MAX_PCM_BYTES) {
     const err = new Error('PCM buffer exceeds the maximum allowed size');
     err.code = AUDIO_TOO_LARGE_CODE;

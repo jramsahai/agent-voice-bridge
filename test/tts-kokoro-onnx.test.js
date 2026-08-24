@@ -121,3 +121,108 @@ test('two speakWithKokoroFast calls against an unreachable service inside one TT
     'the speech entry primed above must still be fresh, proving neither speakWithKokoroFast call re-probed',
   );
 });
+
+// DEBT-04 regression pins: speakWithFastApi coerced a configured speed through a truthiness
+// fallback (`ttsConfig.speed || 1.0`), so a configured 0 silently became 1.0 — the operator
+// who typed a speed the service will not honour got no signal at all. This section pins the
+// resolver's explicit refuse-or-honour contract and the entry-point path-independence of the
+// refusal.
+//
+// `resolveKokoroSpeed` and `DEFAULT_KOKORO_SPEED` are read via a runtime dynamic import
+// rather than a static named import at the top of this file, because before this task's fix
+// commit neither export exists yet. A static named import of a not-yet-existing export is an
+// ES module link-time SyntaxError that fails the *entire* file before any test runs,
+// destroying RED evidence for every test in it — not just this section's. This mirrors the
+// technique 09-01-SUMMARY.md records for DEBT-05's MAX_CONTAINER_BYTES pin.
+async function loadKokoroAdapterModule() {
+  return import('../packages/shared/adapters/tts-kokoro-onnx.js');
+}
+
+test('DEBT-04: resolveKokoroSpeed returns the default for an absent speed and returns a valid speed unchanged', async () => {
+  const { resolveKokoroSpeed, DEFAULT_KOKORO_SPEED } = await loadKokoroAdapterModule();
+  assert.equal(resolveKokoroSpeed({}), DEFAULT_KOKORO_SPEED);
+  assert.equal(resolveKokoroSpeed({ speed: undefined }), DEFAULT_KOKORO_SPEED);
+  assert.equal(resolveKokoroSpeed({ speed: 0.75 }), 0.75);
+  assert.equal(resolveKokoroSpeed({ speed: 2 }), 2);
+});
+
+test('DEBT-04: resolveKokoroSpeed throws for every value that cannot be honoured meaningfully, naming the config key', async () => {
+  const { resolveKokoroSpeed } = await loadKokoroAdapterModule();
+  const invalidSpeeds = [0, -1, NaN, Infinity, -Infinity, '1.0', null, true, {}];
+  for (const speed of invalidSpeeds) {
+    assert.throws(
+      () => resolveKokoroSpeed({ speed }),
+      (err) => {
+        assert.ok(err.message.includes('tts.speed'), `message for ${String(speed)} must name the config key`);
+        return true;
+      },
+      `resolveKokoroSpeed must throw for ${String(speed)}`,
+    );
+  }
+});
+
+test('DEBT-04: resolveKokoroSpeed truncates a rejected value longer than the bounded-echo limit rather than reflecting it whole', async () => {
+  const { resolveKokoroSpeed } = await loadKokoroAdapterModule();
+  const longValue = 'x'.repeat(300);
+  assert.throws(
+    () => resolveKokoroSpeed({ speed: longValue }),
+    (err) => {
+      assert.ok(!err.message.includes(longValue), 'the full 300-character value must not appear in the message');
+      assert.ok(err.message.includes('x'.repeat(200)), 'the truncated 200-character prefix must still appear');
+      return true;
+    },
+  );
+});
+
+test('DEBT-04: speakWithKokoroFast refuses a configured speed of 0 before reaching either reply path, with the speech backend down', async () => {
+  resetBackendHealthCache();
+  await assert.rejects(
+    () =>
+      speakWithKokoroFast(
+        'hello',
+        { speed: 0, serviceUrl: UNREACHABLE_SERVICE_URL, command: '/nonexistent-tts-kokoro-binary-xyz' },
+        {},
+      ),
+    (err) => {
+      assert.ok(err.message.includes('tts.speed'), 'the rejection must name the tts.speed config key');
+      assert.ok(
+        !err.message.includes('/nonexistent-tts-kokoro-binary-xyz'),
+        "the rejection must be the speed refusal, not the spawn fallback's missing-binary failure",
+      );
+      return true;
+    },
+  );
+});
+
+test('DEBT-04: with no speed configured, speakWithKokoroFast still reaches the spawn fallback and fails on its own missing-binary path, unchanged', async () => {
+  resetBackendHealthCache();
+  await assert.rejects(
+    () =>
+      speakWithKokoroFast(
+        'hello',
+        { serviceUrl: UNREACHABLE_SERVICE_URL, command: '/nonexistent-tts-kokoro-binary-xyz' },
+        {},
+      ),
+    (err) => {
+      assert.ok(!err.message.includes('tts.speed'), 'a call with no speed key must not fail with the speed refusal');
+      return true;
+    },
+  );
+});
+
+test('DEBT-04: an already-aborted signal still wins over the speed gate, even with an invalid speed configured', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    () =>
+      speakWithKokoroFast(
+        'hello',
+        { speed: 0, serviceUrl: UNREACHABLE_SERVICE_URL },
+        { signal: controller.signal },
+      ),
+    (err) => {
+      assert.equal(err.name, 'AbortError', 'an already-aborted caller must still win with the abort-shaped error');
+      return true;
+    },
+  );
+});

@@ -150,11 +150,16 @@ function reportTurnError(code, message, hint) {
   console.error(code, message);
 }
 
-// IN-02 (05-REVIEW.md): the microphone stream is acquired once here and never released
-// (no stream.getTracks().forEach(track => track.stop()) anywhere), so the browser's
-// mic-in-use indicator stays lit for the page's remaining life after the first turn. This
-// is intentional, not an oversight: re-acquiring the stream on every turn would re-prompt
-// for permission each time, which is worse UX than a persistently-lit indicator.
+// IN-02 (05-REVIEW.md): the microphone stream is released after every turn, not held for
+// the page's lifetime. stopAndSend()'s finally block unconditionally calls
+// releaseMicStream(), which stops every track on the acquired stream and clears both this
+// binding and mediaRecorder; ensureRecorder() re-acquires on the next turn because the
+// early-return guard below sees a null mediaRecorder and falls through. The earlier design
+// held the stream open instead — that traded away the operating system's mic-in-use
+// indicator as a meaningful signal, since it stayed lit continuously while actual capture
+// only happens for a few seconds per turn. Releasing after every turn rests on RESEARCH.md
+// assumption A1: the browsers this project targets persist per-origin microphone grants and
+// do not re-prompt on the next getUserMedia() call.
 async function ensureRecorder() {
   if (mediaRecorder) return;
   stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -329,6 +334,18 @@ function resetPlayer() {
   player.hidden = true;
 }
 
+// DEBT-09: stops every track on the acquired stream (never mutes — a muted track keeps the
+// operating system indicator lit while silencing audio) and clears both module bindings, so
+// ensureRecorder()'s early-return guard falls through and re-acquires on the next turn. A
+// no-op, not a throw, when no stream was ever acquired or the stream reports zero tracks.
+function releaseMicStream() {
+  if (stream) {
+    stream.getTracks().forEach((track) => track.stop());
+  }
+  stream = null;
+  mediaRecorder = null;
+}
+
 async function stopAndSend() {
   if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
   setBusy(true);
@@ -443,6 +460,7 @@ async function stopAndSend() {
   } finally {
     isRecording = false;
     setBusy(false);
+    releaseMicStream();
   }
 }
 

@@ -561,3 +561,137 @@ test('hasToken treats a whitespace-only token as absent', () => {
   fakeTokenEl.value = '';
   assert.equal(hasToken(), false, 'an empty token must be treated as absent');
 });
+
+// =====================================================================================
+// DEBT-09: the microphone stream is released after every turn rather than held for the
+// page's lifetime. The operating system's mic-in-use indicator is the user's only signal
+// that audio *could* be captured — holding the stream open makes that signal misreport.
+// releaseMicStream() stops every track (never mutes — a muted track keeps the indicator
+// lit while silencing audio) and clears both module-scope bindings, which is what lets
+// ensureRecorder()'s existing early-return guard fall through and re-acquire on the next
+// turn (RESEARCH.md Pitfall 2). This defect is live at HEAD, so its RED direction needs no
+// historical worktree — the five tests below were run against the unfixed file first.
+// =====================================================================================
+
+test('releaseMicStream stops every track on the acquired stream', () => {
+  const stopCalls = [];
+  const fakeTrackA = { stop() { stopCalls.push('a'); } };
+  const fakeTrackB = { stop() { stopCalls.push('b'); } };
+  const fakeStream = { getTracks: () => [fakeTrackA, fakeTrackB] };
+
+  const releaseMicStream = loadBrowserFunction('releaseMicStream', {
+    stream: fakeStream,
+    mediaRecorder: {},
+  });
+
+  releaseMicStream();
+
+  assert.deepEqual(
+    stopCalls,
+    ['a', 'b'],
+    'every track returned by getTracks() must receive a stop() call, regardless of order',
+  );
+  assert.ok(
+    !('enabled' in fakeTrackA) && !('enabled' in fakeTrackB),
+    'the release must stop each track, never mute it — setting track.enabled silences audio while leaving ' +
+      'the operating system indicator lit, which would make the code claim a release it did not perform',
+  );
+});
+
+test('releaseMicStream is a no-op rather than a throw when no stream was ever acquired', () => {
+  const releaseWithUndefinedStream = loadBrowserFunction('releaseMicStream', {
+    stream: undefined,
+    mediaRecorder: undefined,
+  });
+  assert.doesNotThrow(
+    () => releaseWithUndefinedStream(),
+    'releaseMicStream must not throw when no stream was ever acquired',
+  );
+
+  const releaseWithEmptyStream = loadBrowserFunction('releaseMicStream', {
+    stream: { getTracks: () => [] },
+    mediaRecorder: undefined,
+  });
+  assert.doesNotThrow(
+    () => releaseWithEmptyStream(),
+    'releaseMicStream must not throw when the acquired stream reports zero tracks',
+  );
+});
+
+test('releaseMicStream clears both module bindings so the next turn re-acquires the microphone', () => {
+  // loadBrowserFunction injects deps as function parameters, so an assignment the extracted
+  // function makes to `stream` or `mediaRecorder` rebinds the parameter and is invisible to
+  // the caller. The nulling is asserted on the function's own source text instead — do not
+  // "improve" this into an injection-based assertion; it cannot fail if rewritten that way.
+  const releaseMicStreamSource = extractFunctionSource('releaseMicStream');
+  assert.match(
+    releaseMicStreamSource,
+    /\bstream\s*=\s*null\s*;/,
+    'releaseMicStream must assign null to the stream binding',
+  );
+  assert.match(
+    releaseMicStreamSource,
+    /\bmediaRecorder\s*=\s*null\s*;/,
+    'releaseMicStream must assign null to the mediaRecorder binding',
+  );
+
+  const ensureRecorderSource = extractFunctionSource('ensureRecorder');
+  assert.match(
+    ensureRecorderSource,
+    /^\s*if\s*\(\s*mediaRecorder\s*\)\s*return\s*;/m,
+    'ensureRecorder must still open with its early-return guard on mediaRecorder — the release depends on ' +
+      'that guard falling through on the next turn once mediaRecorder is null',
+  );
+});
+
+test('stopAndSend releases the microphone in its finally block, so the release survives the error path', () => {
+  const stopAndSendSource = extractFunctionSource('stopAndSend');
+  const finallyIndex = stopAndSendSource.lastIndexOf('finally');
+  assert.ok(finallyIndex !== -1, "sanity premise: stopAndSend must contain a 'finally' block");
+
+  const callMatches = [...stopAndSendSource.matchAll(/releaseMicStream\(\)/g)];
+  assert.equal(
+    callMatches.length,
+    1,
+    `expected exactly one releaseMicStream() call in stopAndSend; found ${callMatches.length}`,
+  );
+
+  assert.ok(
+    callMatches[0].index > finallyIndex,
+    'releaseMicStream() must be called inside the finally block, after the finally keyword — a release placed ' +
+      'in the try body instead would be skipped by every thrown error, which is precisely the path this ' +
+      'requirement calls out',
+  );
+});
+
+test('the comment above ensureRecorder describes releasing the stream rather than holding it', () => {
+  const declarationPattern = /^(?:async )?function ensureRecorder\(/m;
+  const declarationMatch = declarationPattern.exec(appJsSource);
+  assert.ok(declarationMatch, 'sanity premise: expected a top-level ensureRecorder( declaration in apps/voice-web/app.js');
+
+  const precedingLines = appJsSource.slice(0, declarationMatch.index).split('\n');
+  // The slice ends with the newline separating the last comment line from the declaration
+  // line, so the final split entry is an empty artifact of that boundary, not a blank line
+  // in the source — drop it before walking backwards over actual comment lines.
+  if (precedingLines[precedingLines.length - 1] === '') precedingLines.pop();
+  const commentLines = [];
+  for (let i = precedingLines.length - 1; i >= 0; i--) {
+    const line = precedingLines[i];
+    if (line.trim() === '') break;
+    if (!/^\s*\/\//.test(line)) break;
+    commentLines.unshift(line);
+  }
+  const commentBlock = commentLines.join('\n');
+  assert.ok(commentBlock.length > 0, 'sanity premise: expected a contiguous // comment block preceding ensureRecorder');
+
+  assert.match(
+    commentBlock,
+    /releaseMicStream/,
+    'the comment above ensureRecorder must name releaseMicStream so it describes what the code now does',
+  );
+  assert.ok(
+    !commentBlock.includes('is intentional, not an oversight'),
+    'the comment must no longer carry the pre-fix claim that holding the stream open is deliberate — that ' +
+      'trade is no longer real (RESEARCH.md assumption A1)',
+  );
+});

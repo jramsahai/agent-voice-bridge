@@ -34,10 +34,28 @@ function renderRequestedFormatLabel(requestedFormatId) {
   return text;
 }
 
+// DEBT-02: a screenless client classifies a rejection by its status and its X-Error-Code
+// header together, so a code emitted under a status the catalogue does not assign it is a
+// rejection the device's state machine cannot classify at all. Validated here rather than
+// trusted, so the whole class of drift closes in the one place every rejection renders
+// from instead of needing an audit of every call site forever.
+function assertStatusOverride(code, extra) {
+  if (extra.status === undefined) {
+    return;
+  }
+  const catalogueStatus = ERROR_CODES[code].status;
+  if (extra.status !== catalogueStatus) {
+    throw new Error(
+      `buildError: status override ${JSON.stringify(extra.status)} for '${code}' does not match its catalogue status ${catalogueStatus}`,
+    );
+  }
+}
+
 export function buildError(code, message, extra = {}) {
   if (!isKnownErrorCode(code)) {
     throw new Error(`buildError: '${code}' is not a registered error code`);
   }
+  assertStatusOverride(code, extra);
   const status = extra.status ?? ERROR_CODES[code].status;
   // A non-string or empty message is not a meaningful thing for a screenless client to
   // render — fall back to the catalogue's fixed title for the code rather than emitting

@@ -20,6 +20,12 @@ import {
   prepareClientOutput,
   convertWavToWhisperWav,
 } from '../packages/shared/audio/convert.js';
+// Namespace import, not added to the named-import list above: DEBT-06's regression test below
+// exercises resolveWhisperConversionRecipe, which is not yet an exported symbol pre-fix. A
+// named import of a symbol that does not exist is an ESM link error that fails this entire
+// file before any test runs — a namespace import lets the pre-fix run fail on one clean
+// assertion instead (`typeof convertModule.resolveWhisperConversionRecipe === 'function'`).
+import * as convertModule from '../packages/shared/audio/convert.js';
 import { makePcm16, makeCanonicalWav, makeStereoWav, makeWavWithFillerChunk, makeMalformedWav } from './helpers/fixtures.js';
 
 // Derived from the registry, not hardcoded, so this file never has to know the exact wire
@@ -209,6 +215,52 @@ test('DEBT-05: the reply direction is unaffected — prepareClientOutput with a 
   const wav = makeCanonicalWav({ pcm, sampleRate: 16000, channels: 1 });
   const result = await prepareClientOutput(wav, CODEC_FREE_FORMAT_ID);
   assert.ok(!result.error, 'reply path must remain untouched by the container input ceiling');
+});
+
+// --- DEBT-06: an ambiguous whisper-conversion registry (more than one row carrying non-null
+// afconvertDataFormat) resolves deliberately, by throwing and naming the competing rows,
+// instead of silently taking the first match. resolveDefaultHeaderlessFormat's own first-match
+// shape is a deliberate, unrelated exception (DEBT-06 does not touch it — see 09-01-PLAN.md). ---
+
+test('DEBT-06: resolveWhisperConversionRecipe is reachable as a named export', () => {
+  assert.equal(typeof convertModule.resolveWhisperConversionRecipe, 'function');
+});
+
+test('DEBT-06: resolveWhisperConversionRecipe() called with no argument still returns the single real registry row carrying afconvert tokens', () => {
+  const row = convertModule.resolveWhisperConversionRecipe();
+  assert.deepEqual(row, WHISPER_CONVERSION_RECIPE);
+});
+
+test('DEBT-06: an ambiguous registry (two rows carrying non-null afconvertDataFormat) throws naming both ids', () => {
+  const fakeRegistry = {
+    'fake-row-a': { afconvertDataFormat: 'LEI16@16000' },
+    'fake-row-b': { afconvertDataFormat: 'LEI16@22050' },
+    'fake-row-c-headerless': { afconvertDataFormat: null },
+  };
+  assert.throws(
+    () => convertModule.resolveWhisperConversionRecipe(fakeRegistry),
+    (err) => {
+      assert.ok(err.message.includes('fake-row-a'), 'message must name the first matching id');
+      assert.ok(err.message.includes('fake-row-b'), 'message must name the second matching id');
+      assert.ok(!err.message.includes('fake-row-c-headerless'), 'message must not name the non-matching row');
+      return true;
+    },
+  );
+});
+
+test('DEBT-06: a registry with zero matching rows still throws with the pre-existing no-row message', () => {
+  const fakeRegistry = { 'fake-row-headerless-only': { afconvertDataFormat: null } };
+  assert.throws(
+    () => convertModule.resolveWhisperConversionRecipe(fakeRegistry),
+    /no registry row supplies the afconvert tokens needed to reach whisper-ready audio/,
+  );
+});
+
+test('DEBT-06: convertWavToWhisperWav still converts normally through the default (real) registry', async () => {
+  const pcm = makePcm16({ samples: 4410 });
+  const wav = makeCanonicalWav({ pcm, sampleRate: 44100, channels: 1 });
+  const result = await convertWavToWhisperWav(wav);
+  assert.ok(!result.error, 'expected a successful conversion using the real registry default');
 });
 
 // --- Input direction, real subprocess ---

@@ -609,3 +609,52 @@ test('adapters argument to createRequestHandler is destructured once from the fa
     'no request-derived value (req.headers, req.url, etc.) must be assigned into adapters',
   );
 });
+
+// =====================================================================================
+// DEBT-10: test/http-turn.test.js must wait on observable conditions, never on a fixed
+// wall-clock duration. A guard that scans a file cannot live inside that same file and
+// still be RED-capturable — replacing the scanned file with its historical version would
+// carry the guard away with it, scanning the new content instead of the old — so this
+// guard lives here, this suite's established file-scanning home (directory walk plus
+// explicit path reads elsewhere in this file), rather than inside http-turn.test.js itself.
+// =====================================================================================
+
+const HTTP_TURN_TEST_FILE = path.join(TEST_DIR, 'http-turn.test.js');
+
+// Built via concatenation, matching this file's own FORBIDDEN_NETWORK_MODEL_PATTERNS
+// convention above, so neither pattern can appear as a plain literal substring inside this
+// file and trip the self-scan test below.
+const SET_TIMEOUT_CALL_REGEX_SAFE = ['setTimeout', '\\('].join('');
+const FIXED_DELAY_PATTERN = [SET_TIMEOUT_CALL_REGEX_SAFE, '\\s*resolve\\s*,\\s*', '\\d'].join('');
+const POLLING_TICK_PATTERN = [SET_TIMEOUT_CALL_REGEX_SAFE, '\\s*resolve\\s*,\\s*', 'intervalMs'].join('');
+
+test(
+  "test/http-turn.test.js waits on observable conditions — no fixed-duration timer delay survives outside " +
+    "the polling helper's own interval tick",
+  () => {
+    const source = fs.readFileSync(HTTP_TURN_TEST_FILE, 'utf8');
+    assert.ok(source.length > 0, 'sanity: expected test/http-turn.test.js to be non-empty');
+    assert.match(
+      source,
+      /async function waitUntil\(/,
+      "sanity premise: expected test/http-turn.test.js to declare the waitUntil polling helper — if it was " +
+        'renamed or removed, this premise is what needs updating',
+    );
+
+    const forbiddenMatches = source.match(new RegExp(FIXED_DELAY_PATTERN, 'g')) ?? [];
+    assert.equal(
+      forbiddenMatches.length,
+      0,
+      'test/http-turn.test.js must schedule no timer whose delay is a numeric literal — a fixed-duration sleep ' +
+        'makes the test pass or fail on machine load rather than on the condition it is meant to wait for',
+    );
+
+    const requiredMatches = source.match(new RegExp(POLLING_TICK_PATTERN, 'g')) ?? [];
+    assert.equal(
+      requiredMatches.length,
+      1,
+      "expected exactly one identifier-delay timer tick — the polling helper's own intervalMs tick. Its " +
+        'disappearance means this scan has stopped measuring anything.',
+    );
+  },
+);

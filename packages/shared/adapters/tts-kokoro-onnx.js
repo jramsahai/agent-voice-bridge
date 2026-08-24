@@ -31,12 +31,44 @@ export function composeAbortSignals(...signals) {
   return AbortSignal.any(present);
 }
 
+// DEBT-04: a configured speed is either honoured unchanged or refused by name — never
+// silently coerced through a truthiness fallback, which let a configured 0 become 1.0 with
+// no diagnostic. This resolver is exported beside getKokoroServiceUrl and
+// composeAbortSignals — already exported for the same reason — so tests can drive it
+// directly without a live network call. The truncation below follows the bounded-echo
+// discipline error-response.js's renderRequestedFormatLabel established for a
+// caller-supplied identifier: the value here is operator-supplied config rather than
+// request-supplied, but an unbounded configured string interpolated into a message that
+// reaches a log is the same reflector hazard.
+const MAX_ECHOED_SPEED_LENGTH = 200;
+
+export const DEFAULT_KOKORO_SPEED = 1.0;
+
+function renderRejectedSpeed(value) {
+  const text = String(value);
+  if (text.length > MAX_ECHOED_SPEED_LENGTH) {
+    return `${text.slice(0, MAX_ECHOED_SPEED_LENGTH)}...`;
+  }
+  return text;
+}
+
+export function resolveKokoroSpeed(ttsConfig) {
+  const speed = ttsConfig?.speed;
+  if (speed === undefined) {
+    return DEFAULT_KOKORO_SPEED;
+  }
+  if (typeof speed === 'number' && Number.isFinite(speed) && speed > 0) {
+    return speed;
+  }
+  throw new Error(`tts.speed must be a finite number greater than 0; got ${renderRejectedSpeed(speed)}`);
+}
+
 /**
  * Generate speech via the persistent Kokoro FastAPI service.
  */
 async function speakWithFastApi(text, ttsConfig, { signal } = {}) {
   const voice = ttsConfig.voice || 'af_heart';
-  const speed = ttsConfig.speed || 1.0;
+  const speed = resolveKokoroSpeed(ttsConfig);
   const serviceUrl = getKokoroServiceUrl(ttsConfig);
 
   const res = await fetch(`${serviceUrl}/generate`, {
@@ -108,6 +140,12 @@ export async function speakWithKokoroFast(text, ttsConfig, { signal } = {}) {
   const serviceUrl = getKokoroServiceUrl(ttsConfig);
 
   throwIfAborted(signal);
+  // DEBT-04: refused here, before the health probe writes a verdict into the shared cache
+  // window and before the spawn fallback (which ignores speed entirely) could be reached —
+  // making the refusal path-independent regardless of which reply path this turn would
+  // otherwise have taken. Placed after the first abort check above so an already-aborted
+  // caller still wins over a misconfigured speed.
+  resolveKokoroSpeed(ttsConfig);
   // The single reachability-probe path in the codebase, cached: a downed backend now costs
   // one probe per PROBE_TTL_MS window shared across every caller, not one per turn (OPS-05).
   // A verdict cached from a probe that was cut short by a mid-flight abort self-heals at the

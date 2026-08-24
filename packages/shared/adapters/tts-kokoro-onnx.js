@@ -72,10 +72,14 @@ export function resolveKokoroSpeed(ttsConfig) {
 
 /**
  * Generate speech via the persistent Kokoro FastAPI service.
+ *
+ * IN-02: `speed` is required here rather than recomputed via resolveKokoroSpeed(ttsConfig)
+ * — the only caller, speakWithKokoroFast, already resolved (and validated) it once before
+ * either reply path could be reached, so recomputing it a second time here was redundant
+ * work and a latent maintenance trap if the two calls were ever to disagree.
  */
-async function speakWithFastApi(text, ttsConfig, { signal } = {}) {
+async function speakWithFastApi(text, ttsConfig, { signal, speed } = {}) {
   const voice = ttsConfig.voice || 'af_heart';
-  const speed = resolveKokoroSpeed(ttsConfig);
   const serviceUrl = getKokoroServiceUrl(ttsConfig);
 
   const res = await fetch(`${serviceUrl}/generate`, {
@@ -160,8 +164,11 @@ export async function speakWithKokoroFast(text, ttsConfig, { signal } = {}) {
   // window and before the spawn fallback (which ignores speed entirely) could be reached —
   // making the refusal path-independent regardless of which reply path this turn would
   // otherwise have taken. Placed after the first abort check above so an already-aborted
-  // caller still wins over a misconfigured speed.
-  resolveKokoroSpeed(ttsConfig);
+  // caller still wins over a misconfigured speed. IN-02: the resolved value is kept (not
+  // discarded) and threaded through to speakWithFastApi below, so this is the only call to
+  // resolveKokoroSpeed for the whole turn rather than one to validate and a second,
+  // redundant one inside speakWithFastApi to recompute the same value.
+  const speed = resolveKokoroSpeed(ttsConfig);
   // The single reachability-probe path in the codebase, cached: a downed backend now costs
   // one probe per PROBE_TTL_MS window shared across every caller, not one per turn (OPS-05).
   // A verdict cached from a probe that was cut short by a mid-flight abort self-heals at the
@@ -171,7 +178,7 @@ export async function speakWithKokoroFast(text, ttsConfig, { signal } = {}) {
   throwIfAborted(signal);
 
   if (verdict === BACKEND_UP) {
-    return speakWithFastApi(text, ttsConfig, { signal });
+    return speakWithFastApi(text, ttsConfig, { signal, speed });
   }
   return speakWithKokoroOnnx(text, ttsConfig, { signal });
 }

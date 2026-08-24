@@ -13,6 +13,12 @@ if (!(AUDIO_TOO_LARGE_CODE in ERROR_CODES) || !(AUDIO_MALFORMED_CODE in ERROR_CO
 
 export const MAX_PCM_BYTES = 16000 * 2 * 300; // 5 minutes of 16 kHz mono s16le
 
+// DEBT-05: the container transcription-input ceiling is deliberately the same number the
+// wire enforces through packages/shared/transport/turn-response.js's MAX_REQUEST_AUDIO_BYTES,
+// which is itself initialised from this same MAX_PCM_BYTES — one constant, three consumers,
+// so a container this library accepts can never be one the wire would have already refused.
+export const MAX_CONTAINER_BYTES = MAX_PCM_BYTES;
+
 export function pcmToWav(pcmBuffer, { sampleRate = 16000, channels = 1, bitDepth = 16 } = {}) {
   // DEBT-01: reject anything that is not a Buffer before pcmBuffer.length is ever read, so a
   // caller handing this the wrong type gets the same catalogued AUDIO_MALFORMED shape the
@@ -61,6 +67,24 @@ function malformedError(message) {
   const err = new Error(message);
   err.code = AUDIO_MALFORMED_CODE;
   return err;
+}
+
+// DEBT-05: refuses a container transcription input before readWavFormat ever walks it, so an
+// oversize buffer never reaches a fmt-chunk parse, a temp directory, or an afconvert
+// subprocess. Deliberately NOT folded into walkChunks/readWavFormat/findDataChunk — those
+// three are also reached from prepareClientOutput's reply path and from wavToPcm() on
+// afconvert output, so a ceiling there would silently apply to replies too, which this defect
+// does not ask for. Order matters: the type check runs first so a non-Buffer still surfaces
+// the pre-existing AUDIO_MALFORMED behaviour rather than being shadowed by a size complaint.
+export function assertContainerInputSize(buffer) {
+  if (!Buffer.isBuffer(buffer)) {
+    throw malformedError('Container input is not a Buffer');
+  }
+  if (buffer.length > MAX_CONTAINER_BYTES) {
+    const err = new Error('Container input exceeds the maximum allowed size');
+    err.code = AUDIO_TOO_LARGE_CODE;
+    throw err;
+  }
 }
 
 // Walks every RIFF chunk once, collecting the offset/size of 'fmt ' and 'data' (the two

@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { AUDIO_FORMATS, lookupFormat } from './format-registry.js';
 import { buildError, unsupportedFormatError } from '../errors/error-response.js';
 import { ERROR_CODES } from '../errors/error-codes.js';
-import { pcmToWav, wavToPcm, readWavFormat } from './wav.js';
+import { pcmToWav, wavToPcm, readWavFormat, assertContainerInputSize } from './wav.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -178,10 +178,12 @@ export async function prepareTranscriptionInput(audioBuffer, declaredFormatId, o
     };
   }
 
-  // Container format: read the source's own fmt chunk (throws AUDIO_MALFORMED for a
-  // buffer that isn't a valid WAV at all — before any temp directory is ever created) and
-  // only pay for the afconvert subprocess if the source doesn't already match what
-  // transcription needs.
+  // Container format: DEBT-05 — the size ceiling is checked before the fmt chunk is read and
+  // before any temp directory is created, so an oversize buffer never reaches readWavFormat at
+  // all. Then read the source's own fmt chunk (throws AUDIO_MALFORMED for a buffer that isn't
+  // a valid WAV at all — still before any temp directory is ever created) and only pay for the
+  // afconvert subprocess if the source doesn't already match what transcription needs.
+  assertContainerInputSize(audioBuffer);
   const sourceFormat = readWavFormat(audioBuffer);
   if (matchesTarget(sourceFormat, WHISPER_INPUT)) {
     return {

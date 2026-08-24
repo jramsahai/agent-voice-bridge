@@ -102,6 +102,52 @@ function writeStub(dir, name, scriptBody) {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 
+// --- DEBT-01: a non-Buffer handed to the headerless branch rejects with an AUDIO_MALFORMED
+// Error shape-identical to the container branch's, never a raw TypeError. ---
+
+test('DEBT-01: prepareTranscriptionInput rejects a non-Buffer headerless input with an AUDIO_MALFORMED error shape-identical to the container branch', async () => {
+  const nonBufferInputs = [null, undefined, 'not-a-buffer', {}, 42, new Uint8Array([1, 2, 3])];
+  for (const input of nonBufferInputs) {
+    let headerlessErr;
+    try {
+      await prepareTranscriptionInput(input, CODEC_FREE_FORMAT_ID);
+      assert.fail(`expected prepareTranscriptionInput to reject the headerless branch for input ${String(input)}`);
+    } catch (err) {
+      headerlessErr = err;
+    }
+    assert.equal(headerlessErr.code, 'AUDIO_MALFORMED', `headerless .code for input ${String(input)}`);
+    assert.ok(headerlessErr instanceof Error, `headerless instanceof Error for input ${String(input)}`);
+    assert.equal(headerlessErr instanceof TypeError, false, `headerless must not be a TypeError for input ${String(input)}`);
+
+    let containerErr;
+    try {
+      await prepareTranscriptionInput(input, CONTAINER_FORMAT_ID);
+      assert.fail(`expected prepareTranscriptionInput to reject the container branch for input ${String(input)}`);
+    } catch (err) {
+      containerErr = err;
+    }
+    assert.deepEqual(
+      Object.keys(headerlessErr).sort(),
+      Object.keys(containerErr).sort(),
+      `own-key set must match the container branch's for input ${String(input)}`,
+    );
+  }
+});
+
+test('DEBT-01: a valid Buffer still resolves through the headerless branch after the type guard', async () => {
+  const pcm = makePcm16({ samples: 1600 });
+  const result = await prepareTranscriptionInput(pcm, CODEC_FREE_FORMAT_ID);
+  assert.ok(!result.error, 'expected a successful conversion');
+  assert.ok(result.wavBuffer);
+  assert.equal(result.meta.converted, false);
+});
+
+test('DEBT-01: an unrecognised format id still resolves to an error envelope rather than throwing — throw-vs-resolve contract intact', async () => {
+  const result = await prepareTranscriptionInput(Buffer.alloc(10), 'not-a-registered-id');
+  assert.ok(result.error, 'expected a resolved error envelope, not a throw');
+  assert.equal(result.error.body.error.code, 'FMT_UNSUPPORTED');
+});
+
 // --- Input direction, real subprocess ---
 
 test('a 44.1kHz mono container source converts to whisper-ready 16kHz mono 16-bit', async () => {

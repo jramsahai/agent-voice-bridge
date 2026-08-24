@@ -10,27 +10,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { AUDIO_FORMATS, lookupFormat } from './format-registry.js';
+import { AUDIO_FORMATS, lookupFormat, resolveDefaultHeaderlessFormat } from './format-registry.js';
 import { buildError, unsupportedFormatError } from '../errors/error-response.js';
 import { ERROR_CODES } from '../errors/error-codes.js';
 import { pcmToWav, wavToPcm, readWavFormat, assertContainerInputSize } from './wav.js';
 
 const execFileAsync = promisify(execFile);
 
-// The one registry row that is headerless is, by construction (see format-registry.js),
-// the shape whisper transcription is done against — found structurally, the same way
-// resolveWhisperConversionRecipe() below finds the container row, so this constant can
-// never drift from the registry's own numbers and this file never contains a registered
-// format id as a quoted literal (test/format-registry.test.js's one-row-change scan).
-function resolveDefaultHeaderlessFormat() {
-  const row = Object.values(AUDIO_FORMATS).find((entry) => entry.headerless);
-  if (!row) {
-    throw new Error('convert.js: no registry row is headerless; cannot derive WHISPER_INPUT');
-  }
-  return row;
-}
-
-const defaultHeaderlessFormat = resolveDefaultHeaderlessFormat();
+// IN-01: the one registry row that is headerless is, by construction (see
+// format-registry.js), the shape whisper transcription is done against — found
+// structurally via format-registry.js's own resolveDefaultHeaderlessFormat(), the single
+// place that tie-break rule is decided (negotiate.js's defaultOutputFormatId() calls the
+// same function), so this constant can never drift from the registry's own numbers and
+// this file never contains a registered format id as a quoted literal
+// (test/format-registry.test.js's one-row-change scan).
+const [, defaultHeaderlessFormat] = resolveDefaultHeaderlessFormat();
 export const WHISPER_INPUT = Object.freeze({
   sampleRate: defaultHeaderlessFormat.sampleRate,
   channels: defaultHeaderlessFormat.channels,

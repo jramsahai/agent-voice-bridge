@@ -62,3 +62,19 @@ export function lookupFormat(wireId) {
 export function isSupportedFormat(wireId) {
   return lookupFormat(wireId) !== undefined;
 }
+
+// IN-01: the one place "the default headerless row" is decided. Previously convert.js's
+// resolveDefaultHeaderlessFormat() and negotiate.js's defaultOutputFormatId() each
+// independently scanned AUDIO_FORMATS for the first headerless row — the same first-match
+// tie-break rule encoded twice, only agreeing today because both iterate the same
+// Object.entries order. Both now call this one function instead. Accepts an injectable
+// registry (defaulting to AUDIO_FORMATS) purely so a caller's own tests can drive the
+// ambiguous/absent-row branches without mutating the real registry, mirroring
+// resolveWhisperConversionRecipe()'s existing injectable-registry convention.
+export function resolveDefaultHeaderlessFormat(registry = AUDIO_FORMATS) {
+  const entry = Object.entries(registry).find(([, row]) => row.headerless);
+  if (!entry) {
+    throw new Error('format-registry.js: no registry row is headerless; cannot derive a default output format');
+  }
+  return entry;
+}

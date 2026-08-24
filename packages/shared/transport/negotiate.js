@@ -8,7 +8,7 @@
 // argument at all, which throws (there is nothing to negotiate against), unlike
 // negotiate({}), which resolves an { error } object like any other rejected input.
 
-import { AUDIO_FORMATS, lookupFormat } from '../audio/format-registry.js';
+import { AUDIO_FORMATS, lookupFormat, resolveDefaultHeaderlessFormat } from '../audio/format-registry.js';
 import { unsupportedFormatError, buildError } from '../errors/error-response.js';
 
 export const INPUT_FORMAT_HEADER = 'X-Voice-Input-Format';
@@ -22,16 +22,15 @@ export const WANT_AUDIO_HEADER = 'X-Voice-Want-Audio';
 // plan records rather than inherits; Phase 6 documents the same rule from this constant.
 export const WANT_AUDIO_DISABLED_TOKEN = '0';
 
-// The registry's single headerless row is, by construction (format-registry.js), the
-// default output format for a client that declares no preference — found structurally,
-// the same way convert.js's resolveDefaultHeaderlessFormat() finds it, so this module never
-// hardcodes a registered wire id and FMT-07's one-row-change property survives here too.
+// IN-01: the registry's single headerless row is, by construction (format-registry.js),
+// the default output format for a client that declares no preference — found via
+// format-registry.js's own resolveDefaultHeaderlessFormat(), the single place that
+// tie-break rule is decided (convert.js's WHISPER_INPUT calls the same function), so this
+// module never hardcodes a registered wire id and FMT-07's one-row-change property
+// survives here too.
 export function defaultOutputFormatId() {
-  const entry = Object.entries(AUDIO_FORMATS).find(([, row]) => row.headerless);
-  if (!entry) {
-    throw new Error('negotiate.js: no registry row is headerless; cannot derive a default output format');
-  }
-  return entry[0];
+  const [id] = resolveDefaultHeaderlessFormat();
+  return id;
 }
 
 // Reply-direction availability, resolved structurally from the registry's own row data

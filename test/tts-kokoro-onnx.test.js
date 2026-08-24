@@ -226,3 +226,197 @@ test('DEBT-04: an already-aborted signal still wins over the speed gate, even wi
     },
   );
 });
+
+// WR-03: getKokoroServiceUrl now mirrors resolveKokoroSpeed's refuse-or-honour contract —
+// only undefined falls through to env var / default. Any other falsy or non-string value
+// (including '') is rejected by name rather than silently discarded through ||.
+test('WR-03: getKokoroServiceUrl returns the default when serviceUrl is undefined', async () => {
+  const { getKokoroServiceUrl } = await loadKokoroAdapterModule();
+
+  const originalEnv = process.env.KOKORO_TTS_URL;
+  try {
+    delete process.env.KOKORO_TTS_URL;
+    const url = getKokoroServiceUrl({});
+    assert.equal(url, 'http://127.0.0.1:4319', 'must return the hardcoded default when env is unset');
+
+    process.env.KOKORO_TTS_URL = 'http://custom:5000';
+    const urlWithEnv = getKokoroServiceUrl({});
+    assert.equal(urlWithEnv, 'http://custom:5000', 'must return the env var when set');
+  } finally {
+    if (originalEnv !== undefined) {
+      process.env.KOKORO_TTS_URL = originalEnv;
+    } else {
+      delete process.env.KOKORO_TTS_URL;
+    }
+  }
+});
+
+test('WR-03: getKokoroServiceUrl returns a non-empty string serviceUrl unchanged', async () => {
+  const { getKokoroServiceUrl } = await loadKokoroAdapterModule();
+  const url = getKokoroServiceUrl({ serviceUrl: 'http://myhost:1234' });
+  assert.equal(url, 'http://myhost:1234');
+});
+
+test('WR-03: getKokoroServiceUrl throws for an empty string serviceUrl', async () => {
+  const { getKokoroServiceUrl } = await loadKokoroAdapterModule();
+  assert.throws(
+    () => getKokoroServiceUrl({ serviceUrl: '' }),
+    (err) => {
+      assert.ok(err.message.includes('tts.serviceUrl'), 'message must name the config key');
+      return true;
+    },
+  );
+});
+
+test('WR-03: getKokoroServiceUrl throws for null serviceUrl', async () => {
+  const { getKokoroServiceUrl } = await loadKokoroAdapterModule();
+  assert.throws(
+    () => getKokoroServiceUrl({ serviceUrl: null }),
+    (err) => {
+      assert.ok(err.message.includes('tts.serviceUrl'));
+      return true;
+    },
+  );
+});
+
+test('WR-03: getKokoroServiceUrl throws for false serviceUrl', async () => {
+  const { getKokoroServiceUrl } = await loadKokoroAdapterModule();
+  assert.throws(
+    () => getKokoroServiceUrl({ serviceUrl: false }),
+    (err) => {
+      assert.ok(err.message.includes('tts.serviceUrl'));
+      return true;
+    },
+  );
+});
+
+test('WR-03: getKokoroServiceUrl throws for 0 serviceUrl', async () => {
+  const { getKokoroServiceUrl } = await loadKokoroAdapterModule();
+  assert.throws(
+    () => getKokoroServiceUrl({ serviceUrl: 0 }),
+    (err) => {
+      assert.ok(err.message.includes('tts.serviceUrl'));
+      return true;
+    },
+  );
+});
+
+test('WR-03: getKokoroServiceUrl throws for a non-string serviceUrl', async () => {
+  const { getKokoroServiceUrl } = await loadKokoroAdapterModule();
+  assert.throws(
+    () => getKokoroServiceUrl({ serviceUrl: { host: 'localhost' } }),
+    (err) => {
+      assert.ok(err.message.includes('tts.serviceUrl'));
+      return true;
+    },
+  );
+});
+
+// WR-04: the spawn-based fallback emits a console.error diagnostic when a configured tts.speed
+// is ignored (i.e., when the speed is configured and not equal to DEFAULT_KOKORO_SPEED).
+// This is the only diagnostic an operator gets when the fallback is used with a nondefault speed.
+test('WR-04: speakWithKokoroFast logs a console.error to stdout when configured speed is ignored by spawn fallback', async () => {
+  resetBackendHealthCache();
+  const { DEFAULT_KOKORO_SPEED } = await loadKokoroAdapterModule();
+
+  let capturedError = null;
+  const originalConsoleError = console.error;
+  try {
+    console.error = (msg) => {
+      capturedError = msg;
+    };
+
+    // Force the spawn fallback by using an unreachable service URL and a nonexistent command.
+    // The fallback will fail on the missing-binary path after emitting the speed diagnostic.
+    await assert.rejects(() =>
+      speakWithKokoroFast(
+        'hello',
+        { serviceUrl: UNREACHABLE_SERVICE_URL, command: '/nonexistent-tts-kokoro-binary-xyz', speed: 0.75 },
+        {},
+      ),
+    );
+
+    assert.ok(
+      capturedError && typeof capturedError === 'string',
+      'console.error must have been called with a message about ignored speed',
+    );
+    assert.ok(
+      capturedError.includes('tts.speed'),
+      'the diagnostic must mention that tts.speed is configured',
+    );
+    assert.ok(
+      capturedError.includes('spawn-based'),
+      'the diagnostic must mention this is the spawn-based fallback',
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test('WR-04: speakWithKokoroFast does not log the console.error when speed is absent', async () => {
+  resetBackendHealthCache();
+
+  let consoleErrorCalled = false;
+  const originalConsoleError = console.error;
+  try {
+    console.error = () => {
+      consoleErrorCalled = true;
+    };
+
+    // No speed configured this time — the diagnostic should not fire.
+    await assert.rejects(() =>
+      speakWithKokoroFast(
+        'hello',
+        { serviceUrl: UNREACHABLE_SERVICE_URL, command: '/nonexistent-tts-kokoro-binary-xyz' },
+        {},
+      ),
+    );
+
+    assert.equal(consoleErrorCalled, false, 'console.error must not be called when speed is absent');
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test('WR-04: speakWithKokoroFast does not log the console.error when speed equals DEFAULT_KOKORO_SPEED', async () => {
+  resetBackendHealthCache();
+  const { DEFAULT_KOKORO_SPEED } = await loadKokoroAdapterModule();
+
+  let consoleErrorCalled = false;
+  const originalConsoleError = console.error;
+  try {
+    console.error = () => {
+      consoleErrorCalled = true;
+    };
+
+    // Speed equals the default — the diagnostic should not fire.
+    await assert.rejects(() =>
+      speakWithKokoroFast(
+        'hello',
+        { serviceUrl: UNREACHABLE_SERVICE_URL, command: '/nonexistent-tts-kokoro-binary-xyz', speed: DEFAULT_KOKORO_SPEED },
+        {},
+      ),
+    );
+
+    assert.equal(consoleErrorCalled, false, 'console.error must not be called when speed equals DEFAULT_KOKORO_SPEED');
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test('WR-04: resolveKokoroSpeed is called before the health probe, so an invalid speed is refused before the spawn fallback could be reached', async () => {
+  resetBackendHealthCache();
+
+  await assert.rejects(
+    () =>
+      speakWithKokoroFast(
+        'hello',
+        { serviceUrl: UNREACHABLE_SERVICE_URL, command: '/nonexistent-tts-kokoro-binary-xyz', speed: 0 },
+        {},
+      ),
+    (err) => {
+      assert.ok(err.message.includes('tts.speed'), 'the rejection must be the speed validation, not a spawn failure');
+      return true;
+    },
+  );
+});

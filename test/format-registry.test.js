@@ -9,7 +9,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { AUDIO_FORMATS, listSupportedFormats, lookupFormat, isSupportedFormat } from '../packages/shared/audio/format-registry.js';
+import { AUDIO_FORMATS, listSupportedFormats, lookupFormat, isSupportedFormat, resolveDefaultHeaderlessFormat } from '../packages/shared/audio/format-registry.js';
 import { unsupportedFormatError } from '../packages/shared/errors/error-response.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -216,4 +216,90 @@ test('200 interleaved concurrent lookupFormat/listSupportedFormats calls return 
 test('isSupportedFormat reflects wav as supported and webm as unsupported', () => {
   assert.equal(isSupportedFormat('wav'), true);
   assert.equal(isSupportedFormat('webm'), false);
+});
+
+// IN-01: resolveDefaultHeaderlessFormat exports a single function that both convert.js's
+// WHISPER_INPUT derivation and negotiate.js's defaultOutputFormatId now call instead of
+// independently scanning AUDIO_FORMATS. This prevents duplicate "first headerless" logic.
+test('IN-01: resolveDefaultHeaderlessFormat is exported as a named export', () => {
+  assert.equal(typeof resolveDefaultHeaderlessFormat, 'function');
+});
+
+test('IN-01: resolveDefaultHeaderlessFormat() called with no argument returns the real registry\'s headerless entry as [id, row]', () => {
+  const [id, row] = resolveDefaultHeaderlessFormat();
+  assert.equal(typeof id, 'string', 'first element must be the format id');
+  assert.equal(id, 'pcm16', 'the first (and only current) headerless entry is pcm16');
+  assert.ok(row.headerless === true, 'the second element must be the headerless row');
+  assert.equal(row.mimeType, 'audio/l16;rate=16000;channels=1');
+});
+
+test('IN-01: resolveDefaultHeaderlessFormat honors an injected registry', () => {
+  const customRegistry = {
+    test_headerless: {
+      headerless: true,
+      mimeType: 'audio/test',
+      extension: 'test',
+      sampleRate: 8000,
+      channels: 1,
+      bitDepth: 16,
+      afconvertFileFormat: null,
+      afconvertDataFormat: null,
+    },
+    test_container: {
+      headerless: false,
+      mimeType: 'audio/test-container',
+      extension: 'testc',
+      sampleRate: null,
+      channels: null,
+      bitDepth: null,
+      afconvertFileFormat: 'TEST',
+      afconvertDataFormat: 'TEST_FMT',
+    },
+  };
+
+  const [id, row] = resolveDefaultHeaderlessFormat(customRegistry);
+  assert.equal(id, 'test_headerless', 'must return the first headerless entry from the injected registry');
+  assert.equal(row.mimeType, 'audio/test');
+});
+
+test('IN-01: resolveDefaultHeaderlessFormat throws when no registry row is headerless', () => {
+  const noHeaderlessRegistry = {
+    container_only: {
+      headerless: false,
+      mimeType: 'audio/container',
+      extension: 'cont',
+      sampleRate: null,
+      channels: null,
+      bitDepth: null,
+      afconvertFileFormat: 'TEST',
+      afconvertDataFormat: 'TEST_DATA',
+    },
+  };
+
+  assert.throws(
+    () => resolveDefaultHeaderlessFormat(noHeaderlessRegistry),
+    (err) => {
+      assert.ok(err.message.includes('no registry row is headerless'));
+      return true;
+    },
+  );
+});
+
+test('IN-01: convert.js no longer contains an independent headerless scan', () => {
+  const source = readFileSync(path.join(repoRoot, 'packages', 'shared', 'audio', 'convert.js'), 'utf8');
+  // Look for the pattern of iterating entries and finding headerless — convert.js used to have
+  // a line like: Object.entries(AUDIO_FORMATS).find(([, row]) => row.headerless)
+  // Now it must call resolveDefaultHeaderlessFormat instead. Check for the function call.
+  assert.ok(
+    source.includes('resolveDefaultHeaderlessFormat'),
+    'convert.js must call resolveDefaultHeaderlessFormat instead of scanning independently',
+  );
+});
+
+test('IN-01: negotiate.js no longer contains an independent headerless scan', () => {
+  const source = readFileSync(path.join(repoRoot, 'packages', 'shared', 'transport', 'negotiate.js'), 'utf8');
+  assert.ok(
+    source.includes('resolveDefaultHeaderlessFormat'),
+    'negotiate.js must call resolveDefaultHeaderlessFormat instead of scanning independently',
+  );
 });

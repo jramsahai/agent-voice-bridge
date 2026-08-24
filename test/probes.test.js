@@ -115,3 +115,64 @@ test('probes.js contains no synchronous filesystem call', () => {
   const syncFsToken = ['access', 'Sync'].join('');
   assert.ok(!codeOnly.includes(syncFsToken), 'probes.js must not contain a synchronous filesystem call');
 });
+
+// WR-01: a guard at the top of probeExecutable now throws for empty strings and non-strings
+// before the path-separator branch can degenerate into checking a PATH directory's own
+// traversability. Previously probeExecutable('') resolved as reachable because path.join(dir, '')
+// collapsed to a traversable PATH directory.
+test('WR-01: probeExecutable rejects an empty string with the guard message', async () => {
+  await assert.rejects(
+    () => probeExecutable(''),
+    (err) => {
+      assert.equal(err.message, 'probeExecutable: command must be a non-empty string');
+      return true;
+    },
+  );
+});
+
+test('WR-01: probeExecutable rejects null with the guard message', async () => {
+  await assert.rejects(
+    () => probeExecutable(null),
+    (err) => {
+      assert.equal(err.message, 'probeExecutable: command must be a non-empty string');
+      return true;
+    },
+  );
+});
+
+test('WR-01: probeExecutable rejects undefined with the guard message', async () => {
+  await assert.rejects(
+    () => probeExecutable(undefined),
+    (err) => {
+      assert.equal(err.message, 'probeExecutable: command must be a non-empty string');
+      return true;
+    },
+  );
+});
+
+test('WR-01: probeExecutable rejects a number with the guard message', async () => {
+  await assert.rejects(
+    () => probeExecutable(0),
+    (err) => {
+      assert.equal(err.message, 'probeExecutable: command must be a non-empty string');
+      return true;
+    },
+  );
+});
+
+test('WR-01: probeExecutable rejects an object with the guard message', async () => {
+  await assert.rejects(
+    () => probeExecutable({}),
+    (err) => {
+      assert.equal(err.message, 'probeExecutable: command must be a non-empty string');
+      return true;
+    },
+  );
+});
+
+test('WR-01: the guard does not shadow the existing behavior for valid absolute executables and bare PATH commands', async () => {
+  // The four existing tests in this file verify this, but assert it here as explicit evidence
+  // that the guard does not affect them
+  await assert.doesNotReject(() => probeExecutable(process.execPath));
+  await assert.rejects(() => probeExecutable('this-command-does-not-exist-anywhere-xyz'));
+});

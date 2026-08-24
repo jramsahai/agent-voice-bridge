@@ -532,6 +532,11 @@ const HTTP_SOCKET_EXEMPT_FILES = new Set([
   // server — same hermetic in-process pattern as the three files above, no whisper/OpenClaw/
   // Kokoro binary and no network beyond this file's own loopback socket.
   path.join(repoRoot, 'test', 'api-spec-contract.test.js'),
+  // Phase 09 (IN-02): test/tts-kokoro-speed-threading.test.js legitimately opens a real
+  // loopback socket to prove speed threading through speakWithKokoroFast to speakWithFastApi
+  // reaches the FastAPI request body and meta — same hermetic in-process pattern, no external
+  // network beyond this file's own loopback socket.
+  path.join(repoRoot, 'test', 'tts-kokoro-speed-threading.test.js'),
 ]);
 
 test('no source file this phase created references a network client, a fetch call, or a models directory', () => {

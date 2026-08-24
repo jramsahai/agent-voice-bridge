@@ -21,8 +21,21 @@ const execFileAsync = promisify(execFile);
 // of each hand-maintaining their own copy — three independent copies meant a future change
 // to this precedence only had to be forgotten in one of them for health/preflight to
 // silently disagree with what this adapter actually calls.
+//
+// WR-03: mirrors resolveKokoroSpeed's refuse-or-honour contract below — only `undefined`
+// means "not configured" and falls through to the env var / default. A configured
+// `serviceUrl` of '' (or any other non-string) is refused by name rather than silently
+// discarded through a truthiness fallback, the same silent-misconfiguration class DEBT-04
+// closed for tts.speed.
 export function getKokoroServiceUrl(ttsConfig = {}) {
-  return ttsConfig.serviceUrl || process.env.KOKORO_TTS_URL || 'http://127.0.0.1:4319';
+  const configured = ttsConfig.serviceUrl;
+  if (configured === undefined) {
+    return process.env.KOKORO_TTS_URL || 'http://127.0.0.1:4319';
+  }
+  if (typeof configured === 'string' && configured !== '') {
+    return configured;
+  }
+  throw new Error(`tts.serviceUrl must be a non-empty string when configured; got ${JSON.stringify(configured)}`);
 }
 
 // DEBT-04: a configured speed is either honoured unchanged or refused by name — never

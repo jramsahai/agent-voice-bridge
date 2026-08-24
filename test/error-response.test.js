@@ -271,6 +271,101 @@ test('the published error code -> status mapping is exactly the pinned literal',
   assert.deepEqual(Object.entries(actual).sort(), Object.entries(PUBLISHED_STATUS).sort());
 });
 
+// --- DEBT-02: buildError refuses a status override the frozen catalogue does not assign
+// to the code. A screenless client classifies a rejection from its status and its
+// X-Error-Code header together; a code emitted under a status the catalogue does not
+// assign it is a rejection the device's state machine cannot classify at all. ---
+
+test('DEBT-02: buildError with no extra at all returns the catalogue status for every registered code', () => {
+  for (const [code, entry] of Object.entries(ERROR_CODES)) {
+    const { status } = buildError(code, 'x');
+    assert.equal(status, entry.status, `${code} with no extra`);
+  }
+});
+
+test('DEBT-02: buildError with an empty extra object behaves identically to the two-argument call', () => {
+  for (const [code, entry] of Object.entries(ERROR_CODES)) {
+    const { status } = buildError(code, 'x', {});
+    assert.equal(status, entry.status, `${code} with {} extra`);
+  }
+});
+
+test('DEBT-02: a status override equal to the catalogue status for that code still returns normally', () => {
+  for (const [code, entry] of Object.entries(ERROR_CODES)) {
+    const { status } = buildError(code, 'x', { status: entry.status });
+    assert.equal(status, entry.status, `${code} with an equal override`);
+  }
+});
+
+test('DEBT-02: an explicit status: undefined is treated as no override, not a rejection', () => {
+  for (const [code, entry] of Object.entries(ERROR_CODES)) {
+    const { status } = buildError(code, 'x', { status: undefined });
+    assert.equal(status, entry.status, `${code} with status: undefined`);
+  }
+});
+
+test("DEBT-02: buildError('AUDIO_MALFORMED', 'x', { status: 429 }) throws naming the override, the code, and the catalogue status", () => {
+  assert.throws(
+    () => buildError('AUDIO_MALFORMED', 'x', { status: 429 }),
+    (err) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /429/);
+      assert.match(err.message, /AUDIO_MALFORMED/);
+      assert.match(err.message, /400/);
+      return true;
+    },
+  );
+});
+
+test("DEBT-02: buildError('AUDIO_MALFORMED', 'x', { status: 418 }) throws — 418 is registered nowhere in the catalogue", () => {
+  assert.throws(() => buildError('AUDIO_MALFORMED', 'x', { status: 418 }));
+});
+
+test('DEBT-02: a null status override throws', () => {
+  assert.throws(() => buildError('AUDIO_MALFORMED', 'x', { status: null }));
+});
+
+test("DEBT-02: a numeric-string status override (e.g. '400') throws, even when the numeric value would have matched", () => {
+  assert.throws(() => buildError('AUDIO_MALFORMED', 'x', { status: '400' }));
+});
+
+test('DEBT-02: catalogue-wide sweep — every registered code throws for every registered status that is not its own', () => {
+  const allStatuses = [...new Set(Object.values(ERROR_CODES).map((entry) => entry.status))];
+  for (const [code, entry] of Object.entries(ERROR_CODES)) {
+    for (const otherStatus of allStatuses) {
+      if (otherStatus === entry.status) continue;
+      assert.throws(
+        () => buildError(code, 'x', { status: otherStatus }),
+        `${code} must throw for override ${otherStatus} (its own status is ${entry.status})`,
+      );
+    }
+  }
+});
+
+test('DEBT-02: unchanged guarantee — an unregistered code still throws with its own message, not a status message', () => {
+  assert.throws(
+    () => buildError('NOT_A_REAL_CODE', 'x'),
+    (err) => {
+      assert.match(err.message, /not a registered error code/);
+      return true;
+    },
+  );
+});
+
+test('DEBT-02: unchanged guarantee — an empty message still falls back to the catalogue title after the guard runs', () => {
+  const { body } = buildError('FMT_UNSUPPORTED', '', { status: ERROR_CODES.FMT_UNSUPPORTED.status });
+  assert.equal(body.error.message, ERROR_CODES.FMT_UNSUPPORTED.title);
+});
+
+test('DEBT-02: unchanged guarantee — extra.body still cannot overwrite code or message when a valid status override is also present', () => {
+  const { body } = buildError('FMT_UNSUPPORTED', 'm', {
+    status: ERROR_CODES.FMT_UNSUPPORTED.status,
+    body: { code: 'SPOOFED', message: 'spoofed' },
+  });
+  assert.equal(body.error.code, 'FMT_UNSUPPORTED');
+  assert.equal(body.error.message, 'm');
+});
+
 // --- Turn codes: explicit round-trip and leak-freedom, in addition to the generic loops
 // above (which already cover every catalogue entry including these two) — asserted
 // explicitly against a process id and the temp-directory root, since a turn's lock artifact

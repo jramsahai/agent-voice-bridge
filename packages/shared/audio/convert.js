@@ -100,7 +100,7 @@ function matchesTarget(sourceFormat, target) {
 export function toErrorEnvelope(err) {
   const code = err && typeof err.code === 'string' ? err.code : null;
   if (code && code in ERROR_CODES) {
-    return buildError(code, ERROR_CODES[code].title, { status: ERROR_CODES[code].status });
+    return buildError(code, ERROR_CODES[code].title);
   }
   throw err;
 }
@@ -159,7 +159,7 @@ export async function convertWavToWhisperWav(wavBuffer, options = {}) {
       // outcome.
       console.error('[voice-bridge] afconvert conversion failed', err);
       return {
-        error: buildError('AUDIO_CONVERSION_FAILED', ERROR_CODES.AUDIO_CONVERSION_FAILED.title, { status: 500 }),
+        error: buildError('AUDIO_CONVERSION_FAILED', ERROR_CODES.AUDIO_CONVERSION_FAILED.title),
       };
     }
   } finally {
@@ -266,7 +266,6 @@ export async function prepareClientOutput(replyWavBuffer, requestedFormatId, opt
     error: buildError(
       'FMT_UNSUPPORTED',
       `Requested reply format '${requestedFormatId}' is not available as a reply format.`,
-      { status: 415 },
     ),
   };
 }

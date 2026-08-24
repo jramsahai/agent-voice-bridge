@@ -94,7 +94,6 @@ function unsupportedReplyFormatError(requestedOutputFormatId) {
   const label = renderOutputFormatId(requestedOutputFormatId);
   const message = `Requested output format '${label}' is not available as a reply format. Available reply formats: ${supportedFormats.join(', ')}.`;
   return buildError('FMT_UNSUPPORTED', message, {
-    status: 415,
     body: { supportedFormats },
   });
 }

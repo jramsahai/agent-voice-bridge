@@ -83,7 +83,6 @@ export function unsupportedFormatError(requestedFormatId) {
   const label = renderRequestedFormatLabel(requestedFormatId);
   const message = `Requested format '${label}' is not supported. Supported formats: ${supportedFormats.join(', ')}.`;
   return buildError('FMT_UNSUPPORTED', message, {
-    status: 415,
     body: { supportedFormats },
   });
 }

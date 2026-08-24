@@ -309,6 +309,86 @@ test('parseCliArgs never reads the operator config loader or config.local — re
 });
 
 // =====================================================================================
+// parseCliArgs — --port validation (DEBT-07)
+// =====================================================================================
+
+const PORT_RANGE_MESSAGE = '--port must be an integer between 1 and 65535';
+
+test('parseCliArgs rejects a non-numeric --port with the usage exit code and the port-range message', () => {
+  const parsed = parseCliArgs(['--input', 'x.wav', '--token', 't', '--port', 'abc']);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.exitCode, EXIT_CODES.USAGE);
+  assert.equal(parsed.message, PORT_RANGE_MESSAGE);
+});
+
+test('parseCliArgs accepts both port bounds and rejects the values immediately outside them', () => {
+  const low = parseCliArgs(['--input', 'x.wav', '--token', 't', '--port', '1']);
+  assert.equal(low.ok, true);
+  assert.equal(low.values.port, 1);
+
+  const high = parseCliArgs(['--input', 'x.wav', '--token', 't', '--port', '65535']);
+  assert.equal(high.ok, true);
+  assert.equal(high.values.port, 65535);
+
+  for (const rejected of ['0', '65536', '8080.5', '-1']) {
+    const parsed = parseCliArgs(['--input', 'x.wav', '--token', 't', '--port', rejected]);
+    assert.equal(parsed.ok, false, `--port ${rejected} should be rejected`);
+    assert.equal(parsed.message, PORT_RANGE_MESSAGE, `--port ${rejected} should report the range message`);
+  }
+});
+
+test('parseCliArgs rejects an empty --port value with the port-range message rather than falling through', () => {
+  // An empty string is not `undefined` and does not start with a double dash, so
+  // takeFlagValue returns it rather than raising the missing-value error; Number('') is 0,
+  // which is below the lower bound, so this lands on the range branch, not a distinct
+  // empty-value branch.
+  const parsed = parseCliArgs(['--input', 'x.wav', '--token', 't', '--port', '']);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.exitCode, EXIT_CODES.USAGE);
+  assert.equal(parsed.message, PORT_RANGE_MESSAGE);
+});
+
+// Pins the argv-consumption guard (WR-05, 06-REVIEW.md) neighbouring the --port range check —
+// a different commit's fix from DEBT-07's. Deliberately excluded from Task 1's RED probe: its
+// failure at d1b4551^ would be coincidental evidence about a different fix, not about DEBT-07.
+test('parseCliArgs reports a --port flag left without a value as a missing-value usage error, not a range error', () => {
+  const trailing = parseCliArgs(['--input', 'x.wav', '--token', 't', '--port']);
+  assert.equal(trailing.ok, false);
+  assert.equal(trailing.exitCode, EXIT_CODES.USAGE);
+  assert.equal(trailing.message, '--port requires a value');
+
+  const eatsNextFlag = parseCliArgs(['--input', 'x.wav', '--port', '--token', 't']);
+  assert.equal(eatsNextFlag.ok, false);
+  assert.equal(eatsNextFlag.exitCode, EXIT_CODES.USAGE);
+  assert.equal(eatsNextFlag.message, '--port requires a value');
+});
+
+test('parseCliArgs validates the last --port occurrence when the flag is repeated', () => {
+  // The argv loop assigns left to right and validation runs once after the loop completes,
+  // so the last occurrence is the one checked — an out-of-range earlier occurrence is not a
+  // refusal.
+  const parsed = parseCliArgs([
+    '--input', 'x.wav', '--token', 't', '--port', '70000', '--port', '8080',
+  ]);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.values.port, 8080);
+});
+
+test('main() exits with the usage code and prints the port-range message without attempting a connection', async () => {
+  // main() redacts the --token flag value from its usage-rejection output (see the
+  // dedicated redaction test above); a single-character token like 't' would collide with
+  // ordinary letters inside PORT_RANGE_MESSAGE ("port", "must", "integer") and corrupt the
+  // assertion, so this test uses a distinctive token the message cannot contain.
+  const { result, stderr } = await captureConsole(() =>
+    main(['--input', 'x.wav', '--token', 'DISTINCTIVE-PORT-TEST-TOKEN', '--port', 'abc']),
+  );
+  // Reaching any other exit-code family would mean the argv was carried past the refusal
+  // into the connection attempt, which is exactly what SC1 forbids.
+  assert.equal(result, EXIT_CODES.USAGE);
+  assert.ok(stderr.join('\n').includes(PORT_RANGE_MESSAGE));
+});
+
+// =====================================================================================
 // main() — usage/help exit codes
 // =====================================================================================
 

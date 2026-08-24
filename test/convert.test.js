@@ -13,7 +13,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { AUDIO_FORMATS } from '../packages/shared/audio/format-registry.js';
-import { readWavFormat, wavToPcm } from '../packages/shared/audio/wav.js';
+import { readWavFormat, wavToPcm, MAX_PCM_BYTES } from '../packages/shared/audio/wav.js';
+import { MAX_REQUEST_AUDIO_BYTES } from '../packages/shared/transport/turn-response.js';
 import {
   prepareTranscriptionInput,
   prepareClientOutput,
@@ -146,6 +147,68 @@ test('DEBT-01: an unrecognised format id still resolves to an error envelope rat
   const result = await prepareTranscriptionInput(Buffer.alloc(10), 'not-a-registered-id');
   assert.ok(result.error, 'expected a resolved error envelope, not a throw');
   assert.equal(result.error.body.error.code, 'FMT_UNSUPPORTED');
+});
+
+// --- DEBT-05: container transcription input is refused at the library boundary once it
+// exceeds the wire's own ceiling, before readWavFormat ever parses it. MAX_CONTAINER_BYTES is
+// read through a dynamic import rather than a static named import: pre-fix, wav.js does not
+// yet export it, and a static named import of a not-yet-existing export is an ESM link error
+// that fails this entire file before any test runs — exactly the pitfall the DEBT-06 tests
+// below avoid the same way, for the same reason. A dynamic import's namespace object simply
+// reads `undefined` for a missing export instead, letting the pre-fix run fail on one clean
+// assertion. ---
+
+test('DEBT-05: MAX_CONTAINER_BYTES is derived from MAX_PCM_BYTES and equals the wire ceiling', async () => {
+  const wavModule = await import('../packages/shared/audio/wav.js');
+  assert.equal(wavModule.MAX_CONTAINER_BYTES, MAX_PCM_BYTES, 'MAX_CONTAINER_BYTES must equal MAX_PCM_BYTES');
+  assert.equal(
+    wavModule.MAX_CONTAINER_BYTES,
+    MAX_REQUEST_AUDIO_BYTES,
+    'MAX_CONTAINER_BYTES must equal MAX_REQUEST_AUDIO_BYTES, the wire ceiling',
+  );
+});
+
+test('DEBT-05: a container buffer exceeding the ceiling by exactly the 44-byte header rejects with AUDIO_TOO_LARGE before readWavFormat parses it', async () => {
+  // MAX_CONTAINER_BYTES is derived from (and equal to) MAX_PCM_BYTES by design, so sizing the
+  // PCM payload at MAX_PCM_BYTES makes the total WAV buffer exceed the ceiling by exactly the
+  // 44-byte canonical header — cheap to allocate, and pre-fix this reaches a real code path:
+  // readWavFormat parses it successfully and matchesTarget() returns true, so the call
+  // resolves with no error at all, which is the failure this test must catch.
+  const oversizeWav = makeCanonicalWav({ pcm: Buffer.alloc(MAX_PCM_BYTES) });
+  let err;
+  try {
+    await prepareTranscriptionInput(oversizeWav, CONTAINER_FORMAT_ID);
+    assert.fail('expected prepareTranscriptionInput to reject an oversize container buffer');
+  } catch (caught) {
+    err = caught;
+  }
+  assert.equal(err.code, 'AUDIO_TOO_LARGE');
+});
+
+test('DEBT-05: a container buffer whose total length is exactly the ceiling is accepted, not rejected', async () => {
+  const pcm = Buffer.alloc(MAX_PCM_BYTES - 44);
+  const wav = makeCanonicalWav({ pcm });
+  assert.equal(wav.length, MAX_PCM_BYTES, 'sanity: total WAV length must land exactly on the ceiling');
+  const result = await prepareTranscriptionInput(wav, CONTAINER_FORMAT_ID);
+  assert.ok(!result.error, 'a buffer exactly at the ceiling must not be rejected — the ceiling is exclusive');
+});
+
+test('DEBT-05: a non-Buffer container input still rejects with AUDIO_MALFORMED, not AUDIO_TOO_LARGE', async () => {
+  let err;
+  try {
+    await prepareTranscriptionInput(null, CONTAINER_FORMAT_ID);
+    assert.fail('expected prepareTranscriptionInput to reject a non-Buffer container input');
+  } catch (caught) {
+    err = caught;
+  }
+  assert.equal(err.code, 'AUDIO_MALFORMED', 'the size guard must not shadow the type guard');
+});
+
+test('DEBT-05: the reply direction is unaffected — prepareClientOutput with a normal reply WAV still succeeds', async () => {
+  const pcm = makePcm16({ samples: 4000 });
+  const wav = makeCanonicalWav({ pcm, sampleRate: 16000, channels: 1 });
+  const result = await prepareClientOutput(wav, CODEC_FREE_FORMAT_ID);
+  assert.ok(!result.error, 'reply path must remain untouched by the container input ceiling');
 });
 
 // --- Input direction, real subprocess ---

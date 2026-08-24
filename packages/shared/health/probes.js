@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { getRootDir } from '../config/load-config.js';
-import { composeAbortSignals } from '../adapters/tts-kokoro-onnx.js';
+import { composeAbortSignals } from '../lifecycle/abort-signals.js';
 
 // Same ceiling isFastApiAvailable already used — carried forward unchanged, not
 // re-tuned, so this move is a pure relocation rather than a behavior change.

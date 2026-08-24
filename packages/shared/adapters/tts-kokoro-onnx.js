@@ -3,8 +3,15 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { withTempDir } from '../lifecycle/tempfiles.js';
+import { composeAbortSignals } from '../lifecycle/abort-signals.js';
 import { getBackendStatus, BACKEND_UP } from '../health/backend-health-cache.js';
 import { probeHttpService } from '../health/probes.js';
+
+// WR-02: re-exported so existing callers/tests that import composeAbortSignals from this
+// module keep working unchanged — the real implementation now lives in
+// ../lifecycle/abort-signals.js, which imports nothing, so probes.js and this module no
+// longer import from each other.
+export { composeAbortSignals };
 
 const execFileAsync = promisify(execFile);
 
@@ -16,19 +23,6 @@ const execFileAsync = promisify(execFile);
 // silently disagree with what this adapter actually calls.
 export function getKokoroServiceUrl(ttsConfig = {}) {
   return ttsConfig.serviceUrl || process.env.KOKORO_TTS_URL || 'http://127.0.0.1:4319';
-}
-
-// Composes any number of possibly-undefined AbortSignals into one that aborts when any of
-// them does, using the standard library's own composition rather than hand-rolled listener
-// bookkeeping. A caller's signal must never simply replace an existing timeout-derived
-// signal here — dropping the timeout would turn a downed speech backend from a fast failure
-// into a hang, the fixed per-turn penalty OPS-05 exists to remove in Phase 3. Exported so the
-// abort-threading test can verify composed behavior directly, without a live network call.
-export function composeAbortSignals(...signals) {
-  const present = signals.filter(Boolean);
-  if (present.length === 0) return undefined;
-  if (present.length === 1) return present[0];
-  return AbortSignal.any(present);
 }
 
 // DEBT-04: a configured speed is either honoured unchanged or refused by name — never

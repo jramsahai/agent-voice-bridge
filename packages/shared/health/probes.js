@@ -24,7 +24,7 @@ export async function probeExecutable(command) {
 
   if (hasPathSeparator) {
     const resolvedPath = path.isAbsolute(command) ? command : path.join(getRootDir(), command);
-    fs.accessSync(resolvedPath, fs.constants.X_OK);
+    await fs.promises.access(resolvedPath, fs.constants.X_OK);
     return;
   }
 
@@ -32,7 +32,7 @@ export async function probeExecutable(command) {
   for (const dir of pathEntries) {
     const candidate = path.join(dir, command);
     try {
-      fs.accessSync(candidate, fs.constants.X_OK);
+      await fs.promises.access(candidate, fs.constants.X_OK);
       return;
     } catch {
       // Not on this PATH entry — keep searching the rest.

@@ -60,16 +60,25 @@ function resolveAfconvertBin(options = {}) {
 // format-registry.js), the recipe for turning an arbitrary WAV into whisper-ready audio.
 // Found structurally rather than by a hardcoded wire id — this file must never contain a
 // registered format id as a quoted literal (test/format-registry.test.js's one-row-change
-// scan enforces that), and finding the recipe this way means adding a second container row
-// later cannot break this lookup by requiring a new literal here.
-function resolveWhisperConversionRecipe() {
-  const row = Object.values(AUDIO_FORMATS).find((entry) => entry.afconvertDataFormat != null);
-  if (!row) {
+// scan enforces that). DEBT-06: adding a second afconvert-carrying row now stops this lookup
+// with a named error rather than silently taking the first — a maintainer adding such a row
+// must decide explicitly which row is the whisper recipe. `registry` defaults to AUDIO_FORMATS
+// and is the only seam that makes the ambiguous case reachable from a test against a frozen
+// registry.
+export function resolveWhisperConversionRecipe(registry = AUDIO_FORMATS) {
+  const matches = Object.entries(registry).filter(([, entry]) => entry.afconvertDataFormat != null);
+  if (matches.length === 0) {
     throw new Error(
       'convert.js: no registry row supplies the afconvert tokens needed to reach whisper-ready audio',
     );
   }
-  return row;
+  if (matches.length > 1) {
+    const ids = matches.map(([id]) => id).join(', ');
+    throw new Error(
+      `convert.js: registry supplies more than one afconvert recipe (${ids}) — a maintainer must decide which row is the whisper recipe`,
+    );
+  }
+  return matches[0][1];
 }
 
 function matchesTarget(sourceFormat, target) {

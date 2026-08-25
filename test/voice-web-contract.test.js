@@ -415,13 +415,25 @@ test('the browser client stays deliberately below the published client read-time
 // arrow event listeners (pointerdown and keydown), which extractFunctionSource/loadBrowserFunction
 // cannot reach — they anchor on a top-level `function name(` declaration — so this is a
 // source-shape assertion by necessity, not by preference.
+// WR-01 (10-REVIEW.md) / Success Criterion 3 (10-VERIFICATION.md), Plan 10-05: this test's
+// subject moved from "each of two inline listener bodies" to "the single beginRecording()
+// choke point plus each listener's delegation to it" — the consolidation collapses what were
+// two await ensureRecorder() call sites into one, so the sanity premise below now asserts
+// exactly one rather than at least two.
 test('every awaited ensureRecorder() call site is wrapped in a catch that surfaces the failure and stops', () => {
   const callSites = appJsSource.match(/await ensureRecorder\(\)/g) ?? [];
+  assert.equal(
+    callSites.length,
+    1,
+    `Plan 10-05 consolidated the pointer and keyboard trigger paths into the single beginRecording() choke ` +
+      `point, so exactly one await ensureRecorder() call site is expected; found ${callSites.length}. A second ` +
+      'call site reappearing means a path bypassed the choke point.',
+  );
+
+  const beginRecordingSource = extractFunctionSource('beginRecording');
   assert.ok(
-    callSites.length >= 2,
-    `sanity premise: apps/voice-web/app.js must await ensureRecorder() at least twice (the pointer path and the ` +
-      `keyboard path); found ${callSites.length}. If a path was deliberately removed, this premise is what needs ` +
-      'updating — do not weaken the guarded-count equality below.',
+    beginRecordingSource.includes('await ensureRecorder()'),
+    'the sole await ensureRecorder() call site must live inside beginRecording()',
   );
 
   const guardPattern = /try\s*\{\s*await ensureRecorder\(\);\s*\}\s*catch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{([^{}]*)\}/g;
@@ -431,7 +443,7 @@ test('every awaited ensureRecorder() call site is wrapped in a catch that surfac
     guarded.length,
     callSites.length,
     `every awaited ensureRecorder() call must sit inside a try/catch: ${callSites.length} call sites but ` +
-      `${guarded.length} guarded ones. A removed guard, or a newly added third call site left unguarded, fails here ` +
+      `${guarded.length} guarded ones. A removed guard, or a newly added second call site left unguarded, fails here ` +
       'rather than passing silently — a getUserMedia rejection with no catch is an unhandled rejection the user never sees.',
   );
 
@@ -473,26 +485,45 @@ test('every awaited ensureRecorder() call site is wrapped in a catch that surfac
 // server enforces that, not this file (RESEARCH.md Pitfall 4).
 // =====================================================================================
 
+// WR-01 (10-REVIEW.md) / Success Criterion 3 (10-VERIFICATION.md), Plan 10-05: this test's
+// subject moved from "each of two inline listener bodies" to "the single beginRecording()
+// choke point plus each listener's delegation to it" — mediaRecorder.start() now has exactly
+// one call site (inside beginRecording()), so the recording-start *paths* this test walks are
+// the two await beginRecording() call sites, not two mediaRecorder.start() sites.
 test('every path that starts a recording is preceded by a token-presence refusal in the same listener', () => {
   const recordingStarts = [...appJsSource.matchAll(/mediaRecorder\.start\(\)/g)];
+  assert.equal(
+    recordingStarts.length,
+    1,
+    `Plan 10-05 consolidated the pointer and keyboard trigger paths into the single beginRecording() choke ` +
+      `point, so exactly one mediaRecorder.start() call is expected; found ${recordingStarts.length}.`,
+  );
+
+  const beginRecordingSource = extractFunctionSource('beginRecording');
   assert.ok(
-    recordingStarts.length >= 2,
-    `sanity premise: apps/voice-web/app.js must call mediaRecorder.start() at least twice (the pointer path and ` +
-      `the keyboard path); found ${recordingStarts.length}. If a path was deliberately removed, this premise is ` +
+    beginRecordingSource.includes('mediaRecorder.start()'),
+    'the sole mediaRecorder.start() call must live inside beginRecording()',
+  );
+
+  const chokePointCalls = [...appJsSource.matchAll(/await beginRecording\(\)/g)];
+  assert.ok(
+    chokePointCalls.length >= 2,
+    `sanity premise: apps/voice-web/app.js must await beginRecording() at least twice (the pointer path and ` +
+      `the keyboard path); found ${chokePointCalls.length}. If a path was deliberately removed, this premise is ` +
       'what needs updating — do not weaken the guarded-count equality below.',
   );
 
   const refusals = [...appJsSource.matchAll(/if\s*\(\s*!hasToken\(\)\s*\)/g)];
   assert.equal(
     refusals.length,
-    recordingStarts.length,
-    `every recording-start site must be preceded by a token-presence refusal: ${recordingStarts.length} ` +
-      `recording-start site(s) but ${refusals.length} refusal(s). A newly added third recording-start site left ` +
+    chokePointCalls.length,
+    `every path reaching beginRecording() must be preceded by a token-presence refusal: ${chokePointCalls.length} ` +
+      `choke-point call site(s) but ${refusals.length} refusal(s). A newly added third trigger path left ` +
       'unguarded fails here rather than shipping silently.',
   );
 
   const listenerRegistrationPattern = /addEventListener\(/g;
-  for (const startMatch of recordingStarts) {
+  for (const startMatch of chokePointCalls) {
     let nearestListenerIndex = -1;
     listenerRegistrationPattern.lastIndex = 0;
     let listenerMatch;
@@ -502,13 +533,13 @@ test('every path that starts a recording is preceded by a token-presence refusal
     }
     assert.ok(
       nearestListenerIndex !== -1,
-      `expected an addEventListener( registration preceding the recording-start call at index ${startMatch.index}`,
+      `expected an addEventListener( registration preceding the beginRecording() call at index ${startMatch.index}`,
     );
     const slice = appJsSource.slice(nearestListenerIndex, startMatch.index);
     assert.match(
       slice,
       /if\s*\(\s*!hasToken\(\)\s*\)/,
-      'the token-presence refusal must sit inside the same listener that reaches the recording start — this is ' +
+      'the token-presence refusal must sit inside the same listener that reaches beginRecording() — this is ' +
         'what proves the guard is inside the same listener, not merely somewhere else in the file',
     );
   }
@@ -693,5 +724,180 @@ test('the comment above ensureRecorder describes releasing the stream rather tha
     !commentBlock.includes('is intentional, not an oversight'),
     'the comment must no longer carry the pre-fix claim that holding the stream open is deliberate — that ' +
       'trade is no longer real (RESEARCH.md assumption A1)',
+  );
+});
+
+// =====================================================================================
+// WR-01 (10-REVIEW.md) / Success Criterion 3 (10-VERIFICATION.md), Plan 10-05: DEBT-09's own
+// fix reopened a cross-input-path TOCTOU race on every turn. releaseMicStream() nulls
+// mediaRecorder after each turn, so ensureRecorder()'s `if (mediaRecorder) return;` guard —
+// which used to short-circuit synchronously for the whole life of the page after the first
+// turn — can be passed concurrently by the pointer and the keyboard path on every single
+// turn. beginRecording() closes that window with a synchronous isAcquiring flag read and set
+// before the first await. This defect is live at HEAD (beginRecording does not exist yet), so
+// its RED direction needs no historical worktree — all seven assertions below (five new, two
+// retargeted above) were run against the unfixed file first.
+// =====================================================================================
+
+test('beginRecording acquires exactly one microphone stream when both trigger paths fire inside one acquisition window', () => {
+  // This file's loadBrowserFunction builds its factory once and calls it once, so the
+  // injected deps live in that factory's own scope and the returned function closes over
+  // them — two calls to the returned beginRecording function share one isAcquiring binding.
+  // That property is what makes this a real concurrent-execution assertion rather than a
+  // structural one; a later "improvement" that rebuilds the function per call would silently
+  // make it unable to fail. (The caller still cannot read the flag's value back — that
+  // limitation, recorded in the DEBT-09 bindings test above, is unchanged.)
+  let acquisitionCount = 0;
+  let releaseAcquisition;
+  const gate = new Promise((resolve) => { releaseAcquisition = resolve; });
+  const fakeMediaRecorder = { startCalls: 0, start() { fakeMediaRecorder.startCalls++; } };
+
+  const beginRecording = loadBrowserFunction('beginRecording', {
+    isBusy: false,
+    isRecording: false,
+    isAcquiring: false,
+    async ensureRecorder() {
+      acquisitionCount++;
+      await gate;
+    },
+    setStatus: () => {},
+    setHint: () => {},
+    releaseMicStream: () => {},
+    recordedChunks: [],
+    mediaRecorder: fakeMediaRecorder,
+  });
+
+  const firstCall = beginRecording();
+  const secondCall = beginRecording();
+  releaseAcquisition();
+
+  return Promise.all([firstCall, secondCall]).then(([firstResult, secondResult]) => {
+    assert.equal(
+      acquisitionCount,
+      1,
+      'exactly one ensureRecorder() acquisition must occur when two triggers fire inside one acquisition window',
+    );
+    assert.equal(firstResult, true, 'the first (winning) trigger must resolve true');
+    assert.equal(secondResult, false, 'the second (losing) trigger must be refused (resolve false), not queued');
+    assert.equal(fakeMediaRecorder.startCalls, 1, 'mediaRecorder.start() must be called exactly once');
+  });
+});
+
+test('beginRecording clears its acquisition flag when the microphone is refused, so a later trigger is not locked out', async () => {
+  let ensureRecorderCallCount = 0;
+  const fakeMediaRecorder = { startCalls: 0, start() { fakeMediaRecorder.startCalls++; } };
+
+  const beginRecording = loadBrowserFunction('beginRecording', {
+    isBusy: false,
+    isRecording: false,
+    isAcquiring: false,
+    async ensureRecorder() {
+      ensureRecorderCallCount++;
+      if (ensureRecorderCallCount === 1) throw new Error('denied');
+    },
+    setStatus: () => {},
+    setHint: () => {},
+    releaseMicStream: () => {},
+    recordedChunks: [],
+    mediaRecorder: fakeMediaRecorder,
+  });
+
+  const firstResult = await beginRecording();
+  assert.equal(firstResult, false, 'a denied microphone must resolve false');
+
+  const secondResult = await beginRecording();
+  assert.equal(
+    secondResult,
+    true,
+    'a later trigger must not be locked out by a flag left set from the thrown path — the flag must be cleared ' +
+      'in a finally, not only on the successful path',
+  );
+  assert.equal(
+    fakeMediaRecorder.startCalls,
+    1,
+    'the acquisition counter (recorder starts) must reach exactly 1 on the successful path — proving the flag ' +
+      'was cleared by the finally rather than left set by the thrown path, which would have refused this second call too',
+  );
+});
+
+test('a microphone acquisition that fails part-way releases the stream it already took', async () => {
+  const releaseCalls = [];
+
+  const beginRecording = loadBrowserFunction('beginRecording', {
+    isBusy: false,
+    isRecording: false,
+    isAcquiring: false,
+    async ensureRecorder() {
+      throw new Error('recorder construction failed');
+    },
+    setStatus: () => {},
+    setHint: () => {},
+    releaseMicStream: () => releaseCalls.push('release'),
+    recordedChunks: [],
+    mediaRecorder: {},
+  });
+
+  const result = await beginRecording();
+
+  assert.equal(result, false, 'a part-way acquisition failure must resolve false');
+  assert.equal(
+    releaseCalls.length,
+    1,
+    'ensureRecorder() assigns stream before it constructs the MediaRecorder, so a construction failure leaves a ' +
+      'live stream unreachable from every binding releaseMicStream() reads unless beginRecording() releases it ' +
+      'itself right here',
+  );
+});
+
+test('the acquisition guard is read and set synchronously, before the first await', () => {
+  const beginRecordingSource = extractFunctionSource('beginRecording');
+
+  const guardIndex = beginRecordingSource.indexOf('isAcquiring');
+  assert.ok(guardIndex !== -1, "sanity premise: expected 'isAcquiring' to occur in beginRecording()'s source");
+
+  const setIndex = beginRecordingSource.indexOf('isAcquiring = true');
+  assert.ok(setIndex !== -1, "expected an 'isAcquiring = true' assignment in beginRecording()");
+  assert.ok(
+    guardIndex < setIndex,
+    'the guard condition naming the acquisition flag must occur before the assignment that sets it true',
+  );
+
+  const awaitIndex = beginRecordingSource.indexOf('await');
+  assert.ok(awaitIndex !== -1, "sanity premise: expected an 'await' in beginRecording()'s source");
+  assert.ok(
+    setIndex < awaitIndex,
+    'a flag set after the await is exactly the check-then-act window this gap closed — the assignment must ' +
+      'occur before the first await',
+  );
+
+  // Located by the keyword form, not a bare-word search: IN-01 (10-REVIEW.md) documents how
+  // a bare-substring search for the finally keyword can match the word inside a comment.
+  // That correction is Plan 10-08's; this new test must not reproduce the pattern it corrects.
+  const finallyMatch = /\}\s*finally\s*\{/.exec(beginRecordingSource);
+  assert.ok(finallyMatch, "expected a '} finally {' block in beginRecording()");
+
+  const clearIndex = beginRecordingSource.indexOf('isAcquiring = false', finallyMatch.index);
+  assert.ok(
+    clearIndex !== -1 && clearIndex > finallyMatch.index,
+    'the assignment that clears the acquisition flag must occur after the finally keyword',
+  );
+});
+
+test('neither trigger listener runs its recording UI after beginRecording refuses', () => {
+  const refusalPattern = /if\s*\(\s*!\s*\(\s*await beginRecording\(\)\s*\)\s*\)\s*return;/g;
+  const refusals = [...appJsSource.matchAll(refusalPattern)];
+  const chokePointCalls = [...appJsSource.matchAll(/await beginRecording\(\)/g)];
+
+  assert.equal(
+    refusals.length,
+    2,
+    `expected exactly two refusal-and-return sites of the form 'if (!(await beginRecording())) return;'; found ` +
+      `${refusals.length}`,
+  );
+  assert.equal(
+    refusals.length,
+    chokePointCalls.length,
+    'every await beginRecording() call site must be a negated refusal-and-return — a call site that does not ' +
+      'check the result would run its recording UI even after beginRecording() refused',
   );
 });

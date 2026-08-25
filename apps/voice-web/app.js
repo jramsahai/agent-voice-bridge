@@ -16,6 +16,7 @@ let recordedChunks = [];
 let decodeAudioContext;
 let isBusy = false;
 let isRecording = false;
+let isAcquiring = false;
 let lastPlayerObjectUrl = null;
 
 // WR-06 (05-REVIEW.md): without this, a hung backend leaves the fetch promise never settling
@@ -472,13 +473,20 @@ function hasToken() {
   return Boolean(tokenEl.value.trim());
 }
 
-ptt.addEventListener('pointerdown', async () => {
-  if (isBusy || isRecording) return;
-  if (!hasToken()) {
-    setStatus('Enter the shared access token first.');
-    setHint('The token is saved in this browser after you enter it.');
-    return;
-  }
+// WR-01 (10-REVIEW.md): before this fix, ensureRecorder()'s own existence-check guard only
+// protected against a same-path repeat — the pointer and keyboard listeners each awaited
+// ensureRecorder() independently, so a trigger from the *other* input path arriving inside
+// that await could pass the guard too, acquire its own getUserMedia() stream, and orphan
+// whichever stream lost the race for the module-scope bindings (Success Criterion 3,
+// 10-VERIFICATION.md). isAcquiring is read and set here, synchronously, before the first
+// await, so a trigger arriving from the other input path is refused synchronously — the same
+// silent early return a same-path repeat already gets. The losing trigger is refused, not
+// queued: one physical press means one recording, and awaiting the in-flight acquisition
+// would either start a second recording against the one recorder or hand the loser a
+// recorder the winner is already driving.
+async function beginRecording() {
+  if (isBusy || isRecording || isAcquiring) return false;
+  isAcquiring = true;
   // WR-05 (05-REVIEW.md): getUserMedia() rejects on a denied/missing microphone with no
   // handler here previously — an unhandled rejection with zero visible feedback to the
   // user, the single most common real-world failure mode for a mic app.
@@ -487,11 +495,29 @@ ptt.addEventListener('pointerdown', async () => {
   } catch (error) {
     setStatus('Could not access the microphone.');
     setHint(error.message || 'Check microphone permissions and try again.');
-    return;
+    // Gap-closure reversal of Plan 10-03's explicit scoping-out of the abandoned-stream
+    // path: ensureRecorder() assigns `stream` before constructing the MediaRecorder, so a
+    // construction failure here leaves a live stream unreachable from every binding the
+    // release below reads unless it runs right here.
+    releaseMicStream();
+    return false;
+  } finally {
+    isAcquiring = false;
   }
   recordedChunks = [];
   mediaRecorder.start();
   isRecording = true;
+  return true;
+}
+
+ptt.addEventListener('pointerdown', async () => {
+  if (isBusy || isRecording) return;
+  if (!hasToken()) {
+    setStatus('Enter the shared access token first.');
+    setHint('The token is saved in this browser after you enter it.');
+    return;
+  }
+  if (!(await beginRecording())) return;
   ptt.classList.add('recording');
   ptt.classList.remove('processing');
   ptt.textContent = 'Release to send';
@@ -519,16 +545,7 @@ window.addEventListener('keydown', async (event) => {
       setHint('The token is saved in this browser after you enter it.');
       return;
     }
-    try {
-      await ensureRecorder();
-    } catch (error) {
-      setStatus('Could not access the microphone.');
-      setHint(error.message || 'Check microphone permissions and try again.');
-      return;
-    }
-    recordedChunks = [];
-    mediaRecorder.start();
-    isRecording = true;
+    if (!(await beginRecording())) return;
     ptt.classList.add('recording');
     ptt.textContent = 'Release to send';
     setStatus('Recording...');

@@ -625,7 +625,12 @@ const HTTP_TURN_TEST_FILE = path.join(TEST_DIR, 'http-turn.test.js');
 // convention above, so neither pattern can appear as a plain literal substring inside this
 // file and trip the self-scan test below.
 const SET_TIMEOUT_CALL_REGEX_SAFE = ['setTimeout', '\\('].join('');
-const FIXED_DELAY_PATTERN = [SET_TIMEOUT_CALL_REGEX_SAFE, '\\s*resolve\\s*,\\s*', '\\d'].join('');
+// Extracts every timer call's delay argument, not only one anticipated bad form (WR-02,
+// 10-REVIEW.md): a named constant, a variable, or a wrapped callback are all real
+// fixed-duration sleeps that would defeat this guard's purpose while passing the narrower,
+// digit-only pattern silently. The callback argument is consumed as a non-comma run so this
+// still matches a resolver name or a wrapped arrow callback alike.
+const DELAY_ARGUMENT_PATTERN = [SET_TIMEOUT_CALL_REGEX_SAFE, '[^,]+', ',\\s*', '([^)]+)', '\\)'].join('');
 const POLLING_TICK_PATTERN = [SET_TIMEOUT_CALL_REGEX_SAFE, '\\s*resolve\\s*,\\s*', 'intervalMs'].join('');
 
 test(
@@ -641,12 +646,17 @@ test(
         'renamed or removed, this premise is what needs updating',
     );
 
-    const forbiddenMatches = source.match(new RegExp(FIXED_DELAY_PATTERN, 'g')) ?? [];
+    const delayMatches = [...source.matchAll(new RegExp(DELAY_ARGUMENT_PATTERN, 'g'))];
+    const badDelayArguments = delayMatches
+      .map((match) => match[1].trim())
+      .filter((delayArgument) => delayArgument !== 'intervalMs');
     assert.equal(
-      forbiddenMatches.length,
+      badDelayArguments.length,
       0,
-      'test/http-turn.test.js must schedule no timer whose delay is a numeric literal — a fixed-duration sleep ' +
-        'makes the test pass or fail on machine load rather than on the condition it is meant to wait for',
+      'test/http-turn.test.js must schedule no timer whose delay argument is anything but the polling helper\'s ' +
+        'own intervalMs identifier — a numeric literal, a named constant, or a variable all make the test pass ' +
+        'or fail on machine load rather than on the condition it is meant to wait for. Offending delay ' +
+        `argument(s): ${badDelayArguments.join(', ')}`,
     );
 
     const requiredMatches = source.match(new RegExp(POLLING_TICK_PATTERN, 'g')) ?? [];
@@ -656,5 +666,58 @@ test(
       "expected exactly one identifier-delay timer tick — the polling helper's own intervalMs tick. Its " +
         'disappearance means this scan has stopped measuring anything.',
     );
+  },
+);
+
+// WR-02's non-vacuity control: fixtures, not the scanned file, so a later edit that narrows
+// DELAY_ARGUMENT_PATTERN back to digits-only or widens it into matching nothing fails this
+// test rather than the guard above silently reporting clean. Every fixture is built by
+// concatenation, this file's own array-join convention, so a future extension pointing the
+// delay scan at this file cannot flag its own negative controls.
+const DELAY_PATTERN_FIXTURES = [
+  {
+    label: 'a resolver with a numeric-literal delay',
+    source: ['setTimeout', '(', 'resolve', ', ', '500', ')'].join(''),
+    expectPollingIdentifier: false,
+  },
+  {
+    label: 'a resolver with a named-constant delay',
+    source: ['setTimeout', '(', 'resolve', ', ', 'DELAY_MS', ')'].join(''),
+    expectPollingIdentifier: false,
+  },
+  {
+    label: 'a wrapped callback with a numeric-literal delay',
+    source: ['setTimeout', '(', '() => resolve()', ', ', '500', ')'].join(''),
+    expectPollingIdentifier: false,
+  },
+  {
+    label: 'a resolver with the polling identifier as its delay',
+    source: ['setTimeout', '(', 'resolve', ', ', 'intervalMs', ')'].join(''),
+    expectPollingIdentifier: true,
+  },
+];
+
+test(
+  'the no-fixed-sleep guard flags a delay argument written in any form, not only as a numeric literal',
+  () => {
+    for (const fixture of DELAY_PATTERN_FIXTURES) {
+      const match = new RegExp(DELAY_ARGUMENT_PATTERN).exec(fixture.source);
+      assert.ok(match, `sanity: expected the delay pattern to match a call written as ${fixture.label}`);
+      const delayArgument = match[1].trim();
+      if (fixture.expectPollingIdentifier) {
+        assert.equal(
+          delayArgument,
+          'intervalMs',
+          `a call written as ${fixture.label} must extract exactly the polling identifier`,
+        );
+      } else {
+        assert.notEqual(
+          delayArgument,
+          'intervalMs',
+          `a call written as ${fixture.label} is a real fixed-duration sleep — the pattern must extract a ` +
+            'delay argument other than the polling identifier so the guard above flags it',
+        );
+      }
+    }
   },
 );

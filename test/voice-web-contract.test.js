@@ -677,8 +677,13 @@ test('releaseMicStream clears both module bindings so the next turn re-acquires 
 
 test('stopAndSend releases the microphone in its finally block, so the release survives the error path', () => {
   const stopAndSendSource = extractFunctionSource('stopAndSend');
-  const finallyIndex = stopAndSendSource.lastIndexOf('finally');
-  assert.ok(finallyIndex !== -1, "sanity premise: stopAndSend must contain a 'finally' block");
+  // Located by the keyword form, not a bare-word search: IN-01 (10-REVIEW.md) documents how
+  // a bare-substring search for the finally keyword can be defeated by a comment mentioning
+  // that word after the real block header — matching the convention Plan 10-05's newer test
+  // (`the acquisition guard is read and set synchronously, before the first await`) already uses.
+  const finallyMatch = /\}\s*finally\s*\{/.exec(stopAndSendSource);
+  assert.ok(finallyMatch, "sanity premise: stopAndSend must contain a '} finally {' block");
+  const finallyIndex = finallyMatch.index;
 
   const callMatches = [...stopAndSendSource.matchAll(/releaseMicStream\(\)/g)];
   assert.equal(

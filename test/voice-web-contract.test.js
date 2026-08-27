@@ -687,9 +687,24 @@ test('stopAndSend releases the microphone in its finally block, so the release s
   // a bare-substring search for the finally keyword can be defeated by a comment mentioning
   // that word after the real block header — matching the convention Plan 10-05's newer test
   // (`the acquisition guard is read and set synchronously, before the first await`) already uses.
-  const finallyMatch = /\}\s*finally\s*\{/.exec(stopAndSendSource);
-  assert.ok(finallyMatch, "sanity premise: stopAndSend must contain a '} finally {' block");
-  const finallyIndex = finallyMatch.index;
+  // WR-02 (10-REVIEW.md): the keyword form alone was insufficient, because stopAndSend()
+  // contains TWO `} finally {` blocks — the inner one guarding clearTimeout around the fetch
+  // call, and the outer one that actually contains releaseMicStream() — and a non-global
+  // `.exec()` returns only the first (inner) match, so the old comparison held regardless of
+  // which block the call was really in. The locator now walks every occurrence and takes the
+  // last, on the premise that textually-last-is-outermost holds at this one level of nesting;
+  // the exact-count assertion below is what makes a future third `finally` fail loudly instead
+  // of silently re-opening the same hole.
+  const finallyMatches = [...stopAndSendSource.matchAll(/\}\s*finally\s*\{/g)];
+  assert.equal(
+    finallyMatches.length,
+    2,
+    `expected exactly two '} finally {' blocks in stopAndSend — the inner one guarding clearTimeout around ` +
+      `the fetch call, and the outer one containing releaseMicStream(); found ${finallyMatches.length}. A ` +
+      'third occurrence means the nesting changed and the textually-last-is-outermost assumption this test ' +
+      'rests on must be re-derived, not simply bumped.',
+  );
+  const outerFinallyIndex = finallyMatches[finallyMatches.length - 1].index;
 
   const callMatches = [...stopAndSendSource.matchAll(/releaseMicStream\(\)/g)];
   assert.equal(
@@ -699,10 +714,11 @@ test('stopAndSend releases the microphone in its finally block, so the release s
   );
 
   assert.ok(
-    callMatches[0].index > finallyIndex,
-    'releaseMicStream() must be called inside the finally block, after the finally keyword — a release placed ' +
-      'in the try body instead would be skipped by every thrown error, which is precisely the path this ' +
-      'requirement calls out',
+    callMatches[0].index > outerFinallyIndex,
+    'releaseMicStream() must be called inside the OUTERMOST finally block — a placement anywhere in the try ' +
+      'body between the two finally blocks (after the response bytes are read, inside the non-ok branch, ' +
+      'inside the splitter catch) is inside the try, is skipped by a thrown error, and would satisfy a ' +
+      'comparison made against the inner block instead',
   );
 });
 

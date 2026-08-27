@@ -165,6 +165,25 @@ function extractFunctionSource(name) {
   return source;
 }
 
+// Walks brace depth forward from an opening brace and returns the index of the closing
+// brace that matches it — the OUTER close of a nested block, never the first closing
+// brace encountered. Raw-text walk, no lexer: a brace inside a string, template, regex
+// or comment in the scanned region would desynchronize the depth counter, which is why
+// every call site pairs this with a region-purity check rather than trusting it alone.
+// Throws rather than returning a fallback index on unbalanced input — a wrong index here
+// would silently produce exactly the class of false certificate WR-04 exists to remove.
+function findMatchingClose(source, openBraceIndex) {
+  let depth = 0;
+  for (let i = openBraceIndex; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  throw new Error(`unbalanced braces: no matching close found for the opening brace at index ${openBraceIndex}`);
+}
+
 // Builds a callable out of a function's own extracted source, injecting `deps` as
 // parameter names so each shadows the module-scope binding the extracted function refers
 // to by name — no import is added; new Function needs none.
@@ -681,6 +700,35 @@ test('releaseMicStream clears both module bindings so the next turn re-acquires 
   );
 });
 
+test('findMatchingClose returns the brace closing the block it was given, not the first closing brace it meets', () => {
+  const flatBlock = '{ a; b; }';
+  assert.equal(
+    findMatchingClose(flatBlock, 0),
+    flatBlock.length - 1,
+    'a flat block with no nesting must resolve to its own single closing brace',
+  );
+
+  const nestedBlock = '{ if (x) { y(); } z(); }';
+  const naiveFirstClose = nestedBlock.indexOf('}');
+  const trueOuterClose = nestedBlock.length - 1;
+  assert.notEqual(
+    naiveFirstClose,
+    trueOuterClose,
+    'sanity premise: this fixture must make a first-match scan wrong, or the test proves nothing',
+  );
+  assert.equal(
+    findMatchingClose(nestedBlock, 0),
+    trueOuterClose,
+    'a block containing a nested block must resolve to the OUTER close, not the first closing brace a naive scan meets',
+  );
+
+  assert.throws(
+    () => findMatchingClose('{ a; b;', 0),
+    /unbalanced braces/,
+    'unbalanced input must throw rather than return a wrong index',
+  );
+});
+
 test('stopAndSend releases the microphone in its finally block, so the release survives the error path', () => {
   const stopAndSendSource = extractFunctionSource('stopAndSend');
   // Located by the keyword form, not a bare-word search: IN-01 (10-REVIEW.md) documents how
@@ -695,6 +743,12 @@ test('stopAndSend releases the microphone in its finally block, so the release s
   // last, on the premise that textually-last-is-outermost holds at this one level of nesting;
   // the exact-count assertion below is what makes a future third `finally` fail loudly instead
   // of silently re-opening the same hole.
+  // WR-01 (10-REVIEW.md), tracked as WR-04 in this gap-closure round's own numbering
+  // (10-VERIFICATION.md): the last-match retarget fixed which block the check anchors on but
+  // left the check one-sided, proving only that the call is after the block's opening brace —
+  // a release moved past the block's own closing brace passed that check on a source carrying
+  // the exact regression this test names. The check below is now a containment check bounded
+  // by the block's own matching braces, located by findMatchingClose.
   const finallyMatches = [...stopAndSendSource.matchAll(/\}\s*finally\s*\{/g)];
   assert.equal(
     finallyMatches.length,
@@ -713,12 +767,32 @@ test('stopAndSend releases the microphone in its finally block, so the release s
     `expected exactly one releaseMicStream() call in stopAndSend; found ${callMatches.length}`,
   );
 
+  const outerFinallyOpenBrace = stopAndSendSource.indexOf('{', outerFinallyIndex);
+  const outerFinallyCloseBrace = findMatchingClose(stopAndSendSource, outerFinallyOpenBrace);
+
+  // findMatchingClose is a lexer-free scan: a brace inside a string, template, regex or
+  // comment within the scanned region would desynchronize the depth counter. Today's outer
+  // finally body holds three bare statements and no such literal, so the hazard is not live —
+  // guarded anyway, because a pin must fail loudly when its premise stops holding rather than
+  // mis-locate silently. Sound rather than circular: a stray opening brace inside a literal
+  // only extends the computed region, and a stray closing brace inside a literal only
+  // truncates it to a point still after that literal's own opening delimiter — so in either
+  // desync direction the computed region still contains the offending quote or comment
+  // marker, and this assertion fires. If it ever does fire, re-derive the locator against the
+  // new body; do not relax this guard.
+  const outerFinallyRegion = stopAndSendSource.slice(outerFinallyOpenBrace, outerFinallyCloseBrace + 1);
   assert.ok(
-    callMatches[0].index > outerFinallyIndex,
-    'releaseMicStream() must be called inside the OUTERMOST finally block — a placement anywhere in the try ' +
-      'body between the two finally blocks (after the response bytes are read, inside the non-ok branch, ' +
-      'inside the splitter catch) is inside the try, is skipped by a thrown error, and would satisfy a ' +
-      'comparison made against the inner block instead',
+    !/['"`]/.test(outerFinallyRegion) && !outerFinallyRegion.includes('//') && !outerFinallyRegion.includes('/*'),
+    'the outer finally region must contain no quote character and no comment-opening sequence — a brace ' +
+      'inside a string, template, regex or comment here would desynchronize findMatchingClose\'s raw-text walk',
+  );
+
+  assert.ok(
+    callMatches[0].index > outerFinallyOpenBrace && callMatches[0].index < outerFinallyCloseBrace,
+    'releaseMicStream() must be called strictly inside the OUTERMOST finally block\'s own braces: a call ' +
+      'placed after that block closes is skipped by every early return inside the try body (the TURN_BUSY ' +
+      'branch, the non-ok branch, and the splitter catch), and a call placed in the try body before the ' +
+      'block is skipped by a thrown error',
   );
 });
 
@@ -930,10 +1004,11 @@ test('neither trigger listener runs its recording UI after beginRecording refuse
 });
 
 // =====================================================================================
-// WR-03 (10-REVIEW.md, this gap-closure run's numbering) / Success Criterion 3
-// (10-VERIFICATION.md): Plan 10-05's beginRecording() choke point closed the
-// cross-input-path acquisition race, but its own mediaRecorder.start() call still sat
-// outside the try/catch/finally it introduced. Per the MediaRecorder specification,
+// WR-01 (10-REVIEW.md), tracked as WR-03 in this gap-closure round's own numbering
+// (10-VERIFICATION.md) / Success Criterion 3 (10-VERIFICATION.md): Plan 10-05's
+// beginRecording() choke point closed the cross-input-path acquisition race, but its
+// own mediaRecorder.start() call still sat outside the try/catch/finally it
+// introduced. Per the MediaRecorder specification,
 // start() throws InvalidStateError when the stream carries no live track — reachable if
 // the track stops being live in the narrow window between getUserMedia() resolving
 // (inside ensureRecorder()) and this call: an external microphone disconnecting, the OS

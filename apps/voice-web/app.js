@@ -484,7 +484,8 @@ function hasToken() {
 // queued: one physical press means one recording, and awaiting the in-flight acquisition
 // would either start a second recording against the one recorder or hand the loser a
 // recorder the winner is already driving.
-// WR-03 (10-REVIEW.md, gap-closure round 2): the recorder start call now sits inside this
+// WR-01 (10-REVIEW.md), tracked as WR-03 in this gap-closure round's own numbering
+// (10-VERIFICATION.md): the recorder start call now sits inside this
 // same guarded block, following its own recordedChunks reset. Per the MediaRecorder
 // specification the start call throws InvalidStateError when the stream has no live track,
 // which is reachable when the acquired track dies between the acquisition resolving and the

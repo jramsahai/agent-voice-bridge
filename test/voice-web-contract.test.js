@@ -436,7 +436,13 @@ test('every awaited ensureRecorder() call site is wrapped in a catch that surfac
     'the sole await ensureRecorder() call site must live inside beginRecording()',
   );
 
-  const guardPattern = /try\s*\{\s*await ensureRecorder\(\);\s*\}\s*catch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{([^{}]*)\}/g;
+  // Plan 10-09 moved the recorder start call inside this same guarded block, so the try body
+  // now carries statements after the awaited acquisition. The inserted (?:[^{}]*) segment is
+  // non-capturing (existing capture indices for the catch-binding name and catch body below
+  // are unshifted) and deliberately brace-free: a nested block, an if, or a second try added
+  // to the guarded body drops the match count to zero and fails loudly rather than passing,
+  // which is what keeps this guard's teeth after the body was allowed to grow.
+  const guardPattern = /try\s*\{\s*await ensureRecorder\(\);(?:[^{}]*)\}\s*catch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{([^{}]*)\}/g;
   const guarded = [...appJsSource.matchAll(guardPattern)];
 
   assert.equal(
@@ -904,5 +910,150 @@ test('neither trigger listener runs its recording UI after beginRecording refuse
     chokePointCalls.length,
     'every await beginRecording() call site must be a negated refusal-and-return — a call site that does not ' +
       'check the result would run its recording UI even after beginRecording() refused',
+  );
+});
+
+// =====================================================================================
+// WR-03 (10-REVIEW.md, this gap-closure run's numbering) / Success Criterion 3
+// (10-VERIFICATION.md): Plan 10-05's beginRecording() choke point closed the
+// cross-input-path acquisition race, but its own mediaRecorder.start() call still sat
+// outside the try/catch/finally it introduced. Per the MediaRecorder specification,
+// start() throws InvalidStateError when the stream carries no live track — reachable if
+// the track stops being live in the narrow window between getUserMedia() resolving
+// (inside ensureRecorder()) and this call: an external microphone disconnecting, the OS
+// revoking a grant, another process claiming exclusive access. Before this fix, that
+// throw escaped as an unhandled promise rejection with no user feedback, left
+// mediaRecorder/stream non-null forever, and never set isRecording — wedging every later
+// trigger into ensureRecorder()'s own `if (mediaRecorder) return;` silent no-op for the
+// rest of the page's life.
+//
+// What the two executing tests below can and cannot observe: loadBrowserFunction builds
+// its factory once and calls it once, so injected deps live in that factory's scope and
+// the returned function closes over them — an injected releaseMicStream is a fake, and an
+// assignment the *real* releaseMicStream makes to stream/mediaRecorder rebinds a
+// parameter and is invisible to the caller. These two tests prove releaseMicStream() WAS
+// CALLED on the start-throw path; the pre-existing "releaseMicStream clears both module
+// bindings" test above proves that function nulls both bindings. It is the two together
+// that close the wedge — neither half alone is the whole argument.
+// =====================================================================================
+
+test('a recorder start that throws after a successful acquisition releases the stream and refuses instead of rejecting', async () => {
+  const releaseCalls = [];
+  const statusCalls = [];
+  const hintCalls = [];
+  const fakeMediaRecorder = {
+    startCalls: 0,
+    start() {
+      fakeMediaRecorder.startCalls++;
+      const error = new Error('The associated MediaStream has no live tracks.');
+      error.name = 'InvalidStateError';
+      throw error;
+    },
+  };
+
+  const beginRecording = loadBrowserFunction('beginRecording', {
+    isBusy: false,
+    isRecording: false,
+    isAcquiring: false,
+    async ensureRecorder() {},
+    setStatus: (message) => statusCalls.push(message),
+    setHint: (message) => hintCalls.push(message),
+    releaseMicStream: () => releaseCalls.push('release'),
+    recordedChunks: [],
+    mediaRecorder: fakeMediaRecorder,
+  });
+
+  const result = await beginRecording();
+
+  assert.equal(result, false, 'a recorder start that throws must resolve false, not reject');
+  assert.equal(releaseCalls.length, 1, 'releaseMicStream() must be called exactly once on the start-throw path');
+  assert.equal(statusCalls.length, 1, 'setStatus must be called exactly once with feedback about the failure');
+  assert.ok(statusCalls[0] && statusCalls[0].length > 0, 'the setStatus message must be non-empty');
+  assert.equal(hintCalls.length, 1, 'setHint must be called exactly once with feedback about the failure');
+  assert.ok(hintCalls[0] && hintCalls[0].length > 0, 'the setHint message must be non-empty');
+  assert.equal(
+    fakeMediaRecorder.startCalls,
+    1,
+    'the fake recorder start counter must read 1, proving the throw came from the real start() call site and ' +
+      'this assertion is not vacuous',
+  );
+});
+
+test('a recorder start that throws does not lock the page out of the next acquisition', async () => {
+  const releaseCalls = [];
+  let ensureRecorderCallCount = 0;
+  const fakeMediaRecorder = {
+    startCalls: 0,
+    start() {
+      fakeMediaRecorder.startCalls++;
+      if (fakeMediaRecorder.startCalls === 1) {
+        const error = new Error('The associated MediaStream has no live tracks.');
+        error.name = 'InvalidStateError';
+        throw error;
+      }
+    },
+  };
+
+  const beginRecording = loadBrowserFunction('beginRecording', {
+    isBusy: false,
+    isRecording: false,
+    isAcquiring: false,
+    async ensureRecorder() {
+      ensureRecorderCallCount++;
+    },
+    setStatus: () => {},
+    setHint: () => {},
+    releaseMicStream: () => releaseCalls.push('release'),
+    recordedChunks: [],
+    mediaRecorder: fakeMediaRecorder,
+  });
+
+  const firstResult = await beginRecording();
+  const secondResult = await beginRecording();
+
+  assert.equal(firstResult, false, 'the first call, whose start throws, must resolve false');
+  // The second call succeeding is what proves the acquisition flag was cleared in the
+  // finally rather than left set by the thrown path — the module-binding half of the
+  // no-wedge argument (that releaseMicStream actually nulls the bindings) is carried by
+  // the pre-existing bindings test, not by this one.
+  assert.equal(secondResult, true, 'the second call, whose start succeeds, must resolve true — not locked out');
+  assert.equal(fakeMediaRecorder.startCalls, 2, 'the start counter must reach 2');
+  assert.equal(ensureRecorderCallCount, 2, 'ensureRecorder must have been entered twice');
+  assert.equal(
+    releaseCalls.length,
+    1,
+    'releaseMicStream() must still have been called only once — only the first call threw',
+  );
+});
+
+test("the recorder start call sits inside beginRecording's guarded block, not after it", () => {
+  const beginRecordingSource = extractFunctionSource('beginRecording');
+
+  const catchMatch = /\}\s*catch\s*\(/.exec(beginRecordingSource);
+  assert.ok(catchMatch, "sanity premise: expected a '} catch (' in beginRecording()'s source");
+
+  const startMatches = [...beginRecordingSource.matchAll(/mediaRecorder\.start\(\)/g)];
+  assert.equal(startMatches.length, 1, 'expected exactly one recorder start call in beginRecording()');
+
+  assert.ok(
+    startMatches[0].index < catchMatch.index,
+    'the recorder start call must occur before the catch that closes its guarded try block — a start call ' +
+      'after the guard throws into nothing: no user feedback, no release, and a recorder binding left ' +
+      'non-null that makes every later press a silent no-op',
+  );
+
+  const chunksResetIndex = beginRecordingSource.indexOf('recordedChunks = []');
+  assert.ok(chunksResetIndex !== -1, "expected a 'recordedChunks = []' assignment in beginRecording()");
+  assert.ok(
+    chunksResetIndex < catchMatch.index,
+    'the recordedChunks reset must also occur before the catch that closes the guarded try block',
+  );
+
+  const recordingFlagIndex = beginRecordingSource.indexOf('isRecording = true');
+  assert.ok(recordingFlagIndex !== -1, "expected an 'isRecording = true' assignment in beginRecording()");
+  assert.ok(
+    recordingFlagIndex > startMatches[0].index,
+    'the recorder-active flag must be set only after the start call — setting it before would leave it set ' +
+      "after a throw and strand finishRecording()'s own isRecording guard",
   );
 });

@@ -1004,10 +1004,11 @@ test('neither trigger listener runs its recording UI after beginRecording refuse
 });
 
 // =====================================================================================
-// WR-03 (10-REVIEW.md, this gap-closure run's numbering) / Success Criterion 3
-// (10-VERIFICATION.md): Plan 10-05's beginRecording() choke point closed the
-// cross-input-path acquisition race, but its own mediaRecorder.start() call still sat
-// outside the try/catch/finally it introduced. Per the MediaRecorder specification,
+// WR-01 (10-REVIEW.md), tracked as WR-03 in this gap-closure round's own numbering
+// (10-VERIFICATION.md) / Success Criterion 3 (10-VERIFICATION.md): Plan 10-05's
+// beginRecording() choke point closed the cross-input-path acquisition race, but its
+// own mediaRecorder.start() call still sat outside the try/catch/finally it
+// introduced. Per the MediaRecorder specification,
 // start() throws InvalidStateError when the stream carries no live track — reachable if
 // the track stops being live in the narrow window between getUserMedia() resolving
 // (inside ensureRecorder()) and this call: an external microphone disconnecting, the OS

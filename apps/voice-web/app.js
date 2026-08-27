@@ -484,6 +484,14 @@ function hasToken() {
 // queued: one physical press means one recording, and awaiting the in-flight acquisition
 // would either start a second recording against the one recorder or hand the loser a
 // recorder the winner is already driving.
+// WR-03 (10-REVIEW.md, gap-closure round 2): the recorder start call now sits inside this
+// same guarded block, following its own recordedChunks reset. Per the MediaRecorder
+// specification the start call throws InvalidStateError when the stream has no live track,
+// which is reachable when the acquired track dies between the acquisition resolving and the
+// start being called — an external microphone disconnecting, an OS grant being revoked,
+// another process claiming exclusive access. Routing that throw through the same catch that
+// already handles a denied microphone is what keeps the stream from being orphaned with the
+// operating system indicator lit.
 async function beginRecording() {
   if (isBusy || isRecording || isAcquiring) return false;
   isAcquiring = true;
@@ -492,6 +500,8 @@ async function beginRecording() {
   // user, the single most common real-world failure mode for a mic app.
   try {
     await ensureRecorder();
+    recordedChunks = [];
+    mediaRecorder.start();
   } catch (error) {
     setStatus('Could not access the microphone.');
     setHint(error.message || 'Check microphone permissions and try again.');
@@ -504,8 +514,6 @@ async function beginRecording() {
   } finally {
     isAcquiring = false;
   }
-  recordedChunks = [];
-  mediaRecorder.start();
   isRecording = true;
   return true;
 }

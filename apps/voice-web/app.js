@@ -201,32 +201,45 @@ function interleaveChannels(audioBuffer) {
   return result;
 }
 
-function encodeWavFromAudioBuffer(audioBuffer) {
-  const channels = audioBuffer.numberOfChannels;
-  const sampleRate = audioBuffer.sampleRate;
-  const samples = interleaveChannels(audioBuffer);
-  const bytesPerSample = 2;
-  const blockAlign = channels * bytesPerSample;
-  const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
-  const view = new DataView(buffer);
+// IN-01 (10-REVIEW.md): the single authoritative implementation of the 44-byte
+// RIFF/WAVE/`fmt `/`data` header layout, shared by encodeWavFromAudioBuffer() and
+// wrapPcmAsWavBlob() below — previously each declared its own local writeString() helper
+// and wrote out the same field-by-field layout independently, so a future correction (a
+// byte-order bug, an off-by-one in a length field) had to be made in two places with
+// nothing enforcing that they stayed in sync.
+function writeWavHeader(view, { channels, sampleRate, bitDepth, dataByteLength }) {
+  const blockAlign = channels * (bitDepth / 8);
+  const byteRate = sampleRate * blockAlign;
 
   function writeString(offset, string) {
     for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
   }
 
   writeString(0, 'RIFF');
-  view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+  view.setUint32(4, 36 + dataByteLength, true);
   writeString(8, 'WAVE');
   writeString(12, 'fmt ');
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
   view.setUint16(22, channels, true);
   view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint32(28, byteRate, true);
   view.setUint16(32, blockAlign, true);
-  view.setUint16(34, 16, true);
+  view.setUint16(34, bitDepth, true);
   writeString(36, 'data');
-  view.setUint32(40, samples.length * bytesPerSample, true);
+  view.setUint32(40, dataByteLength, true);
+}
+
+function encodeWavFromAudioBuffer(audioBuffer) {
+  const channels = audioBuffer.numberOfChannels;
+  const sampleRate = audioBuffer.sampleRate;
+  const samples = interleaveChannels(audioBuffer);
+  const bytesPerSample = 2;
+  const dataByteLength = samples.length * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataByteLength);
+  const view = new DataView(buffer);
+
+  writeWavHeader(view, { channels, sampleRate, bitDepth: 16, dataByteLength });
 
   let offset = 44;
   for (let i = 0; i < samples.length; i++, offset += 2) {
@@ -301,28 +314,10 @@ function wrapPcmAsWavBlob(pcmBytes) {
   const sampleRate = 16000;
   const channels = 1;
   const bitDepth = 16;
-  const blockAlign = channels * (bitDepth / 8);
-  const byteRate = sampleRate * blockAlign;
   const buffer = new ArrayBuffer(44 + pcmBytes.length);
   const view = new DataView(buffer);
 
-  function writeString(offset, string) {
-    for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
-  }
-
-  writeString(0, 'RIFF');
-  view.setUint32(4, 36 + pcmBytes.length, true);
-  writeString(8, 'WAVE');
-  writeString(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, channels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitDepth, true);
-  writeString(36, 'data');
-  view.setUint32(40, pcmBytes.length, true);
+  writeWavHeader(view, { channels, sampleRate, bitDepth, dataByteLength: pcmBytes.length });
 
   new Uint8Array(buffer, 44).set(pcmBytes);
 

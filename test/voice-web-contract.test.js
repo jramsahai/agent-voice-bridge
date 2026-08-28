@@ -1180,6 +1180,7 @@ test('beginRecording acquires exactly one microphone stream when both trigger pa
     isBusy: false,
     isRecording: false,
     isAcquiring: false,
+    releaseRequestedDuringAcquisition: false,
     async ensureRecorder() {
       acquisitionCount++;
       await gate;
@@ -1215,6 +1216,7 @@ test('beginRecording clears its acquisition flag when the microphone is refused,
     isBusy: false,
     isRecording: false,
     isAcquiring: false,
+    releaseRequestedDuringAcquisition: false,
     async ensureRecorder() {
       ensureRecorderCallCount++;
       if (ensureRecorderCallCount === 1) throw new Error('denied');
@@ -1251,6 +1253,7 @@ test('a microphone acquisition that fails part-way releases the stream it alread
     isBusy: false,
     isRecording: false,
     isAcquiring: false,
+    releaseRequestedDuringAcquisition: false,
     async ensureRecorder() {
       throw new Error('recorder construction failed');
     },
@@ -1369,6 +1372,7 @@ test('a recorder start that throws after a successful acquisition releases the s
     isBusy: false,
     isRecording: false,
     isAcquiring: false,
+    releaseRequestedDuringAcquisition: false,
     async ensureRecorder() {},
     setStatus: (message) => statusCalls.push(message),
     setHint: (message) => hintCalls.push(message),
@@ -1412,6 +1416,7 @@ test('a recorder start that throws does not lock the page out of the next acquis
     isBusy: false,
     isRecording: false,
     isAcquiring: false,
+    releaseRequestedDuringAcquisition: false,
     async ensureRecorder() {
       ensureRecorderCallCount++;
     },

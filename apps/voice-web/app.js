@@ -17,6 +17,13 @@ let decodeAudioContext;
 let isBusy = false;
 let isRecording = false;
 let isAcquiring = false;
+// CR-01 (10-REVIEW.md): a press-and-release completed while beginRecording()'s microphone
+// acquisition await is still in flight used to be swallowed by finishRecording()'s
+// synchronous `if (!isRecording) return`, since isRecording is only set true after that
+// await resolves — leaving an unstoppable recording running until an unrelated later
+// release happened to land. This flag lets finishRecording() record that intent and
+// beginRecording()'s callers honor it the instant acquisition completes.
+let releaseRequestedDuringAcquisition = false;
 let lastPlayerObjectUrl = null;
 
 // WR-06 (05-REVIEW.md): without this, a hung backend leaves the fetch promise never settling
@@ -496,6 +503,7 @@ function hasToken() {
 async function beginRecording() {
   if (isBusy || isRecording || isAcquiring) return false;
   isAcquiring = true;
+  releaseRequestedDuringAcquisition = false;
   // WR-05 (05-REVIEW.md): getUserMedia() rejects on a denied/missing microphone with no
   // handler here previously — an unhandled rejection with zero visible feedback to the
   // user, the single most common real-world failure mode for a mic app.
@@ -527,6 +535,10 @@ ptt.addEventListener('pointerdown', async () => {
     return;
   }
   if (!(await beginRecording())) return;
+  if (releaseRequestedDuringAcquisition) {
+    await finishRecording();
+    return;
+  }
   ptt.classList.add('recording');
   ptt.classList.remove('processing');
   ptt.textContent = 'Release to send';
@@ -535,6 +547,14 @@ ptt.addEventListener('pointerdown', async () => {
 });
 
 async function finishRecording() {
+  // CR-01 (10-REVIEW.md): a release landing while beginRecording() is still awaiting
+  // ensureRecorder() must not be dropped silently — record it and let beginRecording()'s
+  // caller stop the recording the instant acquisition completes, instead of leaving it
+  // running unattended until an unrelated later release happens to land.
+  if (isAcquiring) {
+    releaseRequestedDuringAcquisition = true;
+    return;
+  }
   if (!isRecording) return;
   ptt.classList.remove('recording');
   await stopAndSend();
@@ -555,6 +575,10 @@ window.addEventListener('keydown', async (event) => {
       return;
     }
     if (!(await beginRecording())) return;
+    if (releaseRequestedDuringAcquisition) {
+      await finishRecording();
+      return;
+    }
     ptt.classList.add('recording');
     ptt.textContent = 'Release to send';
     setStatus('Recording...');

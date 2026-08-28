@@ -186,6 +186,16 @@ function findMatchingClose(source, openBraceIndex) {
   throw new Error(`unbalanced braces: no matching close found for the opening brace at index ${openBraceIndex}`);
 }
 
+// Built by concatenation, never as a plain literal — see the file header's stated rationale
+// for FETCH_CALL_TOKEN, which applies identically here: this file is walked by
+// test/convert.test.js's recursive scan and by test/turn-suite-hygiene.test.js's file
+// discovery, and the honesty test below reads this very file.
+const HTML_COMMENT_OPEN_TOKEN = ['<', '!', '--'].join('');
+const HTML_COMMENT_CLOSE_TOKEN = ['--', '>'].join('');
+// BRACE_HIDING_SUBSTRINGS is a collection, named as a plural deliberately: a future round
+// appends an element here and a matching fixture in the test below rather than restructuring.
+const BRACE_HIDING_SUBSTRINGS = [HTML_COMMENT_OPEN_TOKEN, HTML_COMMENT_CLOSE_TOKEN];
+
 // Returns true when `region` contains none of the four characters that can delimit a
 // literal or comment capable of hiding an unbalanced brace from findMatchingClose's raw-text
 // walk: the single quote, the double quote, the backtick, and the forward slash. No attempt
@@ -194,7 +204,27 @@ function findMatchingClose(source, openBraceIndex) {
 // for quote characters. Its own coverage is pinned by fixtures in the test below, not claimed
 // here.
 function regionIsBraceWalkSafe(region) {
-  return !/['"`/]/.test(region);
+  return !/['"`/]/.test(region) && !BRACE_HIDING_SUBSTRINGS.some((token) => region.includes(token));
+}
+
+// Given a function-source string, locates the OUTERMOST `} finally {` occurrence (the last
+// textual match, on the premise that textually-last-is-outermost holds at this one level of
+// nesting — see the DEBT-09 finally-placement test's own lineage comment for why), and
+// returns its opening brace index, its matching close brace index (via findMatchingClose),
+// and the source slice between them inclusive. Shared by the DEBT-09 finally-placement test
+// and the compound-mutation pin below so neither can drift from the other — a hand-copied
+// re-implementation diverging from the committed one is a hazard this file's own RED-probe
+// recipe (10-VALIDATION.md) names explicitly.
+function locateOuterFinallyRegion(source) {
+  const finallyMatches = [...source.matchAll(/\}\s*finally\s*\{/g)];
+  if (finallyMatches.length === 0) {
+    throw new Error('locateOuterFinallyRegion: no keyword-form finally block was found in the given source');
+  }
+  const outerFinallyIndex = finallyMatches[finallyMatches.length - 1].index;
+  const openBraceIndex = source.indexOf('{', outerFinallyIndex);
+  const closeBraceIndex = findMatchingClose(source, openBraceIndex);
+  const region = source.slice(openBraceIndex, closeBraceIndex + 1);
+  return { finallyMatches, openBraceIndex, closeBraceIndex, region };
 }
 
 // Builds a callable out of a function's own extracted source, injecting `deps` as
@@ -797,6 +827,40 @@ test('regionIsBraceWalkSafe rejects every literal or comment delimiter that can 
     'a region holding a division expression must be rejected as the accepted cost of making no ' +
       'delimiter-vs-operator distinction',
   );
+  // The two fixture pairs below carry no quote, no backtick and no forward slash anywhere in
+  // their region text — stated here so a future editor who adds one of those characters to a
+  // fixture is told why doing so would make the fixture vacuous (it would then be rejected by
+  // the pre-existing four-character class instead of by the token under test).
+  const htmlCommentOpenRegion = ['{ ', HTML_COMMENT_OPEN_TOKEN, ' a\n}'].join('');
+  assert.equal(
+    regionIsBraceWalkSafe(htmlCommentOpenRegion),
+    false,
+    'a region carrying the HTML-like comment opener token must be rejected; this fixture carries no quote, ' +
+      'backtick or forward slash, so the rejection is attributable to the opener token alone',
+  );
+  const htmlCommentOpenRegionControl = ['{ ', ' a\n}'].join('');
+  assert.equal(
+    regionIsBraceWalkSafe(htmlCommentOpenRegionControl),
+    true,
+    'control: the same region with the HTML-like comment opener token removed must be accepted — proving ' +
+      'the rejection above is attributable to the token, not to an incidental character; this control also ' +
+      'carries no quote, backtick or forward slash',
+  );
+  const htmlCommentCloseRegion = ['{ ', HTML_COMMENT_CLOSE_TOKEN, ' a\n}'].join('');
+  assert.equal(
+    regionIsBraceWalkSafe(htmlCommentCloseRegion),
+    false,
+    'a region carrying the HTML-like comment closer token must be rejected; this fixture carries no quote, ' +
+      'backtick or forward slash, so the rejection is attributable to the closer token alone',
+  );
+  const htmlCommentCloseRegionControl = ['{ ', ' a\n}'].join('');
+  assert.equal(
+    regionIsBraceWalkSafe(htmlCommentCloseRegionControl),
+    true,
+    'control: the same region with the HTML-like comment closer token removed must be accepted — proving ' +
+      'the rejection above is attributable to the token, not to an incidental character; this control also ' +
+      'carries no quote, backtick or forward slash',
+  );
 });
 
 test('stopAndSend releases the microphone in its finally block, so the release survives the error path', () => {
@@ -819,7 +883,12 @@ test('stopAndSend releases the microphone in its finally block, so the release s
   // a release moved past the block's own closing brace passed that check on a source carrying
   // the exact regression this test names. The check below is now a containment check bounded
   // by the block's own matching braces, located by findMatchingClose.
-  const finallyMatches = [...stopAndSendSource.matchAll(/\}\s*finally\s*\{/g)];
+  const {
+    finallyMatches,
+    openBraceIndex: outerFinallyOpenBrace,
+    closeBraceIndex: outerFinallyCloseBrace,
+    region: outerFinallyRegion,
+  } = locateOuterFinallyRegion(stopAndSendSource);
   assert.equal(
     finallyMatches.length,
     2,
@@ -828,7 +897,6 @@ test('stopAndSend releases the microphone in its finally block, so the release s
       'third occurrence means the nesting changed and the textually-last-is-outermost assumption this test ' +
       'rests on must be re-derived, not simply bumped.',
   );
-  const outerFinallyIndex = finallyMatches[finallyMatches.length - 1].index;
 
   const callMatches = [...stopAndSendSource.matchAll(/releaseMicStream\(\)/g)];
   assert.equal(
@@ -836,9 +904,6 @@ test('stopAndSend releases the microphone in its finally block, so the release s
     1,
     `expected exactly one releaseMicStream() call in stopAndSend; found ${callMatches.length}`,
   );
-
-  const outerFinallyOpenBrace = stopAndSendSource.indexOf('{', outerFinallyIndex);
-  const outerFinallyCloseBrace = findMatchingClose(stopAndSendSource, outerFinallyOpenBrace);
 
   // findMatchingClose is a lexer-free scan: a brace inside a string, template, regex or
   // comment within the scanned region would desynchronize the depth counter. The region below
@@ -852,7 +917,6 @@ test('stopAndSend releases the microphone in its finally block, so the release s
   // against the new body; do not relax this guard. This widening is G3-01's closure: the
   // compound mutation that defeated the pre-widening check (the too-late regression plus a
   // brace-bearing regex literal) is proved RED against this one in 10-VALIDATION.md.
-  const outerFinallyRegion = stopAndSendSource.slice(outerFinallyOpenBrace, outerFinallyCloseBrace + 1);
   assert.ok(
     regionIsBraceWalkSafe(outerFinallyRegion),
     'the outer finally region must carry no quote character and no forward slash — this forecloses a ' +
@@ -868,6 +932,96 @@ test('stopAndSend releases the microphone in its finally block, so the release s
       'placed after that block closes is skipped by every early return inside the try body (the TURN_BUSY ' +
       'branch, the non-ok branch, and the splitter catch), and a call placed in the try body before the ' +
       'block is skipped by a thrown error',
+  );
+});
+
+test('the purity guard refuses the certificate a brace hidden in an HTML-like comment would otherwise buy', () => {
+  // Mirrors stopAndSend()'s shape: an outer try containing a complete inner try/finally block,
+  // then the outer finally whose body hides an extra opening brace inside an HTML-like comment
+  // and whose real release call sits after the outer finally's own closing brace — the exact
+  // compound counter-example CR-01 (10-REVIEW-GAP4.md) and the verifier each reproduced by hand.
+  // Built by Array.prototype.join over an array of line strings, not a template literal, so
+  // indentation is explicit and no backtick enters the fixture text.
+  const compoundMutationLines = [
+    'function stubSend() {',
+    '  try {',
+    '    try {',
+    '      doWork();',
+    '    } finally {',
+    '      clearTimeout(timer);',
+    '    }',
+    '  } finally {',
+    '    isRecording = false;',
+    '    setBusy(false);',
+    '    ' + [HTML_COMMENT_OPEN_TOKEN, ' an extra brace hides in here {'].join(''),
+    '  }',
+    '  releaseMicStream();',
+    '}',
+  ];
+  const compoundMutationSource = compoundMutationLines.join('\n');
+  const {
+    finallyMatches: compoundFinallyMatches,
+    openBraceIndex: compoundOpenBraceIndex,
+    closeBraceIndex: compoundCloseBraceIndex,
+    region: compoundRegion,
+  } = locateOuterFinallyRegion(compoundMutationSource);
+  assert.equal(
+    compoundFinallyMatches.length,
+    2,
+    "sanity premise: the synthetic fixture must report exactly two '} finally {' matches — if this ever " +
+      'fails the fixture stopped mirroring stopAndSend\'s real shape and proves nothing',
+  );
+  const compoundCallIndex = compoundMutationSource.indexOf('releaseMicStream()');
+  assert.ok(
+    compoundCallIndex > compoundOpenBraceIndex && compoundCallIndex < compoundCloseBraceIndex,
+    'the false certificate: the containment comparison alone reports releaseMicStream() — which in fact ' +
+      "sits after the outer finally block's real closing brace — as strictly contained inside it; this is " +
+      'precisely the false pass CR-01 (10-REVIEW-GAP4.md) and the verifier each reproduced by hand',
+  );
+  assert.equal(
+    regionIsBraceWalkSafe(compoundRegion),
+    false,
+    'the refusal: regionIsBraceWalkSafe on the same region must return false, so the guard fires before the ' +
+      'containment comparison above can issue that certificate',
+  );
+
+  // The control half: the identical line array with the hidden-comment line removed. Proves
+  // both that the rejection above is attributable to the hidden comment alone, and that the
+  // containment bound still has teeth without it — without this control the pin is one-sided,
+  // the exact defect WR-04 was.
+  const compoundControlLines = [
+    'function stubSend() {',
+    '  try {',
+    '    try {',
+    '      doWork();',
+    '    } finally {',
+    '      clearTimeout(timer);',
+    '    }',
+    '  } finally {',
+    '    isRecording = false;',
+    '    setBusy(false);',
+    '  }',
+    '  releaseMicStream();',
+    '}',
+  ];
+  const compoundControlSource = compoundControlLines.join('\n');
+  const {
+    openBraceIndex: controlOpenBraceIndex,
+    closeBraceIndex: controlCloseBraceIndex,
+    region: controlRegion,
+  } = locateOuterFinallyRegion(compoundControlSource);
+  const controlCallIndex = compoundControlSource.indexOf('releaseMicStream()');
+  assert.equal(
+    regionIsBraceWalkSafe(controlRegion),
+    true,
+    'control: the identical fixture with the hidden-comment line removed must be accepted by the guard — ' +
+      'proving the rejection above is attributable to the hidden comment alone',
+  );
+  assert.ok(
+    !(controlCallIndex > controlOpenBraceIndex && controlCallIndex < controlCloseBraceIndex),
+    'control: with the hidden comment removed, the containment comparison must correctly report ' +
+      'releaseMicStream() as NOT contained — proving the containment bound still has teeth without the ' +
+      'hidden comment',
   );
 });
 

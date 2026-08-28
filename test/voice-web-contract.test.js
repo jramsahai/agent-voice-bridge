@@ -169,7 +169,9 @@ function extractFunctionSource(name) {
 // brace that matches it — the OUTER close of a nested block, never the first closing
 // brace encountered. Raw-text walk, no lexer: a brace inside a string, template, regex
 // or comment in the scanned region would desynchronize the depth counter, which is why
-// every call site pairs this with a region-purity check rather than trusting it alone.
+// every call site pairs this with regionIsBraceWalkSafe, whose rejection of the forward
+// slash is what extends the guard to regex literals and comments — its own coverage is
+// pinned by fixtures rather than asserted here.
 // Throws rather than returning a fallback index on unbalanced input — a wrong index here
 // would silently produce exactly the class of false certificate WR-04 exists to remove.
 function findMatchingClose(source, openBraceIndex) {
@@ -182,6 +184,17 @@ function findMatchingClose(source, openBraceIndex) {
     }
   }
   throw new Error(`unbalanced braces: no matching close found for the opening brace at index ${openBraceIndex}`);
+}
+
+// Returns true when `region` contains none of the four characters that can delimit a
+// literal or comment capable of hiding an unbalanced brace from findMatchingClose's raw-text
+// walk: the single quote, the double quote, the backtick, and the forward slash. No attempt
+// is made to distinguish a regex delimiter from a division operator — every forward slash is
+// rejected, which is the conservative direction and the same trade this check already makes
+// for quote characters. Its own coverage is pinned by fixtures in the test below, not claimed
+// here.
+function regionIsBraceWalkSafe(region) {
+  return !/['"`/]/.test(region);
 }
 
 // Builds a callable out of a function's own extracted source, injecting `deps` as
@@ -708,6 +721,20 @@ test('findMatchingClose returns the brace closing the block it was given, not th
     'a flat block with no nesting must resolve to its own single closing brace',
   );
 
+  const immediatelyClosingBlock = '{}';
+  assert.equal(
+    findMatchingClose(immediatelyClosingBlock, 0),
+    1,
+    'a block that closes on the very next character after the opening brace must resolve to that closing brace',
+  );
+
+  const siblingBlocks = '{ {} {} }';
+  assert.equal(
+    findMatchingClose(siblingBlocks, 0),
+    siblingBlocks.length - 1,
+    "two sibling blocks sitting back-to-back at the same depth must resolve to the OUTER block's own close, not either sibling's",
+  );
+
   const nestedBlock = '{ if (x) { y(); } z(); }';
   const naiveFirstClose = nestedBlock.indexOf('}');
   const trueOuterClose = nestedBlock.length - 1;
@@ -729,6 +756,49 @@ test('findMatchingClose returns the brace closing the block it was given, not th
   );
 });
 
+test('regionIsBraceWalkSafe rejects every literal or comment delimiter that can hide an unbalanced brace from findMatchingClose', () => {
+  assert.equal(
+    regionIsBraceWalkSafe('{ a; b; }'),
+    true,
+    'a region holding only bare statements and braces must be considered safe',
+  );
+  assert.equal(
+    regionIsBraceWalkSafe("{ const s = 'a'; }"),
+    false,
+    'a region holding a single-quoted string must be rejected',
+  );
+  assert.equal(
+    regionIsBraceWalkSafe('{ const s = `a`; }'),
+    false,
+    'a region holding a template literal must be rejected',
+  );
+  assert.equal(
+    regionIsBraceWalkSafe('{ // a\n}'),
+    false,
+    'a region holding a line comment must be rejected',
+  );
+  assert.equal(
+    regionIsBraceWalkSafe('{ /* a */ }'),
+    false,
+    'a region holding a block comment must be rejected',
+  );
+  assert.equal(
+    regionIsBraceWalkSafe('{ const r = /a/; }'),
+    false,
+    'a region holding a regex literal must be rejected — this is the class the pre-widening check missed, ' +
+      'and the whole reason this predicate exists',
+  );
+  // Rejecting every forward slash means a legitimate division expression in the scanned region
+  // also fails this guard. That is the accepted, deliberate cost of attempting no
+  // delimiter-vs-operator distinction between a regex literal and division — not a defect.
+  assert.equal(
+    regionIsBraceWalkSafe('{ const n = a / b; }'),
+    false,
+    'a region holding a division expression must be rejected as the accepted cost of making no ' +
+      'delimiter-vs-operator distinction',
+  );
+});
+
 test('stopAndSend releases the microphone in its finally block, so the release survives the error path', () => {
   const stopAndSendSource = extractFunctionSource('stopAndSend');
   // Located by the keyword form, not a bare-word search: IN-01 (10-REVIEW.md) documents how
@@ -743,7 +813,7 @@ test('stopAndSend releases the microphone in its finally block, so the release s
   // last, on the premise that textually-last-is-outermost holds at this one level of nesting;
   // the exact-count assertion below is what makes a future third `finally` fail loudly instead
   // of silently re-opening the same hole.
-  // WR-01 (10-REVIEW.md), tracked as WR-04 in this gap-closure round's own numbering
+  // WR-02 (10-REVIEW.md), tracked as WR-04 in this gap-closure round's own numbering
   // (10-VERIFICATION.md): the last-match retarget fixed which block the check anchors on but
   // left the check one-sided, proving only that the call is after the block's opening brace —
   // a release moved past the block's own closing brace passed that check on a source carrying
@@ -771,20 +841,25 @@ test('stopAndSend releases the microphone in its finally block, so the release s
   const outerFinallyCloseBrace = findMatchingClose(stopAndSendSource, outerFinallyOpenBrace);
 
   // findMatchingClose is a lexer-free scan: a brace inside a string, template, regex or
-  // comment within the scanned region would desynchronize the depth counter. Today's outer
-  // finally body holds three bare statements and no such literal, so the hazard is not live —
-  // guarded anyway, because a pin must fail loudly when its premise stops holding rather than
-  // mis-locate silently. Sound rather than circular: a stray opening brace inside a literal
-  // only extends the computed region, and a stray closing brace inside a literal only
-  // truncates it to a point still after that literal's own opening delimiter — so in either
-  // desync direction the computed region still contains the offending quote or comment
-  // marker, and this assertion fires. If it ever does fire, re-derive the locator against the
-  // new body; do not relax this guard.
+  // comment within the scanned region would desynchronize the depth counter. The region below
+  // is checked with regionIsBraceWalkSafe, which rejects a quote character or a forward slash —
+  // the forward-slash rejection is what extends the guard to a regex literal, a line comment
+  // and a block comment, none of which can avoid carrying one. Sound rather than circular: a
+  // stray opening brace inside a literal only extends the computed region, and a stray closing
+  // brace inside a literal only truncates it to a point still after that literal's own opening
+  // delimiter — so in either desync direction the computed region still contains the offending
+  // quote or slash, and this assertion fires. If it ever does fire, re-derive the locator
+  // against the new body; do not relax this guard. This widening is G3-01's closure: the
+  // compound mutation that defeated the pre-widening check (the too-late regression plus a
+  // brace-bearing regex literal) is proved RED against this one in 10-VALIDATION.md.
   const outerFinallyRegion = stopAndSendSource.slice(outerFinallyOpenBrace, outerFinallyCloseBrace + 1);
   assert.ok(
-    !/['"`]/.test(outerFinallyRegion) && !outerFinallyRegion.includes('//') && !outerFinallyRegion.includes('/*'),
-    'the outer finally region must contain no quote character and no comment-opening sequence — a brace ' +
-      'inside a string, template, regex or comment here would desynchronize findMatchingClose\'s raw-text walk',
+    regionIsBraceWalkSafe(outerFinallyRegion),
+    'the outer finally region must carry no quote character and no forward slash — this forecloses a ' +
+      'string, a template literal, a line comment, a block comment and a regex literal, any of which could ' +
+      'otherwise hide an unbalanced brace from the lexer-free walk below; a division expression in this ' +
+      'block fails too and that is intended; if this assertion fails, re-derive the locator by hand against ' +
+      'the new body — never relax this guard',
   );
 
   assert.ok(

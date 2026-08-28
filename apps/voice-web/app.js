@@ -363,7 +363,18 @@ async function stopAndSend() {
     recordedChunks = [];
     setStatus('Processing audio...');
     setHint('Converting browser audio to WAV.');
-    const wavBlob = await blobToWav(blob);
+    // IN-02 (10-REVIEW.md): blobToWav()'s decodeAudioData() failure (an unsupported or
+    // corrupt recorded blob) has nothing to do with the network — reporting it under the
+    // outer catch's generic NETWORK_ERROR code below showed "Check the connection to the
+    // bridge" advice that could not help. This dedicated catch reports a distinct code
+    // with a hint about the recording itself instead.
+    let wavBlob;
+    try {
+      wavBlob = await blobToWav(blob);
+    } catch (error) {
+      reportTurnError('AUDIO_ENCODE_FAILED', error.message, 'The recording could not be processed. Try recording again.');
+      return;
+    }
 
     setStatus('Transcribing and thinking...');
     setHint('Sending your turn to the bridge.');
@@ -449,10 +460,11 @@ async function stopAndSend() {
     setStatus('Done.');
     setHint('Press and hold to send another turn.');
   } catch (error) {
-    // WR-04 (05-REVIEW.md): blobToWav()'s decodeAudioData and the fetch() call above have
-    // no catch of their own — without this, a network failure or malformed-audio decode
-    // error becomes an unhandled rejection that clears the busy state via `finally` below
-    // but never tells the user why the turn silently failed.
+    // WR-04 (05-REVIEW.md): the fetch() call above has no catch of its own — without this,
+    // a network failure becomes an unhandled rejection that clears the busy state via
+    // `finally` below but never tells the user why the turn silently failed. (IN-02,
+    // 10-REVIEW.md: blobToWav()'s decodeAudioData() failure is now caught separately,
+    // above, and reported under its own distinct code rather than falling through here.)
     // WR-06: the AbortController above turns a hung backend into this same catch as an
     // AbortError — surfaced as a distinct timeout state rather than a generic network error.
     if (error.name === 'AbortError') {

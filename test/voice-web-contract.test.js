@@ -196,13 +196,38 @@ const HTML_COMMENT_CLOSE_TOKEN = ['--', '>'].join('');
 // appends an element here and a matching fixture in the test below rather than restructuring.
 const BRACE_HIDING_SUBSTRINGS = [HTML_COMMENT_OPEN_TOKEN, HTML_COMMENT_CLOSE_TOKEN];
 
-// Returns true when `region` contains none of the four characters that can delimit a
-// literal or comment capable of hiding an unbalanced brace from findMatchingClose's raw-text
-// walk: the single quote, the double quote, the backtick, and the forward slash. No attempt
-// is made to distinguish a regex delimiter from a division operator — every forward slash is
-// rejected, which is the conservative direction and the same trade this check already makes
-// for quote characters. Its own coverage is pinned by fixtures in the test below, not claimed
-// here.
+// The exact marker string an honest bounded claim about this guard's coverage must carry —
+// enforced mechanically by the source-contract test below, not asserted in prose alone.
+const BOUNDED_CLAIM_MARKER = 'conservative heuristic, not a completeness claim';
+
+// Patterns an overclaim about this guard's coverage would match, each built by array-join
+// concatenation rather than as a plain contiguous literal — otherwise this pattern list would
+// match itself, since the honesty test below reads this very file (the identical reason
+// FORBIDDEN_NETWORK_MODEL_PATTERNS in test/turn-suite-hygiene.test.js uses that idiom). The
+// numeral pattern catches any future round-4-shaped claim regardless of which count it picks;
+// the two literal patterns are the two retired claims this round itself replaces.
+const OVERCLAIM_PATTERNS = [
+  new RegExp(['(three|four|five|six|seven)', '\\s+', '(characters|substrings|tokens|delimiters)'].join(''), 'i'),
+  new RegExp(['characters that can delim', 'it a'].join('')),
+  new RegExp(['every literal or comment delim', 'iter'].join('')),
+];
+
+// Returns true when `region` contains none of the quote characters (single quote, double
+// quote, backtick), the forward slash, or a token in BRACE_HIDING_SUBSTRINGS — the HTML-like
+// comment opener and closer. This is a conservative heuristic, not a completeness claim: it
+// can reduce the chance that findMatchingClose's raw-text walk is desynchronized by a brace
+// hidden inside a string, template literal, regex literal, line comment, block comment, or
+// HTML-like comment, but it cannot rule out every brace-hiding construct. No attempt is made
+// to distinguish a delimiter from an operator — a division expression in the scanned region
+// is rejected too, and that is intended, not a defect. No line-position analysis is attempted
+// for the HTML-like comment closer, so it is rejected wherever it appears in the region,
+// regardless of whether Annex B.1.3 would treat it as a comment there — deliberately broader
+// than the grammar requires, the same conservative direction the check already takes for the
+// opener and for the quote characters. Any brace-hiding construct not present in
+// BRACE_HIDING_SUBSTRINGS or the character class below is not covered: this set has already
+// been extended twice (the forward slash for regex literals, then the HTML-like comment
+// tokens), so treat it as open and append an element plus a fixture in the test below — where
+// the predicate's own coverage is pinned — rather than reasoning about closure here.
 function regionIsBraceWalkSafe(region) {
   return !/['"`/]/.test(region) && !BRACE_HIDING_SUBSTRINGS.some((token) => region.includes(token));
 }
@@ -786,7 +811,7 @@ test('findMatchingClose returns the brace closing the block it was given, not th
   );
 });
 
-test('regionIsBraceWalkSafe rejects every literal or comment delimiter that can hide an unbalanced brace from findMatchingClose', () => {
+test('regionIsBraceWalkSafe rejects the delimiter set it enumerates, each rejection pinned by its own fixture', () => {
   assert.equal(
     regionIsBraceWalkSafe('{ a; b; }'),
     true,
@@ -905,25 +930,31 @@ test('stopAndSend releases the microphone in its finally block, so the release s
     `expected exactly one releaseMicStream() call in stopAndSend; found ${callMatches.length}`,
   );
 
-  // findMatchingClose is a lexer-free scan: a brace inside a string, template, regex or
-  // comment within the scanned region would desynchronize the depth counter. The region below
-  // is checked with regionIsBraceWalkSafe, which rejects a quote character or a forward slash —
-  // the forward-slash rejection is what extends the guard to a regex literal, a line comment
-  // and a block comment, none of which can avoid carrying one. Sound rather than circular: a
-  // stray opening brace inside a literal only extends the computed region, and a stray closing
-  // brace inside a literal only truncates it to a point still after that literal's own opening
-  // delimiter — so in either desync direction the computed region still contains the offending
-  // quote or slash, and this assertion fires. If it ever does fire, re-derive the locator
-  // against the new body; do not relax this guard. This widening is G3-01's closure: the
-  // compound mutation that defeated the pre-widening check (the too-late regression plus a
-  // brace-bearing regex literal) is proved RED against this one in 10-VALIDATION.md.
+  // findMatchingClose is a lexer-free scan: a brace inside a string, template, regex, line
+  // comment, block comment, or HTML-like comment within the scanned region would
+  // desynchronize the depth counter. The region below is checked with regionIsBraceWalkSafe,
+  // which rejects a quote character, a forward slash, or a token in BRACE_HIDING_SUBSTRINGS.
+  // Sound rather than circular, for each construct that rejected set names: a stray opening
+  // brace inside the literal or comment only extends the computed region, and a stray closing
+  // brace inside it only truncates the region to a point still after that construct's own
+  // opening delimiter — so in either desync direction the computed region still contains the
+  // offending character or token, and this assertion fires. This is a
+  // conservative heuristic, not a completeness claim: it establishes that the constructs the
+  // rejected set names cannot desync silently, not that the rejected set names every
+  // brace-hiding construct that exists.
+  // An unstated version of that same premise is what let this file's guard overclaim for four
+  // consecutive rounds — see CR-01 (10-REVIEW-GAP4.md) for the reproduction that found the
+  // residual this round closes. If this assertion ever fires, re-derive the locator against the
+  // new body; do not relax this guard.
   assert.ok(
     regionIsBraceWalkSafe(outerFinallyRegion),
-    'the outer finally region must carry no quote character and no forward slash — this forecloses a ' +
-      'string, a template literal, a line comment, a block comment and a regex literal, any of which could ' +
-      'otherwise hide an unbalanced brace from the lexer-free walk below; a division expression in this ' +
-      'block fails too and that is intended; if this assertion fails, re-derive the locator by hand against ' +
-      'the new body — never relax this guard',
+    'the outer finally region must carry no quote character, no forward slash, and no HTML-like comment ' +
+      'opener or closer token — this forecloses a string, a template literal, a line comment, a block ' +
+      'comment, a regex literal and an HTML-like comment, any of which could otherwise hide an unbalanced ' +
+      'brace from the lexer-free walk below; a division expression in this block fails too and that is ' +
+      'intended; this is a conservative heuristic, not a completeness claim, and a brace-hiding construct ' +
+      'outside this set may still exist uncovered; if this assertion fails, re-derive the locator by hand ' +
+      'against the new body — never relax this guard',
   );
 
   assert.ok(
@@ -1055,6 +1086,69 @@ test('the comment above ensureRecorder describes releasing the stream rather tha
     'the comment must no longer carry the pre-fix claim that holding the stream open is deliberate — that ' +
       'trade is no longer real (RESEARCH.md assumption A1)',
   );
+});
+
+// Walks backwards from `anchorIndex` over contiguous `//` lines, stopping at the first blank
+// or non-comment line — the same walk the `ensureRecorder` comment test above uses, reused
+// here in shape against this file's own source rather than app.js's.
+function extractPrecedingCommentBlock(source, anchorIndex) {
+  const precedingLines = source.slice(0, anchorIndex).split('\n');
+  if (precedingLines[precedingLines.length - 1] === '') precedingLines.pop();
+  const commentLines = [];
+  for (let i = precedingLines.length - 1; i >= 0; i--) {
+    const line = precedingLines[i];
+    if (line.trim() === '') break;
+    if (!/^\s*\/\//.test(line)) break;
+    commentLines.unshift(line);
+  }
+  return commentLines.join('\n');
+}
+
+test('the purity guard and its call site state a bounded claim rather than a completeness claim', () => {
+  const thisFilePath = fileURLToPath(import.meta.url);
+  const thisFileSource = fs.readFileSync(thisFilePath, 'utf8');
+
+  const declarationMatch = /function regionIsBraceWalkSafe\(/.exec(thisFileSource);
+  assert.ok(declarationMatch, 'sanity premise: expected a regionIsBraceWalkSafe( declaration in this file');
+  const predicateCommentBlock = extractPrecedingCommentBlock(thisFileSource, declarationMatch.index);
+  assert.ok(
+    predicateCommentBlock.length > 0,
+    'sanity premise: expected a contiguous // comment block preceding regionIsBraceWalkSafe',
+  );
+  assert.ok(
+    predicateCommentBlock.includes(BOUNDED_CLAIM_MARKER),
+    'the comment above regionIsBraceWalkSafe must carry the bounded-claim marker',
+  );
+  for (const pattern of OVERCLAIM_PATTERNS) {
+    assert.ok(
+      !pattern.test(predicateCommentBlock),
+      `the comment above regionIsBraceWalkSafe matched overclaim pattern ${pattern} — the fix is to bound ` +
+        'the claim further, not to weaken this pattern list',
+    );
+  }
+
+  const regionAssertMatch = /^\s*assert\.ok\(\s*\n\s*regionIsBraceWalkSafe\(outerFinallyRegion\)/m.exec(thisFileSource);
+  assert.ok(
+    regionAssertMatch,
+    'sanity premise: expected the region-purity assert.ok(regionIsBraceWalkSafe(outerFinallyRegion) call ' +
+      'site in this file',
+  );
+  const regionCommentBlock = extractPrecedingCommentBlock(thisFileSource, regionAssertMatch.index);
+  assert.ok(
+    regionCommentBlock.length > 0,
+    'sanity premise: expected a contiguous // comment block preceding the region-purity assertion',
+  );
+  assert.ok(
+    regionCommentBlock.includes(BOUNDED_CLAIM_MARKER),
+    'the sound-not-circular comment above the region-purity assertion must carry the bounded-claim marker',
+  );
+  for (const pattern of OVERCLAIM_PATTERNS) {
+    assert.ok(
+      !pattern.test(regionCommentBlock),
+      `the sound-not-circular comment matched overclaim pattern ${pattern} — the fix is to bound the claim ` +
+        'further, not to weaken this pattern list',
+    );
+  }
 });
 
 // =====================================================================================

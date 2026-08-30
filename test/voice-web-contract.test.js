@@ -397,13 +397,45 @@ test('a refused framing declaration reaches the user as error text through the p
 
 test('the splitTurnResponse call site in stopAndSend is wrapped in a catch that calls the turn-error handler', () => {
   const stopAndSendSource = extractFunctionSource('stopAndSend');
-  const callIndex = stopAndSendSource.indexOf('splitTurnResponse(');
-  assert.ok(callIndex !== -1, "sanity: stopAndSend must call 'splitTurnResponse('");
+  const callMatches = [...stopAndSendSource.matchAll(/splitTurnResponse\(/g)];
+  assert.equal(
+    callMatches.length,
+    1,
+    `expected exactly one splitTurnResponse( call in stopAndSend; found ${callMatches.length}`,
+  );
+  const callIndex = callMatches[0].index;
 
   const beforeCall = stopAndSendSource.slice(0, callIndex);
   assert.ok(
     /\btry\b/.test(beforeCall),
     'a try token must occur before the splitTurnResponse( call index — a bare catch with no try cannot satisfy this',
+  );
+  // P-6: the bare-word check above is satisfied even on a source with every real try {
+  // deleted — the client-busy hint string ('Wait for the other client to finish, then try
+  // again.') sitting earlier in this function contains the word 'try' textually before this
+  // call, exactly the IN-01 pattern this file's own comments (round-2-wr-02 lineage, and the
+  // acquisition-guard test above) say must not be reproduced. The keyword form below is the
+  // one with teeth.
+  const tryFormMatches = [...beforeCall.matchAll(/\btry\s*\{/g)];
+  assert.ok(
+    tryFormMatches.length > 0,
+    'a keyword-form try block (not merely the bare word "try") must occur before the splitTurnResponse( call ' +
+      'index — the bare-word check above is satisfied by the word inside the client-busy hint string earlier ' +
+      'in this function, which carries no real try block',
+  );
+
+  // P-6 openness: the nearest enclosing try before the call must still be open where the call
+  // sits — no catch or finally may have closed it first. Neither the bare-word check nor mere
+  // existence of a keyword-form try earlier in the source asserts this. The catch pattern below
+  // is deliberately \bcatch\b with no required parenthesis: stopAndSend's own JSON-parse guard
+  // uses a bare `} catch {` with no error binding, and a pattern requiring `catch (` would miss
+  // it and silently pass on a source where that bare catch is exactly what closed the nearest try.
+  const nearestTryMatch = tryFormMatches[tryFormMatches.length - 1];
+  const betweenTryAndCall = stopAndSendSource.slice(nearestTryMatch.index, callIndex);
+  assert.ok(
+    !/\}\s*catch\b/.test(betweenTryAndCall) && !/\}\s*finally\s*\{/.test(betweenTryAndCall),
+    'the nearest enclosing try before the splitTurnResponse( call must still be open at the call — a catch or ' +
+      'finally closing it before the call means the call is not actually inside a guarded block',
   );
 
   const afterCall = stopAndSendSource.slice(callIndex);
@@ -413,6 +445,22 @@ test('the splitTurnResponse call site in stopAndSend is wrapped in a catch that 
     "the remainder from the splitTurnResponse( call to the end of the function must match a catch clause whose " +
       "body's first call is reportTurnError( — this fails on a swallowing empty catch, a catch wrapping some " +
       "other statement, or the pre-existing player.play().catch(() => {}), which has no reportTurnError in its body",
+  );
+  // P-6 adjacency: the match above proves SOME catch further down matches the shape, but does
+  // not pin it to the call's OWN nearest catch — a distant, unrelated catch further down the
+  // function could also satisfy an unanchored search. The check below pins the match to the
+  // FIRST catch after the call.
+  const catchAfterCallMatches = [...afterCall.matchAll(/\}\s*catch\s*\(/g)];
+  assert.ok(
+    catchAfterCallMatches.length > 0,
+    'sanity premise: expected at least one keyword-form catch after the splitTurnResponse( call',
+  );
+  const nearestCatchOffset = catchAfterCallMatches[0].index;
+  assert.match(
+    afterCall.slice(nearestCatchOffset),
+    /^\}\s*catch\s*\(\s*error\s*\)\s*\{\s*reportTurnError\(/,
+    'the nearest catch after the splitTurnResponse( call — not merely some catch further down the function — ' +
+      'must be the one whose body calls reportTurnError(',
   );
 });
 
@@ -459,14 +507,83 @@ test('a turn carrying no audio detaches the player rather than leaving the previ
 
 test('the no-audio branch of stopAndSend calls resetPlayer, and index.html ships the player hidden', () => {
   const stopAndSendSource = extractFunctionSource('stopAndSend');
-  const branchIndex = stopAndSendSource.indexOf('if (audioPcm)');
-  assert.ok(branchIndex !== -1, "sanity: stopAndSend must branch on 'if (audioPcm)'");
+  const branchMatches = [...stopAndSendSource.matchAll(/if \(audioPcm\)/g)];
+  assert.equal(
+    branchMatches.length,
+    1,
+    `expected exactly one 'if (audioPcm)' branch in stopAndSend; found ${branchMatches.length}`,
+  );
+  const branchIndex = branchMatches[0].index;
+
+  const resetPlayerMatches = [...stopAndSendSource.matchAll(/resetPlayer\(\)/g)];
+  assert.equal(
+    resetPlayerMatches.length,
+    1,
+    `expected exactly one resetPlayer() call in stopAndSend; found ${resetPlayerMatches.length}`,
+  );
+  const resetPlayerIndex = resetPlayerMatches[0].index;
+
+  // P-7: stopAndSend contains TWO '} else {' occurrences — this if's own else, and the
+  // AbortError-vs-network-error else further down in the outer catch. The unbounded
+  // [\s\S]*? middle of the existing check below does not pin which else it landed on, and
+  // resetPlayer() need only appear somewhere after it — including inside that other else.
+  const elseMatches = [...stopAndSendSource.matchAll(/\}\s*else\s*\{/g)];
+  assert.equal(
+    elseMatches.length,
+    2,
+    `expected exactly two '} else {' occurrences in stopAndSend — the if (audioPcm) block's own else, and the ` +
+      `AbortError-vs-network-error else in the outer catch; found ${elseMatches.length}. A third occurrence ` +
+      'means this bound must be re-derived by hand, not the count bumped',
+  );
+
+  const audioBranchOpenBraceIndex = stopAndSendSource.indexOf('{', branchIndex);
+  assert.ok(
+    audioBranchOpenBraceIndex !== -1,
+    "sanity premise: expected an opening brace for the 'if (audioPcm)' block",
+  );
+  const audioBranchCloseBraceIndex = findMatchingClose(stopAndSendSource, audioBranchOpenBraceIndex);
+  const audioBranchRegion = stopAndSendSource.slice(audioBranchOpenBraceIndex, audioBranchCloseBraceIndex + 1);
+  // This is a conservative heuristic, not a completeness claim: the if (audioPcm) block body
+  // carries no quote, backtick, forward slash or HTML-like comment token, so this region is
+  // brace-walk safe; the following else block is NOT (it carries a // comment and apostrophes)
+  // and so cannot be pinned the same way — it is pinned by the uniqueness-of-two-else count
+  // above plus the position complement below instead of by findMatchingClose. This is the
+  // named residual: the else block's own closing brace is deliberately not used as an
+  // additional upper bound, because regionIsBraceWalkSafe rejects that body.
+  assert.ok(
+    regionIsBraceWalkSafe(audioBranchRegion),
+    'the if (audioPcm) block region must carry no quote character, no forward slash, and no HTML-like ' +
+      'comment opener or closer token, so the brace walk that located its matching close is not desynchronized; ' +
+      'this is a conservative heuristic, not a completeness claim',
+  );
+  assert.equal(
+    elseMatches[0].index,
+    audioBranchCloseBraceIndex,
+    "the FIRST '} else {' must be the one immediately closing the if (audioPcm) block — this pins the else " +
+      "to THIS if, closing the hole where stopAndSend's second, unrelated else (in the outer catch) could " +
+      'otherwise satisfy an unbounded match',
+  );
 
   assert.match(
     stopAndSendSource.slice(branchIndex),
     /\}\s*else\s*\{[\s\S]*?resetPlayer\(\)/,
     'the if (audioPcm) block must carry an else branch that calls resetPlayer() — without it a no-audio ' +
       'turn leaves whatever the last audio turn loaded sitting in the player',
+  );
+
+  // P-7 complement: the single resetPlayer() call must not lie inside the if (audioPcm) block's
+  // own region, must lie after that block's own else opens, and must lie before the SECOND
+  // '} else {' — the outer catch's unrelated else — begins. This bound is uniqueness-of-two-else
+  // plus a position complement, a deliberately bounded guarantee rather than a completeness claim.
+  assert.ok(
+    resetPlayerIndex < audioBranchOpenBraceIndex || resetPlayerIndex > audioBranchCloseBraceIndex,
+    'resetPlayer() must not be called from inside the if (audioPcm) block itself',
+  );
+  assert.ok(
+    resetPlayerIndex > audioBranchCloseBraceIndex && resetPlayerIndex < elseMatches[1].index,
+    "resetPlayer() must be called after the if (audioPcm) block's own else opens and before the outer catch's " +
+      'unrelated else begins — a call relocated into that other else would satisfy the unbounded match above ' +
+      'but not this bound',
   );
 
   assert.match(

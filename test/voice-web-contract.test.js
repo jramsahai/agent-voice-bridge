@@ -1247,12 +1247,21 @@ test("the purity guard's four named prose sites each state a bounded claim, not 
     );
   }
 
-  const regionAssertMatch = /^\s*assert\.ok\(\s*\n\s*regionIsBraceWalkSafe\(outerFinallyRegion\)/m.exec(thisFileSource);
-  assert.ok(
-    regionAssertMatch,
-    'sanity premise: expected the region-purity assert.ok(regionIsBraceWalkSafe(outerFinallyRegion) call ' +
-      'site in this file',
+  // P-8: a non-global .exec() takes only the FIRST call site matching this shape with no count
+  // assertion — asymmetric with the sibling Site-3 titleMatches guard just above, which does
+  // assert exactly one. This sweep is about to add region-purity call sites of its own (Tasks 1
+  // and 2), which turns the ambiguity from theoretical into live were this left unguarded.
+  const regionAssertMatches = [
+    ...thisFileSource.matchAll(/^\s*assert\.ok\(\s*\n\s*regionIsBraceWalkSafe\(outerFinallyRegion\)/gm),
+  ];
+  assert.equal(
+    regionAssertMatches.length,
+    1,
+    `expected exactly one region-purity assert.ok(regionIsBraceWalkSafe(outerFinallyRegion) call site in ` +
+      `this file; found ${regionAssertMatches.length}. A second match means the file grew an ambiguous call ` +
+      'site and the locator must be re-derived by hand, not the count bumped',
   );
+  const regionAssertMatch = regionAssertMatches[0];
   const regionCommentBlock = extractPrecedingCommentBlock(thisFileSource, regionAssertMatch.index);
   assert.ok(
     regionCommentBlock.length > 0,

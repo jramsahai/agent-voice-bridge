@@ -502,7 +502,8 @@ test('the browser client stays deliberately below the published client read-time
 // arrow event listeners (pointerdown and keydown), which extractFunctionSource/loadBrowserFunction
 // cannot reach — they anchor on a top-level `function name(` declaration — so this is a
 // source-shape assertion by necessity, not by preference.
-// WR-01 (10-REVIEW.md) / Success Criterion 3 (10-VERIFICATION.md), Plan 10-05: this test's
+// round-1-wr-01 (10-REVIEW-LINEAGE.md#round-1-wr-01) / Success Criterion 3 (10-VERIFICATION.md),
+// Plan 10-05: this test's
 // subject moved from "each of two inline listener bodies" to "the single beginRecording()
 // choke point plus each listener's delegation to it" — the consolidation collapses what were
 // two await ensureRecorder() call sites into one, so the sanity premise below now asserts
@@ -578,7 +579,8 @@ test('every awaited ensureRecorder() call site is wrapped in a catch that surfac
 // server enforces that, not this file (RESEARCH.md Pitfall 4).
 // =====================================================================================
 
-// WR-01 (10-REVIEW.md) / Success Criterion 3 (10-VERIFICATION.md), Plan 10-05: this test's
+// round-1-wr-01 (10-REVIEW-LINEAGE.md#round-1-wr-01) / Success Criterion 3 (10-VERIFICATION.md),
+// Plan 10-05: this test's
 // subject moved from "each of two inline listener bodies" to "the single beginRecording()
 // choke point plus each listener's delegation to it" — mediaRecorder.start() now has exactly
 // one call site (inside beginRecording()), so the recording-start *paths* this test walks are
@@ -894,7 +896,8 @@ test('stopAndSend releases the microphone in its finally block, so the release s
   // a bare-substring search for the finally keyword can be defeated by a comment mentioning
   // that word after the real block header — matching the convention Plan 10-05's newer test
   // (`the acquisition guard is read and set synchronously, before the first await`) already uses.
-  // WR-02 (10-REVIEW.md): the keyword form alone was insufficient, because stopAndSend()
+  // round-2-wr-02 (10-REVIEW-LINEAGE.md#round-2-wr-02): the keyword form alone was insufficient,
+  // because stopAndSend()
   // contains TWO `} finally {` blocks — the inner one guarding clearTimeout around the fetch
   // call, and the outer one that actually contains releaseMicStream() — and a non-global
   // `.exec()` returns only the first (inner) match, so the old comparison held regardless of
@@ -902,8 +905,8 @@ test('stopAndSend releases the microphone in its finally block, so the release s
   // last, on the premise that textually-last-is-outermost holds at this one level of nesting;
   // the exact-count assertion below is what makes a future third `finally` fail loudly instead
   // of silently re-opening the same hole.
-  // WR-02 (10-REVIEW.md), tracked as WR-04 in this gap-closure round's own numbering
-  // (10-VERIFICATION.md): the last-match retarget fixed which block the check anchors on but
+  // round-2-wr-02 (10-REVIEW-LINEAGE.md#round-2-wr-02): the last-match retarget fixed which block
+  // the check anchors on but
   // left the check one-sided, proving only that the call is after the block's opening brace —
   // a release moved past the block's own closing brace passed that check on a source carrying
   // the exact regression this test names. The check below is now a containment check bounded
@@ -1152,7 +1155,8 @@ test('the purity guard and its call site state a bounded claim rather than a com
 });
 
 // =====================================================================================
-// WR-01 (10-REVIEW.md) / Success Criterion 3 (10-VERIFICATION.md), Plan 10-05: DEBT-09's own
+// round-1-wr-01 (10-REVIEW-LINEAGE.md#round-1-wr-01) / Success Criterion 3 (10-VERIFICATION.md),
+// Plan 10-05: DEBT-09's own
 // fix reopened a cross-input-path TOCTOU race on every turn. releaseMicStream() nulls
 // mediaRecorder after each turn, so ensureRecorder()'s `if (mediaRecorder) return;` guard —
 // which used to short-circuit synchronously for the whole life of the page after the first
@@ -1330,8 +1334,8 @@ test('neither trigger listener runs its recording UI after beginRecording refuse
 });
 
 // =====================================================================================
-// WR-01 (10-REVIEW.md), tracked as WR-03 in this gap-closure round's own numbering
-// (10-VERIFICATION.md) / Success Criterion 3 (10-VERIFICATION.md): Plan 10-05's
+// round-2-wr-01 (10-REVIEW-LINEAGE.md#round-2-wr-01) / Success Criterion 3 (10-VERIFICATION.md):
+// Plan 10-05's
 // beginRecording() choke point closed the cross-input-path acquisition race, but its
 // own mediaRecorder.start() call still sat outside the try/catch/finally it
 // introduced. Per the MediaRecorder specification,

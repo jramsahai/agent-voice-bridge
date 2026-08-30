@@ -487,7 +487,8 @@ function hasToken() {
   return Boolean(tokenEl.value.trim());
 }
 
-// WR-01 (10-REVIEW.md): before this fix, ensureRecorder()'s own existence-check guard only
+// round-1-wr-01 (10-REVIEW-LINEAGE.md#round-1-wr-01): before this fix, ensureRecorder()'s own
+// existence-check guard only
 // protected against a same-path repeat — the pointer and keyboard listeners each awaited
 // ensureRecorder() independently, so a trigger from the *other* input path arriving inside
 // that await could pass the guard too, acquire its own getUserMedia() stream, and orphan
@@ -498,8 +499,7 @@ function hasToken() {
 // queued: one physical press means one recording, and awaiting the in-flight acquisition
 // would either start a second recording against the one recorder or hand the loser a
 // recorder the winner is already driving.
-// WR-01 (10-REVIEW.md), tracked as WR-03 in this gap-closure round's own numbering
-// (10-VERIFICATION.md): the recorder start call now sits inside this
+// round-2-wr-01 (10-REVIEW-LINEAGE.md#round-2-wr-01): the recorder start call now sits inside this
 // same guarded block, following its own recordedChunks reset. Per the MediaRecorder
 // specification the start call throws InvalidStateError when the stream has no live track,
 // which is reachable when the acquired track dies between the acquisition resolving and the

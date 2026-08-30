@@ -1480,3 +1480,115 @@ test("the recorder start call sits inside beginRecording's guarded block, not af
       "after a throw and strand finishRecording()'s own isRecording guard",
   );
 });
+
+// Citation-resolution guard (Phase 10 UAT gap G-10-6). Three rounds of this phase cited review
+// findings by bare ID against a review report that is regenerated in place by every review
+// round — so all eight citations silently stopped resolving when a later round replaced that
+// file's entries, and one ID had come to name two different findings across consecutive rounds.
+// The prose audit meant to catch this compared claims against a point-in-time snapshot, so
+// nothing failed when the target moved. This test makes resolution mechanical: every review
+// citation in the browser client and in this file must name a heading anchor that exists in the
+// document it cites, and may only cite an append-only document. A regenerated target now fails
+// here instead of rotting.
+//
+// Documents are resolved by BARE FILENAME against the planning tree, never by repository path —
+// test/doc-reference-hygiene.test.js explains why at length: completed phases get archived into
+// a milestone directory, which moves every file under them, and a path-form citation then
+// resolves nowhere while still looking precise. This scan reads its own source, so every
+// pattern literal below is assembled by concatenation rather than written out, following the
+// convention test/turn-suite-hygiene.test.js established for exactly that reason.
+const PLANNING_ROOT_NAME = ['.', 'planning'].join('');
+const REGENERATED_DOC_SUFFIXES = ['REVIEW', 'VERIFICATION'];
+const CITATION_ANCHOR_PATTERN = new RegExp(
+  ['([a-z0-9-]+)', '\\s+\\(', '([0-9A-Za-z-]+\\', '.md)', '#', '([a-z0-9-]+)', '\\)'].join(''),
+  'g',
+);
+
+function citedHeadingAnchors(markdownSource) {
+  return new Set(
+    markdownSource
+      .split('\n')
+      .filter((line) => /^#{1,6}\s/.test(line))
+      .map((line) => line.replace(/^#{1,6}\s+/, '').trim().toLowerCase())
+      .map((title) => title.replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-')),
+  );
+}
+
+function isRegeneratedArtifact(filename) {
+  const stem = filename.replace(/\.md$/, '');
+  return REGENERATED_DOC_SUFFIXES.some((suffix) => stem.endsWith(`-${suffix}`));
+}
+
+test('every review citation resolves to a real heading in an append-only planning document', (t) => {
+  const planningRoot = path.join(repoRoot, PLANNING_ROOT_NAME);
+  if (!fs.existsSync(planningRoot)) {
+    t.skip('planning tree absent — expected in the filtered public mirror');
+    return;
+  }
+
+  const byFilename = new Map();
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir)) {
+      const fullPath = path.join(dir, entry);
+      if (fs.statSync(fullPath).isDirectory()) walk(fullPath);
+      else if (!byFilename.has(entry)) byFilename.set(entry, fullPath);
+    }
+  };
+  walk(planningRoot);
+
+  const thisFilePath = fileURLToPath(import.meta.url);
+  const scanned = [
+    ['apps/voice-web/app.js', fs.readFileSync(appJsPath, 'utf8')],
+    ['test/voice-web-contract.test.js', fs.readFileSync(thisFilePath, 'utf8')],
+  ];
+
+  const citations = [];
+  for (const [label, source] of scanned) {
+    for (const match of source.matchAll(CITATION_ANCHOR_PATTERN)) {
+      const [, id, filename, anchor] = match;
+      const line = source.slice(0, match.index).split('\n').length;
+      citations.push({ site: `${label}:${line}`, id, filename, anchor });
+    }
+  }
+
+  assert.ok(
+    citations.length > 0,
+    'sanity premise: expected at least one anchored review citation across the scanned files — a ' +
+      'zero-citation scan would make every assertion below vacuous',
+  );
+
+  const anchorCache = new Map();
+  for (const citation of citations) {
+    assert.ok(
+      !isRegeneratedArtifact(citation.filename),
+      `${citation.site} cites ${citation.filename}, which each review round regenerates in place: the ` +
+        'anchor it names can be dropped by the next regeneration without anything failing. Cite the ' +
+        'append-only lineage document instead',
+    );
+
+    const resolvedPath = byFilename.get(citation.filename);
+    assert.ok(
+      resolvedPath,
+      `${citation.site} cites ${citation.filename}, which does not exist anywhere in the planning tree`,
+    );
+
+    if (!anchorCache.has(citation.filename)) {
+      anchorCache.set(citation.filename, citedHeadingAnchors(fs.readFileSync(resolvedPath, 'utf8')));
+    }
+
+    assert.ok(
+      anchorCache.get(citation.filename).has(citation.anchor),
+      `${citation.site} cites ${citation.filename}#${citation.anchor}, but that document has no such ` +
+        'heading — the exact drift G-10-6 recorded: a citation that still reads plausibly while pointing ' +
+        'at nothing. Re-derive the anchor by hand rather than deleting the citation',
+    );
+
+    assert.equal(
+      citation.id,
+      citation.anchor,
+      `${citation.site} labels the finding '${citation.id}' but cites anchor '${citation.anchor}': the ` +
+        'label must be the anchor, so a citation cannot name one finding while pointing at another — the ' +
+        'second half of G-10-6, where one ID meant two different findings depending on the site',
+    );
+  }
+});

@@ -47,7 +47,7 @@ const FORBIDDEN_PATH_PREFIXES = [`${PLANNING_DIR}/`, `${AGENT_DIR}/`];
 // so a module added later is covered without editing this test.
 const SCAN_ROOTS = ['apps', 'packages', 'test'];
 
-const DOC_SUFFIXES = ['PLAN', 'UAT', 'SPEC', 'SUMMARY', 'VERIFICATION', 'RESEARCH', 'REVIEW', 'PATTERNS'];
+const DOC_SUFFIXES = ['PLAN', 'UAT', 'SPEC', 'SUMMARY', 'VERIFICATION', 'RESEARCH', 'REVIEW', 'PATTERNS', 'LINEAGE'];
 const CITATION_PATTERN = new RegExp(
   ['\\b\\d{2}-[A-Za-z0-9-]*(?:', DOC_SUFFIXES.join('|'), ')\\', '.md\\b'].join(''),
   'g',

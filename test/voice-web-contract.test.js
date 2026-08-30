@@ -1107,7 +1107,7 @@ function extractPrecedingCommentBlock(source, anchorIndex) {
   return commentLines.join('\n');
 }
 
-test('the purity guard and its call site state a bounded claim rather than a completeness claim', () => {
+test("the purity guard's four named prose sites each state a bounded claim, not a completeness claim", () => {
   const thisFilePath = fileURLToPath(import.meta.url);
   const thisFileSource = fs.readFileSync(thisFilePath, 'utf8');
 
@@ -1152,6 +1152,72 @@ test('the purity guard and its call site state a bounded claim rather than a com
         'further, not to weaken this pattern list',
     );
   }
+
+  // Sites 3 and 4 below are plain string literals, not `//` comments, so
+  // extractPrecedingCommentBlock cannot reach either of them. CR-01 (10-REVIEW-GAP5.md) proved by
+  // reverted mutation that retired wording reinstated at either site left this suite fully green.
+  // This test scans these four named sites and no others; its own title and its own assertion
+  // messages are deliberately outside the scanned set — an enumerated scope, not a claim about
+  // every prose site in this file.
+
+  // Site 3 — the predicate pinning test's title (see `regionIsBraceWalkSafe rejects ...` above): a
+  // plain string literal reached by pattern, not by extractPrecedingCommentBlock. This pattern
+  // needs no array-join concatenation the way FETCH_CALL_TOKEN and OVERCLAIM_PATTERNS do, because
+  // the `^` line anchor plus the required `test\('` prefix means this regex literal's own indented
+  // source line — which begins with whitespace, not `test(` — cannot satisfy it.
+  const titleMatches = [...thisFileSource.matchAll(/^test\('(regionIsBraceWalkSafe rejects[^']*)'/gm)];
+  assert.equal(
+    titleMatches.length,
+    1,
+    `expected exactly one regionIsBraceWalkSafe pinning-test title; found ${titleMatches.length}. A second ` +
+      'match means the file grew an ambiguous title and the locator must be re-derived by hand, not the ' +
+      'count bumped',
+  );
+  for (const pattern of OVERCLAIM_PATTERNS) {
+    assert.ok(
+      !pattern.test(titleMatches[0][1]),
+      `the pinning-test title matched overclaim pattern ${pattern} — the fix is to bound the title further, ` +
+        'not to weaken this pattern list',
+    );
+  }
+  // BOUNDED_CLAIM_MARKER is not required at this site: a test title has no room for the disclaimer
+  // clause, so the title is overclaim-scanned only — a deliberately weaker guarantee than the other
+  // three named sites.
+
+  // Site 4 — the region-purity assert's own failure message. Reuses regionAssertMatch above rather
+  // than re-deriving the locator, then slices forward to the call's own closing `);` rather than
+  // trying to isolate the string content directly.
+  const regionAssertTerminatorIndex = thisFileSource.indexOf(');', regionAssertMatch.index);
+  assert.notEqual(
+    regionAssertTerminatorIndex,
+    -1,
+    'sanity premise: expected a closing ); terminator for the region-purity assert.ok call',
+  );
+  const regionAssertSlice = thisFileSource.slice(regionAssertMatch.index, regionAssertTerminatorIndex + 2);
+  assert.ok(regionAssertSlice.length > 0, 'sanity premise: the region-purity assert slice must be non-empty');
+  const regionAssertCallOccurrences = [...regionAssertSlice.matchAll(/regionIsBraceWalkSafe\(/g)];
+  assert.equal(
+    regionAssertCallOccurrences.length,
+    1,
+    'sanity premise: expected exactly one regionIsBraceWalkSafe( occurrence in the region-purity assert ' +
+      `slice — proving the slice stopped at this assertion instead of running on into neighbouring code; ` +
+      `found ${regionAssertCallOccurrences.length}`,
+  );
+  assert.ok(
+    regionAssertSlice.includes(BOUNDED_CLAIM_MARKER),
+    'the region-purity assert failure message must carry the bounded-claim marker',
+  );
+  for (const pattern of OVERCLAIM_PATTERNS) {
+    assert.ok(
+      !pattern.test(regionAssertSlice),
+      `the region-purity assert failure message matched overclaim pattern ${pattern} — the fix is to bound ` +
+        'the claim further, not to weaken this pattern list',
+    );
+  }
+  // Fragility: BOUNDED_CLAIM_MARKER above is matched against this raw concatenated source slice, so
+  // the marker must remain inside a single string literal. A later reflow that splits it across a
+  // concatenation boundary fails this assertion; the correct response is to re-join the literal,
+  // never to relax the check.
 });
 
 // =====================================================================================

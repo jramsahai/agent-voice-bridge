@@ -1358,6 +1358,31 @@ test('the acquisition guard is read and set synchronously, before the first awai
     guardIndex < setIndex,
     'the guard condition naming the acquisition flag must occur before the assignment that sets it true',
   );
+  // P-3: the check above has no teeth on its own — 'isAcquiring' is a prefix substring of
+  // 'isAcquiring = true', so guardIndex <= setIndex holds by construction for ANY source text,
+  // whether or not a real guard exists. The guard-FORM locator below is what actually pins a
+  // guard, tightened per this sweep's own P-3 orchestrator decision to the exact
+  // `if (...isAcquiring...) return` shape rather than any `if` merely naming the flag.
+  const setMatches = [...beginRecordingSource.matchAll(/isAcquiring = true/g)];
+  assert.equal(
+    setMatches.length,
+    1,
+    `expected exactly one 'isAcquiring = true' assignment in beginRecording(); found ${setMatches.length}`,
+  );
+  const guardFormMatches = [...beginRecordingSource.matchAll(/if\s*\([^)]*isAcquiring[^)]*\)\s*return\b/g)];
+  assert.equal(
+    guardFormMatches.length,
+    1,
+    `expected exactly one 'if (...isAcquiring...) return' guard form in beginRecording(); found ` +
+      `${guardFormMatches.length} — the bare-identifier locator above is satisfied by the assignment itself, ` +
+      'so this keyword-shaped locator is what actually pins a guard rather than any occurrence of the flag name',
+  );
+  assert.ok(
+    guardFormMatches[0].index < setIndex,
+    'the guard-form match must occur before the assignment that sets the flag true — this is the bound with ' +
+      'teeth; the bare-identifier guardIndex above is a prefix of the literal isAcquiring = true itself, so ' +
+      'guardIndex < setIndex holds regardless of whether a real guard exists',
+  );
 
   const awaitIndex = beginRecordingSource.indexOf('await');
   assert.ok(awaitIndex !== -1, "sanity premise: expected an 'await' in beginRecording()'s source");
@@ -1370,13 +1395,57 @@ test('the acquisition guard is read and set synchronously, before the first awai
   // Located by the keyword form, not a bare-word search: IN-01 (10-REVIEW.md) documents how
   // a bare-substring search for the finally keyword can match the word inside a comment.
   // That correction is Plan 10-08's; this new test must not reproduce the pattern it corrects.
-  const finallyMatch = /\}\s*finally\s*\{/.exec(beginRecordingSource);
+  // P-2: a non-global .exec() takes only the FIRST '} finally {' occurrence with no count
+  // assertion, which is the root cause round-2-wr-02 (10-REVIEW-LINEAGE.md#round-2-wr-02) named
+  // for stopAndSend's own finally-placement test — this test carried the same hole. Reusing
+  // locateOuterFinallyRegion (shared with that already-fixed test) plus the exact-count check
+  // below closes it here too, without hand-rolling a second locator.
+  const {
+    finallyMatches,
+    openBraceIndex: beginRecordingFinallyOpenBrace,
+    closeBraceIndex: beginRecordingFinallyCloseBrace,
+    region: beginRecordingFinallyRegion,
+  } = locateOuterFinallyRegion(beginRecordingSource);
+  assert.equal(
+    finallyMatches.length,
+    1,
+    `expected exactly one '} finally {' block in beginRecording(); found ${finallyMatches.length}. A second ` +
+      'occurrence means the nesting changed and the locator must be re-derived by hand, not the count bumped',
+  );
+  const finallyMatch = finallyMatches[finallyMatches.length - 1];
   assert.ok(finallyMatch, "expected a '} finally {' block in beginRecording()");
+
+  // This is a conservative heuristic, not a completeness claim: it establishes that the
+  // finally region carries none of the constructs that could desync the raw-text brace walk
+  // below, not that every brace-hiding construct is covered.
+  assert.ok(
+    regionIsBraceWalkSafe(beginRecordingFinallyRegion),
+    'the beginRecording finally region must carry no quote character, no forward slash, and no HTML-like ' +
+      'comment opener or closer token, so the containment check below is not desynchronized by a hidden ' +
+      'brace; this is a conservative heuristic, not a completeness claim',
+  );
+
+  const clearMatches = [...beginRecordingSource.matchAll(/isAcquiring = false/g)];
+  assert.equal(
+    clearMatches.length,
+    1,
+    `expected exactly one 'isAcquiring = false' assignment in beginRecording(); found ${clearMatches.length}`,
+  );
 
   const clearIndex = beginRecordingSource.indexOf('isAcquiring = false', finallyMatch.index);
   assert.ok(
     clearIndex !== -1 && clearIndex > finallyMatch.index,
     'the assignment that clears the acquisition flag must occur after the finally keyword',
+  );
+  // P-1: the check above is a lower bound only — indexOf can only return an index >= the
+  // finally keyword's own index, so '> finallyMatch.index' adds nothing beyond '!== -1'. A
+  // clear moved past the finally block's own closing brace still passes it. The bound below
+  // closes that hole by containing the clear strictly within the finally block's own matching
+  // braces, located by findMatchingClose via locateOuterFinallyRegion above.
+  assert.ok(
+    clearIndex > beginRecordingFinallyOpenBrace && clearIndex < beginRecordingFinallyCloseBrace,
+    "the assignment that clears the acquisition flag must occur strictly inside the finally block's own " +
+      'braces — a clear placed after the block closes has already left the flag set on the way there',
   );
 });
 
@@ -1518,7 +1587,26 @@ test('a recorder start that throws does not lock the page out of the next acquis
 test("the recorder start call sits inside beginRecording's guarded block, not after it", () => {
   const beginRecordingSource = extractFunctionSource('beginRecording');
 
-  const catchMatch = /\}\s*catch\s*\(/.exec(beginRecordingSource);
+  // P-4: both locators below are now exact-count assertions rather than bare non-global
+  // .exec() calls with no count guard. The try match also gives the guarded block's own
+  // opening brace, which the two containment checks further down use as their missing
+  // lower bound — the title claims containment INSIDE the guarded block, and an upper bound
+  // alone does not enforce that.
+  const tryMatches = [...beginRecordingSource.matchAll(/\btry\s*\{/g)];
+  assert.equal(
+    tryMatches.length,
+    1,
+    `expected exactly one 'try {' block in beginRecording(); found ${tryMatches.length}`,
+  );
+  const tryOpenBraceIndex = tryMatches[0].index + tryMatches[0][0].length - 1;
+
+  const catchMatches = [...beginRecordingSource.matchAll(/\}\s*catch\s*\(/g)];
+  assert.equal(
+    catchMatches.length,
+    1,
+    `expected exactly one '} catch (' in beginRecording()'s source; found ${catchMatches.length}`,
+  );
+  const catchMatch = catchMatches[0];
   assert.ok(catchMatch, "sanity premise: expected a '} catch (' in beginRecording()'s source");
 
   const startMatches = [...beginRecordingSource.matchAll(/mediaRecorder\.start\(\)/g)];
@@ -1530,12 +1618,27 @@ test("the recorder start call sits inside beginRecording's guarded block, not af
       'after the guard throws into nothing: no user feedback, no release, and a recorder binding left ' +
       'non-null that makes every later press a silent no-op',
   );
+  assert.ok(
+    startMatches[0].index > tryOpenBraceIndex,
+    "the recorder start call must also occur after the guarded block's own opening brace — a start call " +
+      "hoisted above the try is outside the block the test's own title claims it sits inside",
+  );
 
-  const chunksResetIndex = beginRecordingSource.indexOf('recordedChunks = []');
-  assert.ok(chunksResetIndex !== -1, "expected a 'recordedChunks = []' assignment in beginRecording()");
+  const chunksResetMatches = [...beginRecordingSource.matchAll(/recordedChunks = \[\]/g)];
+  assert.equal(
+    chunksResetMatches.length,
+    1,
+    `expected exactly one 'recordedChunks = []' assignment in beginRecording(); found ${chunksResetMatches.length}`,
+  );
+  const chunksResetIndex = chunksResetMatches[0].index;
   assert.ok(
     chunksResetIndex < catchMatch.index,
     'the recordedChunks reset must also occur before the catch that closes the guarded try block',
+  );
+  assert.ok(
+    chunksResetIndex > tryOpenBraceIndex,
+    "the recordedChunks reset must also occur after the guarded block's own opening brace — hoisted above " +
+      'the try, it would run on every call regardless of whether acquisition even started',
   );
 
   const recordingFlagIndex = beginRecordingSource.indexOf('isRecording = true');
@@ -1544,6 +1647,41 @@ test("the recorder start call sits inside beginRecording's guarded block, not af
     recordingFlagIndex > startMatches[0].index,
     'the recorder-active flag must be set only after the start call — setting it before would leave it set ' +
       "after a throw and strand finishRecording()'s own isRecording guard",
+  );
+  // P-5: the check above is a lower bound only. isRecording = true relocated INTO the catch
+  // block is still after the start call and passes it, even though the assertion's own message
+  // names that placement as the defect. The complement below closes that hole: the flag must
+  // be set strictly after the finally block closes, which places it outside the catch entirely.
+  const recordingFlagMatches = [...beginRecordingSource.matchAll(/isRecording = true/g)];
+  assert.equal(
+    recordingFlagMatches.length,
+    1,
+    `expected exactly one 'isRecording = true' assignment in beginRecording(); found ${recordingFlagMatches.length}`,
+  );
+  const {
+    finallyMatches: beginRecordingFinallyMatches,
+    closeBraceIndex: beginRecordingFinallyCloseBrace,
+    region: beginRecordingFinallyRegion,
+  } = locateOuterFinallyRegion(beginRecordingSource);
+  assert.equal(
+    beginRecordingFinallyMatches.length,
+    1,
+    `expected exactly one '} finally {' block in beginRecording(); found ${beginRecordingFinallyMatches.length}`,
+  );
+  // This is a conservative heuristic, not a completeness claim: it establishes that the
+  // finally region carries none of the constructs that could desync the raw-text brace walk
+  // below, not that every brace-hiding construct is covered.
+  assert.ok(
+    regionIsBraceWalkSafe(beginRecordingFinallyRegion),
+    'the beginRecording finally region must carry no quote character, no forward slash, and no HTML-like ' +
+      'comment opener or closer token, so the bound below is not desynchronized by a hidden brace; this is a ' +
+      'conservative heuristic, not a completeness claim',
+  );
+  assert.ok(
+    recordingFlagIndex > beginRecordingFinallyCloseBrace,
+    'the recorder-active flag must be set strictly after the finally block closes — a flag set inside the ' +
+      'catch block is after the start call and would pass the lower bound above, but is exactly the ' +
+      'placement that would leave it set after a throw',
   );
 });
 

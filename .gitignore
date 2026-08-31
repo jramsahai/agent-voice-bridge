@@ -5,3 +5,4 @@ node_modules/
 config/config.local.json
 reply.pcm
 .claude/settings.local.json
+.gsd/

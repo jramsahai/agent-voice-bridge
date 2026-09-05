@@ -27,7 +27,7 @@ function extractReply(stdout) {
   }
 }
 
-function cleanTextForSpeech(text) {
+export function cleanTextForSpeech(text) {
   let cleaned = text
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/\*([^*]+)\*/g, '$1')
@@ -40,7 +40,11 @@ function cleanTextForSpeech(text) {
     .replace(/^\d+\.\s+/gm, ' ')
     .replace(/^\[\s*[xX]\s*\]\s+/gm, ' ')
     .replace(/^\[\s*\]\s+/gm, ' ')
-    .replace(/[→\-•✓✔]/g, ' ')
+    // Extended_Pictographic/Emoji_Presentation/Emoji_Modifier/Regional_Indicator plus the
+    // ZWJ, VS16, and keycap enclosing mark cover multi-code-point emoji sequences; the
+    // legacy arrow/bullet/checkmark set stays explicit since none of it is caught by those
+    // properties (✓ U+2713 notably is not Extended_Pictographic).
+    .replace(/[→\-•✓✔\u200D\uFE0F\u20E3\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji_Modifier}\p{Regional_Indicator}]/gu, ' ')
     .replace(/:\s*$/gm, ' ')
     .replace(/:\s+/g, ' ')
     .replace(/\s+/g, ' ')

@@ -18,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { sendTurnToOpenClaw } from '../packages/shared/adapters/openclaw-cli.js';
+import { sendTurnToOpenClaw, cleanTextForSpeech } from '../packages/shared/adapters/openclaw-cli.js';
 
 function uniqueLabel(label) {
   return `vbtest-openclawcli-${label}-${randomUUID()}`;
@@ -83,6 +83,66 @@ test('sendTurnToOpenClaw with a well-formed sessionId still primes and writes ex
     const before = fs.readFileSync(statePath, 'utf8');
     await sendTurnToOpenClaw('hello again', { command: stubPath, sessionId }, {});
     assert.equal(fs.readFileSync(statePath, 'utf8'), before, 'a second turn must not rewrite the priming marker');
+  } finally {
+    fs.rmSync(statePath, { force: true });
+    fs.rmSync(stubDir, { recursive: true, force: true });
+  }
+});
+
+// cleanTextForSpeech's emoji strip: a screenless device speaking pictograph names is a
+// defect the client can't work around, so the strip is pinned with exact-string assertions
+// covering plain pictographs, multi-code-point sequences (ZWJ, flags, keycaps, skin tone),
+// and proof the legacy arrow/bullet/checkmark set and ordinary prose are unaffected.
+
+test('cleanTextForSpeech removes plain pictographs, including a multi-emoji reply', () => {
+  assert.equal(cleanTextForSpeech('Hello \u{1F600} world'), 'Hello world');
+  assert.equal(cleanTextForSpeech('Great job \u{1F44D} \u{1F389} today'), 'Great job today');
+});
+
+test('cleanTextForSpeech removes ZWJ sequences, joiner included, with no orphan code point', () => {
+  assert.equal(cleanTextForSpeech('Meet \u{1F468}‍\u{1F469}‍\u{1F467} today'), 'Meet today');
+  assert.equal(cleanTextForSpeech('A \u{1F469}‍\u{1F4BB} arrived'), 'A arrived');
+});
+
+test('cleanTextForSpeech removes a regional-indicator flag sequence', () => {
+  assert.equal(cleanTextForSpeech('Ship to \u{1F1FA}\u{1F1F8} now'), 'Ship to now');
+});
+
+test('cleanTextForSpeech strips a keycap sequence but retains the base digit', () => {
+  assert.equal(cleanTextForSpeech('Step 1️⃣ then 2️⃣'), 'Step 1 then 2');
+});
+
+test('cleanTextForSpeech removes a skin-tone modifier attached to a base pictograph', () => {
+  assert.equal(cleanTextForSpeech('Nice \u{1F44D}\u{1F3FD} job'), 'Nice job');
+});
+
+test('cleanTextForSpeech leaves ordinary text, digits, and punctuation byte-identical', () => {
+  const prose = 'The meeting is at 3pm on Tuesday, and it costs $4.50.';
+  assert.equal(cleanTextForSpeech(prose), prose);
+});
+
+test('cleanTextForSpeech still strips the legacy arrow/bullet/checkmark set', () => {
+  assert.equal(cleanTextForSpeech('A → B • C ✓ D ✔ E'), 'A B C D E');
+});
+
+function writeEmojiStubOpenClaw(dir, reply) {
+  const scriptPath = path.join(dir, 'openclaw-stub-emoji.sh');
+  const payload = JSON.stringify({ reply });
+  fs.writeFileSync(scriptPath, `#!/bin/sh\nprintf '%s' '${payload}'\n`, { mode: 0o755 });
+  return scriptPath;
+}
+
+test('sendTurnToOpenClaw cleans emoji from text but leaves rawText verbatim, emoji included', async () => {
+  const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vbtest-openclawcli-stub-'));
+  const sessionId = uniqueLabel('emoji-invariant');
+  const statePath = path.join(voiceSessionStateDir, `${sessionId}.json`);
+  try {
+    const reply = 'Great job \u{1F44D} today';
+    const stubPath = writeEmojiStubOpenClaw(stubDir, reply);
+
+    const result = await sendTurnToOpenClaw('hello', { command: stubPath, sessionId }, {});
+    assert.equal(result.text, 'Great job today');
+    assert.equal(result.rawText, reply);
   } finally {
     fs.rmSync(statePath, { force: true });
     fs.rmSync(stubDir, { recursive: true, force: true });

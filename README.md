@@ -12,7 +12,8 @@ See [`docs/API.md`](./docs/API.md) for the versioned HTTP API contract a client 
 This service runs on **macOS only** and will not run on Linux or Windows. It shells out to
 macOS-specific binaries at fixed paths: `/usr/bin/afconvert` for audio format conversion
 (the default in `packages/shared/audio/convert.js`), `/usr/bin/say` for the `macos-say` TTS
-provider, and a `#!/bin/zsh` wrapper script (`scripts/whisper-audio`) for local transcription.
+provider, and two `#!/bin/zsh` wrapper scripts (`scripts/whisper-audio` for local transcription,
+`scripts/tts-kokoro` for the Kokoro spawn fallback).
 The OpenClaw CLI itself is typically installed via a Homebrew-style path. The test suite shells
 out to the real `/usr/bin/afconvert`, so it does not run on Linux either.
 
@@ -172,7 +173,7 @@ Example shape:
   },
   "tts": {
     "provider": "kokoro-onnx",
-    "command": "tts-kokoro",
+    "command": "./scripts/tts-kokoro",
     "serviceUrl": "http://127.0.0.1:4319",
     "voice": "af_heart",
     "voices": ["af_heart"]

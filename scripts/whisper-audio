@@ -9,7 +9,8 @@ fi
 input="$1"
 model="${VOICE_BRIDGE_WHISPER_MODEL:-$HOME/.openclaw/models/whisper/ggml-small.en.bin}"
 vad_model="${VOICE_BRIDGE_WHISPER_VAD_MODEL:-$HOME/.openclaw/models/whisper/ggml-silero-vad.onnx}"
-whisper_cli="${WHISPER_CLI:-whisper-cli}"
+# Resolved explicitly so this script also works from a launchd job whose PATH lacks Homebrew.
+whisper_cli="${WHISPER_CLI:-$(command -v whisper-cli 2>/dev/null || echo /opt/homebrew/bin/whisper-cli)}"
 afconvert_bin="${AFCONVERT:-/usr/bin/afconvert}"
 
 tmpdir="$(mktemp -d)"
@@ -18,9 +19,16 @@ wav="$tmpdir/audio.wav"
 
 "$afconvert_bin" -f WAVE -d LEI16@16000 "$input" "$wav" >/dev/null 2>&1
 
+# VAD trims leading/trailing silence and skips pauses so short push-to-talk clips transcribe
+# faster; the thresholds below were tuned against real handheld turns.
 vad_args=()
 if [ -f "$vad_model" ]; then
-  vad_args=(--vad -vm "$vad_model")
+  vad_args=(
+    --vad -vm "$vad_model"
+    --vad-threshold 0.30
+    --vad-min-silence-duration-ms 400
+    --vad-speech-pad-ms 200
+  )
 fi
 
 "$whisper_cli" -m "$model" -f "$wav" -nt -np "${vad_args[@]}"

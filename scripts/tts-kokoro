@@ -1,0 +1,14 @@
+#!/bin/zsh
+# Spawn-fallback TTS command for the bridge (config tts.command). Runs apps/kokoro-tts/speak.py
+# under the Kokoro venv. Model paths come from KOKORO_MODEL / KOKORO_VOICES (see speak.py).
+set -euo pipefail
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: tts-kokoro <text> <output-wav> [voice]" >&2
+  exit 2
+fi
+
+script_dir="${0:A:h}"
+python_bin="${KOKORO_PYTHON:-$HOME/.openclaw/tts/kokoro-onnx/.venv/bin/python}"
+
+exec "$python_bin" "$script_dir/../apps/kokoro-tts/speak.py" "$@"

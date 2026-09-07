@@ -51,6 +51,7 @@ Keep `config/config.local.json` out of git.
 ## Whisper STT
 
 The repo includes `scripts/whisper-audio`, which accepts an audio file path and prints transcript text.
+It also includes `scripts/tts-kokoro`, the spawn fallback the bridge uses for speech when the Kokoro service is down; it runs `apps/kokoro-tts/speak.py` under the Kokoro venv (override the interpreter with `KOKORO_PYTHON`).
 
 Defaults:
 

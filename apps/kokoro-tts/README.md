@@ -38,3 +38,7 @@ Useful environment variables:
 - `KOKORO_PORT`: bind port, default `4319`
 
 Point the bridge at the service with `tts.serviceUrl` in `config.local.json` or with `KOKORO_TTS_URL`.
+
+## Spawn fallback
+
+When the service is unreachable the bridge falls back to spawning `tts.command` once per turn. The repo ships that command as `scripts/tts-kokoro`, which runs `apps/kokoro-tts/speak.py` (`<text> <output-wav> [voice]`) under the same venv. It reads `KOKORO_MODEL`, `KOKORO_VOICES`, and `KOKORO_DEFAULT_VOICE` exactly as the service does, and `KOKORO_PYTHON` selects the interpreter (default `~/.openclaw/tts/kokoro-onnx/.venv/bin/python`). It loads the model on every call, so expect a few seconds per turn on this path.

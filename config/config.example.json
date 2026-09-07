@@ -14,7 +14,7 @@
   },
   "tts": {
     "provider": "kokoro-onnx",
-    "command": "tts-kokoro",
+    "command": "./scripts/tts-kokoro",
     "serviceUrl": "http://127.0.0.1:4319",
     "voice": "af_heart",
     "voices": ["af_heart"]

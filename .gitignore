@@ -6,3 +6,5 @@ config/config.local.json
 reply.pcm
 .claude/settings.local.json
 .gsd/
+__pycache__/
+*.pyc

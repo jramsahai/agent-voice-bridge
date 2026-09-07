@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -812,6 +813,78 @@ test('a client that destroys its socket mid-turn causes the in-flight fake speak
     await waitUntil(() => observedAborted !== null);
 
     assert.equal(observedAborted, true);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('a client that disconnects mid-upload (before Content-Length bytes arrive) logs outcome aborted with errorCode TURN_ABORTED, not INTERNAL_ERROR', async (t) => {
+  const errorCalls = [];
+  t.mock.method(console, 'error', (...args) => {
+    errorCalls.push(args);
+  });
+
+  const config = buildTestConfig();
+  const adapters = {
+    transcribe: async () => {
+      throw new Error('transcribe must not be called — the body never finished uploading');
+    },
+    agent: async () => {
+      throw new Error('agent must not be called');
+    },
+    speak: async () => {
+      throw new Error('speak must not be called');
+    },
+  };
+  const records = [];
+  const handler = createRequestHandler({
+    config,
+    adapters,
+    webDir: '/nonexistent',
+    logTurn: (record) => records.push(record),
+  });
+  const server = await startServer(handler);
+  try {
+    const port = server.address().port;
+    const socket = net.connect(port, '127.0.0.1');
+    await new Promise((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+
+    // Declares a body twice the size of what is actually sent, then the socket is torn
+    // down mid-upload — readRawBody's for-await loop must observe the connection reset
+    // rather than ever completing the body.
+    const declaredLength = 1000;
+    const partialBody = Buffer.alloc(50);
+    const requestHead =
+      'POST /v1/turn HTTP/1.1\r\n' +
+      'Host: 127.0.0.1\r\n' +
+      'Content-Type: application/octet-stream\r\n' +
+      `Content-Length: ${declaredLength}\r\n` +
+      'X-Voice-Input-Format: pcm16\r\n' +
+      'Connection: close\r\n' +
+      '\r\n';
+    socket.on('error', () => {});
+    socket.write(requestHead);
+    // Destroys once the partial body has actually been handed to the OS (an observable
+    // write-flush condition, not a fixed wall-clock guess) — so the server is guaranteed to
+    // have received fewer bytes than the declared Content-Length before the reset arrives.
+    await new Promise((resolve, reject) => socket.write(partialBody, (err) => (err ? reject(err) : resolve())));
+    socket.destroy();
+
+    await waitUntil(() => records.length === 1);
+    assert.equal(records[0].outcome, TURN_OUTCOMES.ABORTED);
+    assert.equal(records[0].errorCode, 'TURN_ABORTED');
+
+    assert.ok(
+      !errorCalls.some((args) => String(args[0]).includes('[voice-bridge] request failed')),
+      'a mid-upload disconnect must never log through the INTERNAL_ERROR / "request failed" path',
+    );
+    assert.ok(
+      !records.some((record) => record.errorCode === 'INTERNAL_ERROR'),
+      'a mid-upload disconnect must never be logged as INTERNAL_ERROR',
+    );
   } finally {
     await closeServer(server);
   }

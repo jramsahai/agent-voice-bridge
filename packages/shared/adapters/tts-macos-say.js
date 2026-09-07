@@ -33,7 +33,7 @@ export async function speakWithMacosSay(text, ttsConfig, { signal } = {}) {
       maxBuffer: 10 * 1024 * 1024,
       signal,
     });
-    const audioBuffer = fs.readFileSync(wavPath);
+    const audioBuffer = await fs.promises.readFile(wavPath);
 
     return {
       audioBuffer,

@@ -48,7 +48,6 @@ export function cleanTextForSpeech(text) {
     .replace(/:\s*$/gm, ' ')
     .replace(/:\s+/g, ' ')
     .replace(/\s+/g, ' ')
-    .replace(/\n+/g, ' ')
     .trim();
 
   return cleaned;
@@ -87,10 +86,17 @@ function getSessionStatePath(sessionId) {
   return path.join(voiceSessionStateDir, `${sessionId}.json`);
 }
 
+// Memoized so a hot session doesn't pay an fs.existsSync stat on every turn — once a
+// sessionId is observed primed (on disk or just marked), later turns skip the stat entirely.
+const primedSessionCache = new Set();
+
 function hasSessionBeenPrimed(sessionId) {
   if (!sessionId) return false;
+  if (primedSessionCache.has(sessionId)) return true;
   try {
-    return fs.existsSync(getSessionStatePath(sessionId));
+    const primed = fs.existsSync(getSessionStatePath(sessionId));
+    if (primed) primedSessionCache.add(sessionId);
+    return primed;
   } catch {
     return false;
   }
@@ -100,6 +106,13 @@ function markSessionPrimed(sessionId) {
   if (!sessionId) return;
   fs.mkdirSync(voiceSessionStateDir, { recursive: true });
   fs.writeFileSync(getSessionStatePath(sessionId), JSON.stringify({ primedAt: new Date().toISOString() }), 'utf8');
+  primedSessionCache.add(sessionId);
+}
+
+// Test-only: lets a test suite that reuses the same sessionId across cases clear the
+// in-process memoization without needing a fresh process.
+export function resetPrimedSessionCache() {
+  primedSessionCache.clear();
 }
 
 function getOpenClawCommand(openclawConfig) {

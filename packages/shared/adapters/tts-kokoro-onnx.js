@@ -132,7 +132,7 @@ async function speakWithKokoroOnnx(text, ttsConfig, { signal } = {}) {
     // codebase: forwarding signal terminates this child directly on abort. The command
     // already writes a WAV to wavPath (FMT-02) — no conversion needed.
     await execFileAsync(command, [text, wavPath, voice], { timeout: 120000, maxBuffer: 10 * 1024 * 1024, signal });
-    const audioBuffer = fs.readFileSync(wavPath);
+    const audioBuffer = await fs.promises.readFile(wavPath);
 
     return {
       audioBuffer,

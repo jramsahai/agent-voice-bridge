@@ -24,6 +24,7 @@ import { listSupportedFormats } from '../../packages/shared/audio/format-registr
 import { buildError } from '../../packages/shared/errors/error-response.js';
 import { isKnownErrorCode } from '../../packages/shared/errors/error-codes.js';
 import { getBackendStatus, BACKEND_UP } from '../../packages/shared/health/backend-health-cache.js';
+import { TurnAbortedError } from '../../packages/shared/errors/turn-errors.js';
 import { probeExecutable, probeHttpService } from '../../packages/shared/health/probes.js';
 import { buildClientDigests, resolveClientIdentity, ANONYMOUS_CLIENT_NAME } from '../../packages/shared/security/token-auth.js';
 import { getKokoroServiceUrl } from '../../packages/shared/adapters/tts-kokoro-onnx.js';
@@ -260,14 +261,29 @@ export function createRequestHandler({
 
     const chunks = [];
     let total = 0;
-    for await (const chunk of req) {
-      total += chunk.length;
-      if (total > MAX_REQUEST_AUDIO_BYTES) {
-        const err = new Error('audio payload exceeds the maximum allowed size');
-        err.code = 'AUDIO_TOO_LARGE';
-        throw err;
+    try {
+      for await (const chunk of req) {
+        total += chunk.length;
+        if (total > MAX_REQUEST_AUDIO_BYTES) {
+          const err = new Error('audio payload exceeds the maximum allowed size');
+          err.code = 'AUDIO_TOO_LARGE';
+          throw err;
+        }
+        chunks.push(chunk);
       }
-      chunks.push(chunk);
+    } catch (err) {
+      // A client that drops mid-upload surfaces here as the socket's own error (verified
+      // empirically on this Node version: code ECONNRESET, message 'aborted') — not a server
+      // fault, so it must not fall through to the router's outer catch as an INTERNAL_ERROR
+      // with a logged stack. Re-thrown as TurnAbortedError so the existing TURN_ABORTED
+      // branch there handles it (outcome aborted, no stack logged). req.destroyed is NOT a
+      // usable signal here — breaking out of the for-await loop above via our own
+      // AUDIO_TOO_LARGE throw also flips it true (the async iterator's return() tears the
+      // stream down as cleanup), so checking it would misclassify that case as an abort too.
+      if (err.code === 'ECONNRESET' || err.message === 'aborted') {
+        throw new TurnAbortedError();
+      }
+      throw err;
     }
     return Buffer.concat(chunks);
   }
@@ -513,10 +529,18 @@ export function createRequestHandler({
   // BACKEND_DOWN by getBackendStatus's own contract — no try/catch of its own is needed
   // here. Served without acquiring the shared turn lock: this route never calls runTurn().
   async function handleHealth(req, res) {
+    // Probe the backend the configured provider actually uses (mirrors preflight.js's own
+    // provider branching) — a macos-say deployment has no Kokoro service to reach, so
+    // probing it there would report a healthy deployment as down.
+    const ttsProvider = config.tts?.provider ?? 'macos-say';
+    const probeSpeech =
+      ttsProvider === 'macos-say'
+        ? () => probeExecutable('/usr/bin/say')
+        : () => probeHttpService(getKokoroServiceUrl(config.tts));
     const [transcribe, agent, speech] = await Promise.all([
       getBackendStatus('transcribe', () => probeExecutable(config.stt?.command ?? '')),
       getBackendStatus('agent', () => probeExecutable(config.openclaw?.command ?? '')),
-      getBackendStatus('speech', () => probeHttpService(getKokoroServiceUrl(config.tts))),
+      getBackendStatus('speech', probeSpeech),
     ]);
 
     // Named backends only — no service URL, configured command, resolved path, or probe

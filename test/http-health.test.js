@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 import { createRequestHandler, DISCOVERY_RATE_LIMIT_MAX_REQUESTS } from '../apps/voice-bridge/request-handler.js';
@@ -183,12 +184,20 @@ test('D-04 locked contract: all three backends resolving returns exactly 200, an
   const upConfig = buildTestConfig({
     stt: { command: process.execPath },
     openclaw: { command: process.execPath },
-    tts: { serviceUrl: `http://127.0.0.1:${probeTargetPort}` },
+    tts: { provider: 'kokoro-onnx', serviceUrl: `http://127.0.0.1:${probeTargetPort}` },
   });
   const upHandler = createRequestHandler({ config: upConfig, adapters: {}, webDir: '/nonexistent' });
   const upServer = await startServer(upHandler);
 
-  const downConfig = buildTestConfig({ stt: { command: process.execPath }, openclaw: { command: process.execPath } });
+  // Explicit kokoro-onnx provider: this test exercises the HTTP-service probe path
+  // specifically (the macos-say path has its own dedicated tests below), so the
+  // unresolvable serviceUrl must actually be what's probed regardless of the local
+  // machine's own /usr/bin/say availability.
+  const downConfig = buildTestConfig({
+    stt: { command: process.execPath },
+    openclaw: { command: process.execPath },
+    tts: { provider: 'kokoro-onnx' },
+  });
   const downHandler = createRequestHandler({ config: downConfig, adapters: {}, webDir: '/nonexistent' });
   const downServer = await startServer(downHandler);
 
@@ -386,6 +395,55 @@ test(`request number ${DISCOVERY_RATE_LIMIT_MAX_REQUESTS + 1} to GET /v1/health 
     assert.ok(idx > 0, 'first line must split into a key and a value on \': \' — it is not JSON');
     assert.equal(firstLine.slice(0, idx), 'error-code');
     assert.equal(firstLine.slice(idx + 2), 'RATE_LIMITED');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// =====================================================================================
+// speech probe follows the configured TTS provider, not always Kokoro
+// =====================================================================================
+
+function hasExecutableSay() {
+  try {
+    fs.accessSync('/usr/bin/say', fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test('provider macos-say with no reachable Kokoro service still reports speech: up, via /usr/bin/say', { skip: !hasExecutableSay() }, async () => {
+  const config = buildTestConfig({
+    stt: { command: process.execPath },
+    openclaw: { command: process.execPath },
+    tts: { provider: 'macos-say', serviceUrl: UNREACHABLE_SERVICE_URL },
+  });
+  const handler = createRequestHandler({ config, adapters: {}, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const response = await getPath(server.address().port, '/v1/health');
+    const pairs = parseLineBody(response.body);
+    assert.deepEqual(Object.fromEntries(pairs).speech, BACKEND_UP);
+    assert.equal(response.statusCode, 200);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('provider kokoro-onnx with an unreachable serviceUrl still reports speech: down', async () => {
+  const config = buildTestConfig({
+    stt: { command: process.execPath },
+    openclaw: { command: process.execPath },
+    tts: { provider: 'kokoro-onnx', serviceUrl: UNREACHABLE_SERVICE_URL },
+  });
+  const handler = createRequestHandler({ config, adapters: {}, webDir: '/nonexistent' });
+  const server = await startServer(handler);
+  try {
+    const response = await getPath(server.address().port, '/v1/health');
+    const pairs = parseLineBody(response.body);
+    assert.deepEqual(Object.fromEntries(pairs).speech, BACKEND_DOWN);
+    assert.equal(response.statusCode, 503);
   } finally {
     await closeServer(server);
   }

@@ -71,7 +71,9 @@ test('both stage ceilings are exported as positive numbers', () => {
 // published floor — exactly the drift these constants were introduced to prevent.
 for (const { file, constant } of [
   { file: 'packages/shared/adapters/stt-whisper-local.js', constant: 'TRANSCRIBE_TIMEOUT_MS' },
-  { file: 'packages/shared/adapters/openclaw-cli.js', constant: 'AGENT_TIMEOUT_MS' },
+  { file: 'packages/shared/adapters/agent-openclaw-cli.js', constant: 'AGENT_TIMEOUT_MS' },
+  { file: 'packages/shared/adapters/agent-hermes-cli.js', constant: 'AGENT_TIMEOUT_MS' },
+  { file: 'packages/shared/adapters/agent-command.js', constant: 'AGENT_TIMEOUT_MS' },
 ]) {
   test(`${file} takes its execFile timeout from ${constant}, not an inlined number`, () => {
     const sourceText = sourceOf(file);

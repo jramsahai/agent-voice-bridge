@@ -45,9 +45,9 @@ function makeFakes({ transcript = 'hello world', rawReply = 'Hi **there**.', spe
     record.transcribe.push({ audioPath, sttConfig, options, existedAtCallTime, contentsAtCallTime });
     return { text: transcript, meta: {} };
   };
-  const agent = async (text, openclawConfig, options) => {
+  const agent = async (text, agentConfig, options) => {
     calls.agent += 1;
-    record.agent.push({ text, openclawConfig, options });
+    record.agent.push({ text, agentConfig, options });
     return { text: speechText, rawText: rawReply, meta: {} };
   };
   const speak = async (text, ttsConfig, options) => {
@@ -74,7 +74,7 @@ test('a complete turn resolves transcript, reply, speechText and speech from the
     audioBuffer,
     adapters,
     sttConfig: { command: 'whisper-cli' },
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: { provider: 'macos-say' },
   });
 
@@ -95,7 +95,7 @@ test('a complete turn resolves transcript, reply, speechText and speech from the
   assert.ok('signal' in transcribeOptions);
 
   assert.equal(record.agent.length, 1);
-  const { text: agentText, openclawConfig: agentConfig, options: agentOptions } = record.agent[0];
+  const { text: agentText, agentConfig: agentConfig, options: agentOptions } = record.agent[0];
   assert.equal(agentText, 'what time is it');
   assert.equal(agentConfig.sessionId, sessionId);
   assert.ok('signal' in agentOptions);
@@ -119,7 +119,7 @@ test('wantAudio: false resolves with speech null and never calls the speak fake'
     audioBuffer: Buffer.from('bytes'),
     adapters,
     sttConfig: {},
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: {},
     wantAudio: false,
   });
@@ -133,14 +133,14 @@ test('wantAudio: false resolves with speech null and never calls the speak fake'
 
 test('two sequential turns with the same config report the same session id and reuse the config object reference', async () => {
   const sessionId = uniqueSessionId('shared');
-  const openclawConfig = { sessionId };
+  const agentConfig = { sessionId };
   const { adapters, record } = makeFakes();
 
   const first = await runTurn({
     audioBuffer: Buffer.from('turn-one'),
     adapters,
     sttConfig: {},
-    openclawConfig,
+    agentConfig,
     ttsConfig: {},
     wantAudio: false,
   });
@@ -148,24 +148,24 @@ test('two sequential turns with the same config report the same session id and r
     audioBuffer: Buffer.from('turn-two'),
     adapters,
     sttConfig: {},
-    openclawConfig,
+    agentConfig,
     ttsConfig: {},
     wantAudio: false,
   });
 
   assert.equal(first.meta.sessionId, sessionId);
   assert.equal(second.meta.sessionId, sessionId);
-  assert.equal(record.agent[0].openclawConfig, openclawConfig, 'the agent fake must receive the identical config object reference');
-  assert.equal(record.agent[1].openclawConfig, openclawConfig);
+  assert.equal(record.agent[0].agentConfig, agentConfig, 'the agent fake must receive the identical config object reference');
+  assert.equal(record.agent[1].agentConfig, agentConfig);
 });
 
-test('source assertion: every sessionId property read in turn-pipeline.js reads from openclawConfig', () => {
+test('source assertion: every sessionId property read in turn-pipeline.js reads from agentConfig', () => {
   const identifiers = [...PIPELINE_SOURCE.matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)\.sessionId/g)].map((m) => m[1]);
   assert.ok(identifiers.length > 0, 'expected at least one sessionId property read in the module');
-  assert.deepEqual(new Set(identifiers), new Set(['openclawConfig']));
+  assert.deepEqual(new Set(identifiers), new Set(['agentConfig']));
 });
 
-test('unknown top-level keys are ignored: session id always comes from openclawConfig and extraneous keys never reach an adapter', async () => {
+test('unknown top-level keys are ignored: session id always comes from agentConfig and extraneous keys never reach an adapter', async () => {
   const sessionId = uniqueSessionId('unknown-keys');
   const { adapters, record } = makeFakes();
 
@@ -173,15 +173,15 @@ test('unknown top-level keys are ignored: session id always comes from openclawC
     audioBuffer: Buffer.from('bytes'),
     adapters,
     sttConfig: {},
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: {},
     wantAudio: false,
     sessionId: 'attacker-controlled-id',
     extraneous: 'must never reach an adapter',
   });
 
-  assert.equal(record.agent[0].openclawConfig.sessionId, sessionId);
-  assert.ok(!('extraneous' in record.agent[0].openclawConfig));
+  assert.equal(record.agent[0].agentConfig.sessionId, sessionId);
+  assert.ok(!('extraneous' in record.agent[0].agentConfig));
 });
 
 // --- Guard clauses ---
@@ -203,7 +203,7 @@ for (const { label, sessionId } of sessionIdGuardCases) {
         audioBuffer: Buffer.from('bytes'),
         adapters,
         sttConfig: {},
-        openclawConfig: { sessionId },
+        agentConfig: { sessionId },
         ttsConfig: {},
       }),
     );
@@ -241,7 +241,7 @@ for (const { label, adapters } of adapterGuardCases) {
         audioBuffer: Buffer.from('bytes'),
         adapters,
         sttConfig: {},
-        openclawConfig: { sessionId },
+        agentConfig: { sessionId },
         ttsConfig: {},
       }),
     );
@@ -265,7 +265,7 @@ test('guard clause: non-Buffer audioBuffer rejects before any adapter call, lock
       audioBuffer: 'not-a-buffer',
       adapters,
       sttConfig: {},
-      openclawConfig: { sessionId },
+      agentConfig: { sessionId },
       ttsConfig: {},
     }),
   );
@@ -283,7 +283,7 @@ test('guard clause: an audioFilename with a path separator is rejected the same 
       audioBuffer: Buffer.from('bytes'),
       adapters,
       sttConfig: {},
-      openclawConfig: { sessionId },
+      agentConfig: { sessionId },
       ttsConfig: {},
       audioFilename: 'a/b.wav',
     }),
@@ -309,7 +309,7 @@ for (const badFilename of ['.', '..']) {
         audioBuffer: Buffer.from('bytes'),
         adapters,
         sttConfig: {},
-        openclawConfig: { sessionId },
+        agentConfig: { sessionId },
         ttsConfig: {},
         audioFilename: badFilename,
       }),
@@ -330,7 +330,7 @@ test('after a successful turn the lock artifact does not exist', async () => {
     audioBuffer: Buffer.from('bytes'),
     adapters,
     sttConfig: {},
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: {},
     wantAudio: false,
   });
@@ -355,7 +355,7 @@ test('a throwing agent fake propagates the original error unchanged and still re
         audioBuffer: Buffer.from('bytes'),
         adapters,
         sttConfig: {},
-        openclawConfig: { sessionId },
+        agentConfig: { sessionId },
         ttsConfig: {},
       }),
     (err) => err === boom,
@@ -384,7 +384,7 @@ test('lock span: the artifact and its holder metadata exist while the agent stag
     audioBuffer: Buffer.from('bytes'),
     adapters,
     sttConfig: {},
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: {},
     wantAudio: false,
   });
@@ -405,7 +405,7 @@ test('an already-held lock causes runTurn to reject with TurnBusyError without c
           audioBuffer: Buffer.from('bytes'),
           adapters,
           sttConfig: {},
-          openclawConfig: { sessionId },
+          agentConfig: { sessionId },
           ttsConfig: {},
         }),
       (err) => err instanceof TurnBusyError,
@@ -447,7 +447,7 @@ test('temp hygiene: a successful turn creates a real directory and removes it', 
     audioBuffer: Buffer.from('bytes'),
     adapters,
     sttConfig: {},
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: {},
     wantAudio: false,
   });

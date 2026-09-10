@@ -1,11 +1,11 @@
-# OpenClaw Voice Bridge
+# Agent Voice Bridge
 
-A modular, portable voice companion for OpenClaw focused on private, remote, push-to-talk conversations over Tailscale.
+A modular, portable push-to-talk voice bridge for local agent CLIs, focused on private, remote conversations over Tailscale. Speak from a phone, a laptop, or a handheld; the bridge transcribes locally, hands the text to your agent, and speaks the reply back.
 
 See [`docs/API.md`](./docs/API.md) for the versioned HTTP API contract a client can implement against without reading server source.
 
-> **Unofficial, third-party project.** This is not affiliated with, endorsed by, or supported
-> by the OpenClaw project.
+> **Unofficial, third-party project.** Not affiliated with, endorsed by, or supported by the
+> OpenClaw or Hermes projects.
 
 ## macOS only
 
@@ -14,25 +14,33 @@ macOS-specific binaries at fixed paths: `/usr/bin/afconvert` for audio format co
 (the default in `packages/shared/audio/convert.js`), `/usr/bin/say` for the `macos-say` TTS
 provider, and two `#!/bin/zsh` wrapper scripts (`scripts/whisper-audio` for local transcription,
 `scripts/tts-kokoro` for the Kokoro spawn fallback).
-The OpenClaw CLI itself is typically installed via a Homebrew-style path. The test suite shells
-out to the real `/usr/bin/afconvert`, so it does not run on Linux either.
+The test suite shells out to the real `/usr/bin/afconvert`, so it does not run on Linux either.
+Linux support is on the roadmap, not in the code.
 
-## What OpenClaw is
+## Supported agents
 
-[OpenClaw](https://openclaw.ai/) is the agent CLI this bridge hands voice turns to. It is
-MIT-licensed and lives at [github.com/openclaw/openclaw](https://github.com/openclaw/openclaw).
-It installs via npm as the `openclaw` package, or via a Homebrew cask.
+The bridge talks to the agent through one small adapter per provider, selected by `agent.provider`:
+
+| Provider | Agent | Status |
+| --- | --- | --- |
+| `openclaw` | [OpenClaw](https://github.com/openclaw/openclaw), via `openclaw agent --json` against a dedicated session | Exercised daily on the author's own setup |
+| `hermes` | [Hermes Agent](https://github.com/NousResearch/hermes-agent), via `hermes chat -Q --oneshot -q … --resume …` | Written from the CLI reference; not yet run against a real install |
+| `command` | Any executable that takes a prompt and prints a reply | Stateless escape hatch for everything else |
+
+Adding a provider is one file in `packages/shared/adapters/` exposing
+`(text, agentConfig, { signal }) → { text, rawText, meta }` plus a branch in `agent.js`. See
+[`SETUP.md`](./SETUP.md) for the per-provider config.
 
 ## What it is
 
-This project provides a small browser-based voice client and a local bridge service that lets you talk to an OpenClaw agent from other devices on your tailnet.
+This project provides a small browser-based voice client and a local bridge service that lets you talk to your agent from other devices on your tailnet.
 
 Current shape:
 - browser push-to-talk UI
 - a versioned HTTP API (`docs/API.md`) any client can implement against, plus a non-browser reference CLI client (`apps/voice-cli`) proving it
-- local bridge service on the OpenClaw host
+- local bridge service on the agent's host
 - local STT via `whisper-cpp` wrapper
-- OpenClaw turn handoff via `openclaw agent`
+- agent turn handoff through a provider adapter (`openclaw`, `hermes`, or any `command`)
 - switchable local TTS backends:
   - `macos-say`
   - `kokoro-onnx`
@@ -40,7 +48,7 @@ Current shape:
 
 ## Current status
 
-This repo now contains a working MVP that has been exercised across multiple devices.
+This repo contains a working MVP that has been exercised across multiple devices.
 
 Working today:
 - a published, versioned HTTP API (`docs/API.md`) covering `POST /v1/turn`, `GET /v1/capabilities`, and `GET /v1/health`, implementable with raw HTTP and PCM buffers
@@ -48,10 +56,10 @@ Working today:
 - remote voice access from laptop and phone over Tailscale
 - browser mic capture in a secure context
 - local transcription on the host machine
-- dedicated OpenClaw session handoff for voice turns
+- dedicated agent session handoff for voice turns
 - local TTS reply playback in the browser
 - voice-mode session shaping for better spoken replies:
-  - the bridge uses a dedicated OpenClaw session for voice turns
+  - the bridge uses a dedicated agent session for voice turns
   - that session is primed once with voice-mode instructions instead of injecting a fake system prompt into every turn
   - normal turns send only the plain transcript text to the agent
   - TTS receives a speech-cleaned version of the reply while the client can still receive the raw reply text for display/debugging
@@ -73,19 +81,19 @@ This is still an MVP, but it is no longer just a scaffold.
 ## Architecture at a glance
 
 ```text
-Phone / Laptop Browser
+Phone / Laptop Browser, CLI, or handheld
         ↓
 Tailscale Serve HTTPS
         ↓
 Voice Bridge Service
         ↓
 - STT adapter (local whisper wrapper)
-- OpenClaw adapter
+- agent adapter (`openclaw`, `hermes`, or `command`)
 - TTS adapter (`macos-say` or `kokoro-onnx`)
         ↓
-OpenClaw session reply
+agent session reply
         ↓
-Audio + text back to browser
+Audio + text back to the client
 ```
 
 ## Goals
@@ -94,7 +102,7 @@ Audio + text back to browser
 - Tailscale-first private access
 - Local speech-to-text by default
 - Swappable text-to-speech backends
-- Minimal coupling to any single OpenClaw install
+- Swappable agent backends, with no agent-specific logic outside its adapter
 - Portable enough to reuse on another machine or share with a friend
 
 ## Core modules
@@ -108,7 +116,7 @@ Audio + text back to browser
 ### `apps/voice-bridge`
 - accepts uploaded turn audio
 - runs STT adapter
-- calls OpenClaw
+- calls the agent adapter
 - runs TTS adapter
 - returns text + audio payloads
 - exposes the versioned HTTP API documented in `docs/API.md` (`POST /v1/turn`, `GET /v1/capabilities`, `GET /v1/health`)
@@ -126,7 +134,8 @@ Audio + text back to browser
 ### `packages/shared/adapters`
 - STT adapters
 - TTS adapters
-- OpenClaw integration layer
+- agent adapters (`agent-openclaw-cli.js`, `agent-hermes-cli.js`, `agent-command.js`) behind the `agent.js` selector
+- shared session priming (`agent-session.js`) and speech cleanup (`speech-clean.js`)
 
 ## Current adapters
 
@@ -142,11 +151,14 @@ Audio + text back to browser
   - prefers the optional persistent Kokoro service when `tts.serviceUrl` or `KOKORO_TTS_URL` is available
   - falls back to the local wrapper command so the bridge can stay runtime-agnostic
 
-### OpenClaw
-- `openclaw agent --json`
-- uses a dedicated explicit session id so voice turns do not contend with the main chat lane
-- on first use, the bridge sends a one-time priming turn to that session with voice-mode instructions so replies stay brief, conversational, and speech-friendly
-- after that, normal turns send only the transcribed user text rather than injecting a fake system prompt on every request
+### Agent
+- `openclaw`
+  - `openclaw agent --json` with a dedicated explicit session id so voice turns do not contend with the main chat lane
+- `hermes`
+  - `hermes chat -Q --oneshot -q <text> --resume <sessionId>`; the session must already exist
+- `command`
+  - your executable, `{text}` in `agent.args` or the transcript on stdin, reply on stdout
+- for the session-aware providers, the bridge sends a one-time priming turn with voice-mode instructions on first use so replies stay brief, conversational, and speech-friendly; after that, normal turns send only the transcribed user text
 
 ## Configuration
 
@@ -162,7 +174,8 @@ Example shape:
     "host": "127.0.0.1",
     "port": 4318
   },
-  "openclaw": {
+  "agent": {
+    "provider": "openclaw",
     "command": "openclaw",
     "sessionId": "voice-bridge-mvp",
     "thinking": "low"
@@ -196,6 +209,9 @@ Example shape:
 }
 ```
 
+A config still using the pre-provider `openclaw` key is migrated in memory to `agent` with
+`"provider": "openclaw"` and a startup warning; update the file to silence it.
+
 `security.expectedHost` also still accepts a plain string (one host) — that shape is unchanged.
 The list form exists so one configuration can serve both a Tailscale-Serve-fronted browser
 (port 443, so the `Host` header carries no port suffix) and a TLS-less client reaching the
@@ -225,18 +241,18 @@ Do not commit:
 - real Tailscale hostnames
 - real usernames or home paths
 - local-only deployment configs
-- durable model/runtime state under `~/.openclaw`
+- durable model/runtime state
 
 See [`config/PORTABILITY.md`](./config/PORTABILITY.md) for more.
 
 ## Setup
 
-See [`SETUP.md`](./SETUP.md) for a fresh-machine checklist covering model files, local config, Whisper STT, the optional Kokoro service, and Tailscale Serve.
+See [`SETUP.md`](./SETUP.md) for a fresh-machine checklist covering model files, local config, the agent provider, Whisper STT, the optional Kokoro service, and Tailscale Serve.
 
 ## Project structure
 
 ```text
-voice-bridge/
+agent-voice-bridge/
   README.md
   ARCHITECTURE.md
   ROADMAP.md
@@ -275,7 +291,7 @@ The current bridge intentionally separates three concerns:
    - the bridge tracks locally whether that dedicated session has already been primed so it does not resend the priming turn on every request
 
 2. **Per-turn handoff**
-   - each normal voice turn sends only the transcribed user message to OpenClaw
+   - each normal voice turn sends only the transcribed user message to the agent
    - this avoids brittle per-turn fake system prompt injection and keeps the user turn clean
 
 3. **TTS cleanup**
@@ -287,8 +303,8 @@ This architecture produced noticeably better spoken replies than the earlier app
 
 ## Next likely improvements
 
+- verify the Hermes provider against a real install
 - better secret handling / token rotation
-- optional warm persistent Kokoro service for lower latency
 - stronger install/setup automation
 - more polished voice UX and TTS tuning
 - broader portability cleanup for non-macOS hosts

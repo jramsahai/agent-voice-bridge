@@ -155,7 +155,7 @@ test('temp hygiene: a successful turn creates a real directory and removes it', 
     audioBuffer: Buffer.from('bytes'),
     adapters,
     sttConfig: {},
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: {},
   });
 
@@ -180,7 +180,7 @@ test('temp hygiene: a turn whose transcribe adapter throws still removes its own
       audioBuffer: Buffer.from('bytes'),
       adapters,
       sttConfig: {},
-      openclawConfig: { sessionId },
+      agentConfig: { sessionId },
       ttsConfig: {},
     }),
   );
@@ -208,7 +208,7 @@ test('temp hygiene: a turn whose agent adapter throws still removes its own dire
       audioBuffer: Buffer.from('bytes'),
       adapters,
       sttConfig: {},
-      openclawConfig: { sessionId },
+      agentConfig: { sessionId },
       ttsConfig: {},
     }),
   );
@@ -236,7 +236,7 @@ test('temp hygiene: a turn whose speak adapter throws still removes its own dire
       audioBuffer: Buffer.from('bytes'),
       adapters,
       sttConfig: {},
-      openclawConfig: { sessionId },
+      agentConfig: { sessionId },
       ttsConfig: {},
     }),
   );
@@ -269,7 +269,7 @@ test('temp hygiene: a turn refused by a guard clause never reaches the transcrib
       audioBuffer: Buffer.from('bytes'),
       adapters,
       sttConfig: {},
-      openclawConfig: { sessionId: '' },
+      agentConfig: { sessionId: '' },
       ttsConfig: {},
     }),
   );
@@ -297,7 +297,7 @@ test('temp hygiene: a turn refused as busy never reaches the transcribe stage, s
           audioBuffer: Buffer.from('bytes'),
           adapters,
           sttConfig: {},
-          openclawConfig: { sessionId },
+          agentConfig: { sessionId },
           ttsConfig: {},
         }),
       (err) => err.code === 'TURN_BUSY',
@@ -331,7 +331,7 @@ test('a zero-length audio buffer still produces a real directory that is removed
     audioBuffer: Buffer.alloc(0),
     adapters,
     sttConfig: {},
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: {},
     wantAudio: false,
   });
@@ -360,7 +360,7 @@ test('two back-to-back turns hand their transcribe adapters two different direct
     audioBuffer: Buffer.from('one'),
     adapters,
     sttConfig: {},
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: {},
     wantAudio: false,
   });
@@ -368,7 +368,7 @@ test('two back-to-back turns hand their transcribe adapters two different direct
     audioBuffer: Buffer.from('two'),
     adapters,
     sttConfig: {},
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: {},
     wantAudio: false,
   });
@@ -402,7 +402,7 @@ test('several turns launched at once against one session each remove their own d
         audioBuffer: Buffer.from('bytes'),
         adapters,
         sttConfig: {},
-        openclawConfig: { sessionId },
+        agentConfig: { sessionId },
         ttsConfig: {},
         wantAudio: false,
       }),

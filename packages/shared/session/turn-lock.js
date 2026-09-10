@@ -12,10 +12,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-// The same directory packages/shared/adapters/openclaw-cli.js already writes its
+// The same directory packages/shared/adapters/agent-session.js already writes its
 // {sessionId}.json session-state file into — the lock sits at the same level of reality as
 // the resource it protects.
-const LOCK_ROOT = path.join(os.tmpdir(), 'openclaw-voice-bridge-session-state');
+const LOCK_ROOT = path.join(os.tmpdir(), 'agent-voice-bridge-session-state');
 
 // Distinct from the session-state file's own naming (`{sessionId}.json`) so the lock
 // artifact can never collide with it.
@@ -87,7 +87,7 @@ function isProcessAlive(pid) {
 }
 
 // Every read here is wrapped so a failure collapses to the safe "no metadata" answer rather
-// than propagating — the same posture openclaw-cli.js's hasSessionBeenPrimed applies to its
+// than propagating — the same posture agent-session.js's hasSessionBeenPrimed applies to its
 // own read path.
 function readHolderMetadata(lockPath) {
   try {

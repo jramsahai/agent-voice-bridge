@@ -8,8 +8,9 @@
 
 import { probeExecutable, probeHttpService } from '../health/probes.js';
 import { getKokoroServiceUrl } from '../adapters/tts-kokoro-onnx.js';
+import { getAgentCommand } from '../adapters/agent.js';
 
-// Fixed declaration order (D-09, 04-03-PLAN.md): stt.command, openclaw.command,
+// Fixed declaration order (D-09, 04-03-PLAN.md): stt.command, agent.command,
 // /usr/bin/afconvert, then exactly one of [system speech binary | ONNX spawn-fallback
 // command] depending on the configured provider, and finally — only for the ONNX
 // provider — the speech service itself as the one soft check. The output arrays are always
@@ -25,8 +26,8 @@ function buildChecks(config) {
     },
     {
       kind: 'hard',
-      probeArg: config.openclaw?.command ?? 'openclaw',
-      message: (arg) => `openclaw.command ('${arg}') is not resolvable — required to reach the agent`,
+      probeArg: getAgentCommand(config.agent),
+      message: (arg) => `agent.command ('${arg}') is not resolvable — required to reach the agent`,
     },
     {
       kind: 'hard',

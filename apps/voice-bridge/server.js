@@ -6,10 +6,13 @@ import { runPreflightChecks } from '../../packages/shared/lifecycle/preflight.js
 import { installShutdownHandlers } from '../../packages/shared/lifecycle/shutdown.js';
 import { transcribeWithWhisperLocal } from '../../packages/shared/adapters/stt-whisper-local.js';
 import { speakText } from '../../packages/shared/adapters/tts.js';
-import { sendTurnToOpenClaw } from '../../packages/shared/adapters/openclaw-cli.js';
+import { sendTurnToAgent } from '../../packages/shared/adapters/agent.js';
 import { createRequestHandler } from './request-handler.js';
 
-const { config, configPath } = loadConfig();
+const { config, configPath, warnings: configWarnings } = loadConfig();
+for (const warning of configWarnings) {
+  console.warn(`[voice-bridge] ${warning}`);
+}
 const rootDir = getRootDir();
 const webDir = path.join(rootDir, 'apps', 'voice-web');
 
@@ -43,7 +46,7 @@ if (preflightErrors.length > 0) {
 
 const adapters = {
   transcribe: transcribeWithWhisperLocal,
-  agent: sendTurnToOpenClaw,
+  agent: sendTurnToAgent,
   speak: speakText,
 };
 

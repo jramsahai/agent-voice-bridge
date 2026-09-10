@@ -1,5 +1,5 @@
 // The two concrete reachability probes this project has: a filesystem-resolvability check
-// for external CLI commands (whisper, openclaw) and an HTTP health check for the Kokoro
+// for external CLI commands (whisper, the agent CLI) and an HTTP health check for the Kokoro
 // FastAPI service. Both are zero-argument-friendly factories suitable to hand to
 // getBackendStatus as its probeFn.
 
@@ -14,7 +14,7 @@ import { composeAbortSignals } from '../lifecycle/abort-signals.js';
 const HTTP_PROBE_TIMEOUT_MS = 2000;
 
 // Resolvability check only — this must never execute the configured binary. Probing the
-// agent backend by actually running the OpenClaw CLI would start real work nobody asked for
+// agent backend by actually running the agent CLI would start real work nobody asked for
 // (T-3-12). A command containing a path separator is resolved against the repository root
 // via getRootDir() when relative, then checked directly; a bare command name is searched
 // across every entry in process.env.PATH the same way. Resolves when runnable, rejects

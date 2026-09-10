@@ -39,7 +39,7 @@ function buildTestConfig({ security = {}, tts = { voices: ['af_heart', 'af_bella
       ...security,
     },
     stt: {},
-    openclaw: { sessionId: uniqueSessionId('capabilities') },
+    agent: { sessionId: uniqueSessionId('capabilities') },
     tts,
   };
 }

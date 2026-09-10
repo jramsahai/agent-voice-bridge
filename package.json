@@ -1,7 +1,7 @@
 {
-  "name": "openclaw-voice-bridge",
+  "name": "agent-voice-bridge",
   "version": "0.1.0",
-  "description": "Tailscale-first push-to-talk voice bridge for OpenClaw",
+  "description": "Tailscale-first push-to-talk voice bridge for local agent CLIs (OpenClaw, Hermes, or any command)",
   "license": "MIT",
   "type": "module",
   "repository": {

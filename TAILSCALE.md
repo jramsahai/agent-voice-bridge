@@ -30,7 +30,7 @@ Open that once and enable Serve for the node.
 ## Start the voice bridge
 
 ```bash
-cd voice-bridge
+cd agent-voice-bridge
 node apps/voice-bridge/server.js
 ```
 

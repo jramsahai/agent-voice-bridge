@@ -13,6 +13,7 @@ export const MIN_CLIENT_TOKEN_LENGTH = 16;
 export const PLACEHOLDER_TOKEN_PREFIX = 'replace-with-';
 
 const TTS_PROVIDERS = ['macos-say', 'kokoro-onnx'];
+const AGENT_PROVIDERS = ['openclaw', 'hermes', 'command'];
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -155,18 +156,27 @@ export function validateConfig(config) {
     }
   }
 
-  // 8. stt / openclaw
+  // 8. stt / agent
   const sttCommand = config.stt?.command;
   if (typeof sttCommand !== 'string' || sttCommand.length === 0) {
     errors.push('stt.command must be a non-empty string');
   }
-  const openclawCommand = config.openclaw?.command;
-  if (typeof openclawCommand !== 'string' || openclawCommand.length === 0) {
-    errors.push('openclaw.command must be a non-empty string');
+  // The pre-provider key. loadConfig migrates it when it stands alone; reaching here with
+  // it still present means a raw config carried both spellings, or bypassed loadConfig.
+  if (config.openclaw !== undefined) {
+    errors.push('config key "openclaw" was renamed to "agent" (with "provider": "openclaw"); remove the old key');
   }
-  const openclawSessionId = config.openclaw?.sessionId;
-  if (typeof openclawSessionId !== 'string' || openclawSessionId.length === 0) {
-    errors.push('openclaw.sessionId must be a non-empty string');
+  const agentProvider = config.agent?.provider;
+  if (agentProvider !== undefined && !AGENT_PROVIDERS.includes(agentProvider)) {
+    errors.push(`agent.provider must be one of: ${AGENT_PROVIDERS.join(', ')}`);
+  }
+  const agentCommand = config.agent?.command;
+  if (typeof agentCommand !== 'string' || agentCommand.length === 0) {
+    errors.push('agent.command must be a non-empty string');
+  }
+  const agentSessionId = config.agent?.sessionId;
+  if (typeof agentSessionId !== 'string' || agentSessionId.length === 0) {
+    errors.push('agent.sessionId must be a non-empty string');
   }
 
   // 9. tts — provider must be one of the strings the selector in adapters/tts.js actually

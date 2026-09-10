@@ -29,7 +29,7 @@ function createDeferred() {
   return { promise, resolve };
 }
 
-// Imitates markSessionPrimed's write shape in openclaw-cli.js (mkdirSync the parent, then
+// Imitates markSessionPrimed's write shape in agent-session.js (mkdirSync the parent, then
 // one writeFileSync of a small JSON document) so the single-writer proof below is about a
 // realistic write, not a synthetic counter.
 function writeScratchRecord(scratchPath, turnId) {
@@ -50,7 +50,7 @@ function makeBaseArgs(sessionId, adapters) {
     audioBuffer: Buffer.from(turnId, 'utf8'),
     adapters,
     sttConfig: {},
-    openclawConfig: { sessionId },
+    agentConfig: { sessionId },
     ttsConfig: {},
     wantAudio: false,
   });

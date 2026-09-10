@@ -26,6 +26,7 @@ import { isKnownErrorCode } from '../../packages/shared/errors/error-codes.js';
 import { getBackendStatus, BACKEND_UP } from '../../packages/shared/health/backend-health-cache.js';
 import { TurnAbortedError } from '../../packages/shared/errors/turn-errors.js';
 import { probeExecutable, probeHttpService } from '../../packages/shared/health/probes.js';
+import { getAgentCommand } from '../../packages/shared/adapters/agent.js';
 import { buildClientDigests, resolveClientIdentity, ANONYMOUS_CLIENT_NAME } from '../../packages/shared/security/token-auth.js';
 import { getKokoroServiceUrl } from '../../packages/shared/adapters/tts-kokoro-onnx.js';
 import {
@@ -419,7 +420,7 @@ export function createRequestHandler({
         audioBuffer: prepared.wavBuffer,
         adapters: turnAdapters,
         sttConfig: config.stt,
-        openclawConfig: config.openclaw,
+        agentConfig: config.agent,
         ttsConfig: config.tts,
         wantAudio,
         audioFilename: 'input.wav',
@@ -539,7 +540,7 @@ export function createRequestHandler({
         : () => probeHttpService(getKokoroServiceUrl(config.tts));
     const [transcribe, agent, speech] = await Promise.all([
       getBackendStatus('transcribe', () => probeExecutable(config.stt?.command ?? '')),
-      getBackendStatus('agent', () => probeExecutable(config.openclaw?.command ?? '')),
+      getBackendStatus('agent', () => probeExecutable(getAgentCommand(config.agent))),
       getBackendStatus('speech', probeSpeech),
     ]);
 

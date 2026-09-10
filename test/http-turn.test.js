@@ -51,7 +51,7 @@ function buildTestConfig(securityOverrides = {}) {
       ...securityOverrides,
     },
     stt: {},
-    openclaw: { sessionId: uniqueSessionId('turn') },
+    agent: { sessionId: uniqueSessionId('turn') },
     tts: {},
   };
 }
@@ -2065,7 +2065,7 @@ test('G5 / AUTH-05 / WR-03: host mismatch rejection draws on the failed-auth thr
       rateLimitMaxRequests: 1000,
     },
     stt: {},
-    openclaw: { sessionId: uniqueSessionId('turn') },
+    agent: { sessionId: uniqueSessionId('turn') },
     tts: {},
   };
 

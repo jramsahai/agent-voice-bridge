@@ -49,7 +49,7 @@ function buildTestConfig(securityOverrides = {}) {
       ...securityOverrides,
     },
     stt: {},
-    openclaw: { sessionId: uniqueSessionId('turn') },
+    agent: { sessionId: uniqueSessionId('turn') },
     tts: {},
   };
 }

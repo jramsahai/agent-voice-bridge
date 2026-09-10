@@ -12,8 +12,8 @@ Phone/Laptop Browser
    Voice Bridge Service
         ↓
  ┌──────────────────────────┐
- │ Host running OpenClaw    │
- │ - OpenClaw gateway       │
+ │ Host running the agent   │
+ │ - agent CLI              │
  │ - local STT              │
  │ - local/optional TTS     │
  │ - bridge service         │
@@ -29,8 +29,8 @@ Phone/Laptop Browser
 3. Client uploads the audio turn to the bridge.
 4. Bridge passes audio to STT adapter.
 5. STT adapter returns transcript text.
-6. Bridge sends transcript to OpenClaw adapter.
-7. OpenClaw returns reply text.
+6. Bridge sends transcript to the configured agent adapter.
+7. The agent returns reply text.
 8. Bridge passes reply text to TTS adapter.
 9. TTS adapter returns playable audio.
 10. Client receives transcript, reply text, and audio.
@@ -46,7 +46,7 @@ Responsibilities:
 
 Should not know:
 - machine-specific STT paths
-- OpenClaw internal config
+- agent internal config
 - local filesystem details
 
 ### 2. Voice Bridge Service
@@ -60,7 +60,7 @@ Responsibilities:
 Should not hardcode:
 - one STT backend
 - one TTS backend
-- one OpenClaw endpoint layout
+- one agent CLI
 
 ### 3. Adapter Layer
 Common interfaces:
@@ -71,7 +71,7 @@ Common interfaces:
 ### 4. Config Layer
 All environment-specific concerns should live in config:
 - Tailscale host/bind info
-- OpenClaw gateway URL/token
+- agent provider, command, and session
 - STT command paths/models
 - TTS backend/voice
 - temp directories
@@ -89,9 +89,9 @@ All environment-specific concerns should live in config:
 
 Design first as a standalone companion app with clean adapters.
 That makes it easier to:
-- reuse on another OpenClaw install
+- reuse on another machine or another agent
 - share with a friend
-- later convert pieces into an OpenClaw plugin if that becomes cleaner
+- later convert pieces into an agent-specific plugin if that becomes cleaner
 
 ## Suggested future phases
 

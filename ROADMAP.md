@@ -12,6 +12,7 @@
 - [x] Add local whisper STT adapter
 - [x] Add macOS `say` TTS adapter
 - [x] Add OpenClaw turn adapter
+- [x] Agent provider abstraction (`openclaw`, `hermes`, generic `command`)
 - [x] Add config schema + example config
 - [x] Add Tailscale deployment notes
 

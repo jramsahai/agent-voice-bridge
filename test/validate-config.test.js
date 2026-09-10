@@ -30,7 +30,7 @@ function validConfig() {
       rateLimitMaxRequests: 6,
     },
     stt: { provider: 'whisper-local', command: './scripts/whisper-audio' },
-    openclaw: { command: 'openclaw', sessionId: 'voice-bridge-mvp', thinking: 'low' },
+    agent: { command: 'openclaw', sessionId: 'voice-bridge-mvp', thinking: 'low' },
     tts: { provider: 'kokoro-onnx', command: 'tts-kokoro', serviceUrl: 'http://127.0.0.1:4319' },
   };
 }
@@ -274,7 +274,7 @@ test('a non-finite or non-positive rateLimitMaxRequests produces an error', () =
   }
 });
 
-// --- 8. stt / openclaw ---
+// --- 8. stt / agent ---
 
 test('an empty or missing stt.command produces an error', () => {
   for (const bad of ['', undefined]) {
@@ -287,20 +287,20 @@ test('an empty or missing stt.command produces an error', () => {
   }
 });
 
-test('an empty or missing openclaw.command produces an error', () => {
+test('an empty or missing agent.command produces an error', () => {
   const config = withMutation((c) => {
-    c.openclaw.command = '';
+    c.agent.command = '';
   });
   const errors = validateConfig(config);
-  assert.ok(errors.some((e) => e.includes('openclaw.command')));
+  assert.ok(errors.some((e) => e.includes('agent.command')));
 });
 
-test('an empty or missing openclaw.sessionId produces an error', () => {
+test('an empty or missing agent.sessionId produces an error', () => {
   const config = withMutation((c) => {
-    delete c.openclaw.sessionId;
+    delete c.agent.sessionId;
   });
   const errors = validateConfig(config);
-  assert.ok(errors.some((e) => e.includes('openclaw.sessionId')));
+  assert.ok(errors.some((e) => e.includes('agent.sessionId')));
 });
 
 // --- 9. tts ---
@@ -335,7 +335,7 @@ test('a config with three independent problems yields an error list of length 3'
   const config = withMutation((c) => {
     c.server.host = '';
     c.stt.command = '';
-    c.openclaw.command = '';
+    c.agent.command = '';
   });
   const errors = validateConfig(config);
   assert.equal(errors.length, 3);

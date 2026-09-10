@@ -1,6 +1,6 @@
 # Portability Notes
 
-This project is meant to travel across OpenClaw installs, not stay glued to one machine.
+This project is meant to travel across machines and agent installs, not stay glued to one of either.
 
 ## Keep out of the shared repo
 
@@ -26,7 +26,7 @@ Every external binary is resolved from config, never hardcoded in adapter code:
 
 | Binary | Config key | Fallback |
 | --- | --- | --- |
-| OpenClaw CLI | `openclaw.command` | `OPENCLAW_BIN` env var, then `openclaw` on `PATH` |
+| Agent CLI | `agent.command` | per provider: `OPENCLAW_BIN` then `openclaw` on `PATH`; `HERMES_BIN` then `hermes`; none for `command` |
 | STT | `stt.command` | none — required |
 | TTS | `tts.command` | none — required |
 

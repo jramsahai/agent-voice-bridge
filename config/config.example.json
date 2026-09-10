@@ -3,7 +3,8 @@
     "host": "127.0.0.1",
     "port": 4318
   },
-  "openclaw": {
+  "agent": {
+    "provider": "openclaw",
     "command": "openclaw",
     "sessionId": "voice-bridge-mvp",
     "thinking": "low"

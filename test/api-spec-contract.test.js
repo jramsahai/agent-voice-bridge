@@ -87,7 +87,7 @@ function buildTestConfig({ security = {}, tts = { voices: EXAMPLE_VOICES } } = {
       ...security,
     },
     stt: {},
-    openclaw: { sessionId: uniqueSessionId('turn') },
+    agent: { sessionId: uniqueSessionId('turn') },
     tts,
   };
 }
@@ -681,7 +681,7 @@ test('a live GET /v1/health returns exactly three named backend lines whose valu
     // command and an unreachable service URL, so this check never depends on whether a real
     // whisper/openclaw binary happens to be on this host's PATH.
     stt: { command: 'this-command-does-not-exist-anywhere-xyz' },
-    openclaw: { sessionId: uniqueSessionId('health'), command: 'this-command-does-not-exist-anywhere-xyz' },
+    agent: { sessionId: uniqueSessionId('health'), command: 'this-command-does-not-exist-anywhere-xyz' },
     tts: { serviceUrl: 'http://127.0.0.1:1' },
   };
   const adapters = buildTestAdapters();

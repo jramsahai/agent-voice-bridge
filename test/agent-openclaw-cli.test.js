@@ -1,11 +1,11 @@
 // WR-02: sendTurnToOpenClaw's own session-state path helpers (getSessionStatePath,
 // hasSessionBeenPrimed, markSessionPrimed) previously derived a filesystem path from
 // sessionId with zero validation of their own, relying entirely on turn-pipeline.js's
-// upstream guard. This file exercises openclaw-cli.js directly — the one exported entry
+// upstream guard. This file exercises agent-openclaw-cli.js directly — the one exported entry
 // point, sendTurnToOpenClaw — with no upstream validation in the way, proving the module's
 // own guard is now load-bearing rather than merely inherited.
 //
-// Every test here points openclawConfig.command at a small stub script written inside the
+// Every test here points agentConfig.command at a small stub script written inside the
 // test's own throwaway directory, so nothing depends on a real `openclaw` binary being
 // installed. Every session id this file constructs carries a unique, high-entropy suffix so
 // two runs (or two parallel test files sharing the same voiceSessionStateDir) can never
@@ -18,13 +18,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { sendTurnToOpenClaw, cleanTextForSpeech } from '../packages/shared/adapters/openclaw-cli.js';
+import { sendTurnToOpenClaw, cleanTextForSpeech } from '../packages/shared/adapters/agent-openclaw-cli.js';
 
 function uniqueLabel(label) {
   return `vbtest-openclawcli-${label}-${randomUUID()}`;
 }
 
-const voiceSessionStateDir = path.join(os.tmpdir(), 'openclaw-voice-bridge-session-state');
+const voiceSessionStateDir = path.join(os.tmpdir(), 'agent-voice-bridge-session-state');
 
 function writeStubOpenClaw(dir) {
   const scriptPath = path.join(dir, 'openclaw-stub.sh');

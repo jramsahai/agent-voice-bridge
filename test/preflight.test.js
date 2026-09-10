@@ -22,7 +22,7 @@ test('sanity: the required session id generator produces distinct values for the
 function buildConfig(overrides = {}) {
   return {
     stt: { command: 'whisper-cli' },
-    openclaw: { command: 'openclaw' },
+    agent: { command: 'openclaw' },
     tts: { provider: 'macos-say' },
     ...overrides,
   };

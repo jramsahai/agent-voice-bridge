@@ -27,7 +27,7 @@ function uniqueSessionId(label) {
 const UNRESOLVABLE_COMMAND = 'this-command-does-not-exist-anywhere-xyz';
 const UNREACHABLE_SERVICE_URL = 'http://127.0.0.1:1';
 
-function buildTestConfig({ security = {}, stt = {}, openclaw = {}, tts = {} } = {}) {
+function buildTestConfig({ security = {}, stt = {}, agent = {}, tts = {} } = {}) {
   return {
     security: {
       clients: {},
@@ -38,7 +38,7 @@ function buildTestConfig({ security = {}, stt = {}, openclaw = {}, tts = {} } = 
       ...security,
     },
     stt: { command: UNRESOLVABLE_COMMAND, ...stt },
-    openclaw: { sessionId: uniqueSessionId('health'), command: UNRESOLVABLE_COMMAND, ...openclaw },
+    agent: { sessionId: uniqueSessionId('health'), command: UNRESOLVABLE_COMMAND, ...agent },
     tts: { serviceUrl: UNREACHABLE_SERVICE_URL, ...tts },
   };
 }
@@ -183,7 +183,7 @@ test('D-04 locked contract: all three backends resolving returns exactly 200, an
 
   const upConfig = buildTestConfig({
     stt: { command: process.execPath },
-    openclaw: { command: process.execPath },
+    agent: { command: process.execPath },
     tts: { provider: 'kokoro-onnx', serviceUrl: `http://127.0.0.1:${probeTargetPort}` },
   });
   const upHandler = createRequestHandler({ config: upConfig, adapters: {}, webDir: '/nonexistent' });
@@ -195,7 +195,7 @@ test('D-04 locked contract: all three backends resolving returns exactly 200, an
   // machine's own /usr/bin/say availability.
   const downConfig = buildTestConfig({
     stt: { command: process.execPath },
-    openclaw: { command: process.execPath },
+    agent: { command: process.execPath },
     tts: { provider: 'kokoro-onnx' },
   });
   const downHandler = createRequestHandler({ config: downConfig, adapters: {}, webDir: '/nonexistent' });
@@ -416,7 +416,7 @@ function hasExecutableSay() {
 test('provider macos-say with no reachable Kokoro service still reports speech: up, via /usr/bin/say', { skip: !hasExecutableSay() }, async () => {
   const config = buildTestConfig({
     stt: { command: process.execPath },
-    openclaw: { command: process.execPath },
+    agent: { command: process.execPath },
     tts: { provider: 'macos-say', serviceUrl: UNREACHABLE_SERVICE_URL },
   });
   const handler = createRequestHandler({ config, adapters: {}, webDir: '/nonexistent' });
@@ -434,7 +434,7 @@ test('provider macos-say with no reachable Kokoro service still reports speech: 
 test('provider kokoro-onnx with an unreachable serviceUrl still reports speech: down', async () => {
   const config = buildTestConfig({
     stt: { command: process.execPath },
-    openclaw: { command: process.execPath },
+    agent: { command: process.execPath },
     tts: { provider: 'kokoro-onnx', serviceUrl: UNREACHABLE_SERVICE_URL },
   });
   const handler = createRequestHandler({ config, adapters: {}, webDir: '/nonexistent' });

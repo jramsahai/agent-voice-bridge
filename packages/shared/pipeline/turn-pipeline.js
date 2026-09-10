@@ -50,10 +50,10 @@ function isPlainFilename(value) {
   );
 }
 
-// Every property read of sessionId in this module reads from openclawConfig and nowhere
+// Every property read of sessionId in this module reads from agentConfig and nowhere
 // else — the mechanical proof that no caller-supplied field can select the conversation.
-function assertValidArgs({ audioBuffer, adapters, openclawConfig, audioFilename }) {
-  const sessionId = openclawConfig?.sessionId;
+function assertValidArgs({ audioBuffer, adapters, agentConfig, audioFilename }) {
+  const sessionId = agentConfig?.sessionId;
   if (
     typeof sessionId !== 'string' ||
     sessionId.length === 0 ||
@@ -62,7 +62,7 @@ function assertValidArgs({ audioBuffer, adapters, openclawConfig, audioFilename 
     sessionId === '.' ||
     sessionId === '..'
   ) {
-    throw new Error('runTurn: openclawConfig.sessionId must be a non-empty string with no path separator');
+    throw new Error('runTurn: agentConfig.sessionId must be a non-empty string with no path separator');
   }
   if (
     !adapters ||
@@ -85,7 +85,7 @@ export async function runTurn({
   audioBuffer,
   adapters,
   sttConfig,
-  openclawConfig,
+  agentConfig,
   ttsConfig,
   wantAudio = true,
   audioFilename = 'input.audio',
@@ -93,7 +93,7 @@ export async function runTurn({
 }) {
   // Step 1: synchronous argument validation. Throws on any failure, before any adapter
   // call, any lock artifact and any temp directory.
-  const sessionId = assertValidArgs({ audioBuffer, adapters, openclawConfig, audioFilename });
+  const sessionId = assertValidArgs({ audioBuffer, adapters, agentConfig, audioFilename });
 
   // Step 2: the pipeline accepts an already-constructed AbortSignal and never constructs
   // one itself — the caller owns that lifecycle, whether the caller is a test or Phase 3's
@@ -131,7 +131,7 @@ export async function runTurn({
 
       const agentStart = Date.now();
       const agentResult = await runStage(
-        () => adapters.agent(transcribeResult.text, openclawConfig, { signal }),
+        () => adapters.agent(transcribeResult.text, agentConfig, { signal }),
         signal,
       );
       meta.durationsMs.agent = Date.now() - agentStart;
